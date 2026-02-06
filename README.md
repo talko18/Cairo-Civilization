@@ -49,8 +49,9 @@ cairo_civ/
 | ZK circuit | One circuit (TurnProof) handles everything |
 | Commitment | Flat Poseidon hash of full state (no Merkle tree for MVP) |
 | Map privacy | Dealer-prover generates map, serves tiles on valid exploration |
+| Unit positions | Public (revealed each turn) — production/research/gold stay private |
 | Combat | 2-tx split proof: attacker reveals on their turn, defender on theirs |
-| Randomness | Derived from both players' turn salts, each bound to opponent's last commitment |
+| Randomness | Derived from both players' combat salts (derived from state salts bound to opponent's last commitment) |
 | Turns | Sequential |
 
 ## Tech Stack

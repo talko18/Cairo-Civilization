@@ -26,9 +26,13 @@ Each of these is a well-defined extension that can be added without redesigning 
 
 ## 3. Roadmap
 
+Each phase has a dedicated design directory with detailed docs on what to build and how.
+
 ### Phase 1: Public Game on StarkNet (Months 1-3)
 
 All state is public (no ZK yet). Prove the game logic works.
+
+Design: `design/` (main docs describe the MVP target)
 
 | Task | Priority |
 |---|---|
@@ -45,6 +49,13 @@ All state is public (no ZK yet). Prove the game logic works.
 
 Swap public state for commitments. State stays off-chain, proofs go on-chain.
 
+Design: `design/phase2_zk_privacy/`
+- `01_transition_overview.md` — what changes from Phase 1 to Phase 2
+- `02_commitment_scheme.md` — how to add Poseidon hashing, salt derivation, commitment storage
+- `03_off_chain_prover.md` — TurnProof circuit, WASM compilation, client integration
+- `04_dealer_prover.md` — map generation service, tile serving, trust model
+- `05_event_sync.md` — external event incorporation, event chain hash
+
 | Task | Priority |
 |---|---|
 | Poseidon hashing library for game state | High |
@@ -60,16 +71,32 @@ Swap public state for commitments. State stays off-chain, proofs go on-chain.
 
 Optimize, add features, prepare for testnet.
 
+Design: `design/phase3_expansion/`
+- `01_unit_fog_of_war.md` — zone bitmask, Merkle tree commitment, combat non-membership proofs
+- `02_barbarians.md` — public NPC state, deterministic AI
+- `03_city_states.md` — public NPCs, envoy system, suzerainty
+- `04_encrypted_backups.md` — IPFS-based state recovery
+- `05_expanded_units_and_techs.md` — full Ancient–Renaissance era content
+
 | Task | Priority |
 |---|---|
 | Proof optimization (circuit size reduction) | High |
 | Gas optimization | High |
+| Unit fog of war (zone bitmask + Merkle tree) | High |
 | Additional unit types, expanded tech tree | Medium |
 | Barbarians (public NPC state) | Medium |
 | City-states (public NPC state) | Medium |
 | Encrypted state backups (IPFS) | Medium |
 | Testnet deployment + playtesting | High |
 | Security audit of proof circuit | High |
+
+### Future Features
+
+Design: `design/future/`
+- `01_religion.md` — founding, spreading, theological combat, religious victory
+- `02_espionage.md` — spy placement, missions, detection, counter-espionage
+- `03_great_people_and_trade.md` — point tracking, trade routes, plundering
+- `04_multiplayer_and_simultaneous.md` — 3+ player scaling, simultaneous turn protocol
 
 ## 4. Success Criteria
 

@@ -23,6 +23,7 @@ PUBLIC INPUTS:
     turn_number              : u32
     opponent_last_commitment : felt252     // opponent's on-chain commitment (for salt binding)
     external_events_hash     : felt252     // hash of events from other players we incorporated
+    unit_positions           : (u8, u8, u8)[]    // all player's units: (type, q, r) in storage coords
     public_actions           : Action[]    // actions that need to be public (combat, city founding)
 
 PRIVATE INPUTS (witness):
@@ -42,6 +43,8 @@ CONSTRAINTS:
     6. All actions are legal given the state
     7. public_actions ⊆ actions
     8. Poseidon(external_events) == external_events_hash
+    9. unit_positions matches all units in new_state (type, col, row)
+       // Unit positions are PUBLIC — this is how the opponent learns where your units are
 ```
 
 That's it. One circuit. One proof per turn.
@@ -63,10 +66,10 @@ The contract reads the `public_actions` list and routes each action to the appro
 
 Combat is the only interaction that spans two players. Since no single prover has both players' private states, combat uses **two separate TurnProofs** — one from each player:
 
-1. **Attacker's turn**: Their TurnProof includes `PublicAction::AttackUnit(unit_reveal, target_pos, turn_salt)`. Contract records a pending combat.
-2. **Defender's next turn**: Their TurnProof includes `PublicAction::DefendUnit(unit_reveal, terrain, turn_salt)`. Contract resolves combat deterministically.
+1. **Attacker's turn**: Their TurnProof includes `PublicAction::AttackUnit(unit_reveal, target_pos, combat_salt)`. Contract verifies the target tile has an enemy unit (positions are public). Contract records a pending combat.
+2. **Defender's next turn**: Their TurnProof includes `PublicAction::DefendUnit(unit_reveal, terrain, combat_salt)`. Contract resolves combat deterministically.
 
-Randomness = `Poseidon(attacker_salt, defender_salt, combat_id) % 51 + 75` (0.75x–1.25x damage multiplier). Both salts are already committed as part of each player's state hash, so no extra commit-reveal is needed.
+Randomness = `Poseidon(attacker_combat_salt, defender_combat_salt, combat_id) % 51 + 75` (0.75x–1.25x damage multiplier). Both combat salts are derived from each player's state salt (`combat_salt = Poseidon(state_salt, "COMBAT")`), which is committed as part of the state hash. The state salt itself is never revealed.
 
 ## 5. Hash Function
 
