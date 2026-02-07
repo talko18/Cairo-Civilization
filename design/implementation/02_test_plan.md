@@ -10,6 +10,14 @@ All Cairo tests use `#[test]` attribute and run via `scarb test`.
 
 Each module has its own test file. Tests are pure — no contract deployment, no storage.
 
+### 1.0 `test_types` — StorePacking Round-Trips
+
+| # | Test | What It Verifies |
+|---|---|---|
+| P1 | `test_pack_unpack_unit` | Pack Unit with edge values (hp=200, all fields max) → unpack → identical |
+| P2 | `test_pack_unpack_city` | Pack City with buildings bitmask fully set, max population → unpack → identical |
+| P3 | `test_pack_unpack_tile_data` | Pack TileData with all fields set (mountain, marsh, iron, all river edges) → unpack → identical |
+
 ### 1.1 `test_hex` — Hex Math
 
 | # | Test | What It Verifies |
@@ -596,4 +604,4 @@ Phase 4: Manual testing
     Deploy to devnet → open UI → run MT1-MT15
 ```
 
-Total: **352 automated tests** across 3 layers (239 unit + 92 integration + 21 system) + **15 manual test scenarios**.
+Total: **355 automated tests** across 3 layers (3 packing + 239 unit + 92 integration + 21 system) + **15 manual test scenarios**.

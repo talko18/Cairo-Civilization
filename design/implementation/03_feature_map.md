@@ -36,15 +36,20 @@ Every module only depends on modules above it. We implement top-down through thi
 
 ## Feature 1: Types & Constants
 
-**What**: All shared data types, enums, constants, lookup tables. No logic.
+**What**: All shared data types, enums, constants, lookup tables, and `StorePacking` implementations. No game logic.
 
 **Files**:
-- `src/types.cairo` — Unit, City, TileData, Action enum, CombatResult, CityYields, etc.
+- `src/types.cairo` — Unit, City, TileData, Action enum, CombatResult, CityYields, TileYield, StorePacking impls
 - `src/constants.cairo` — terrain IDs, unit stats table, building costs, damage lookup table (81 entries), production ID ranges, tech costs, improvement valid terrain
 
-**Tests**: None (pure data definitions). Compiler checks correctness.
+**Tests**: Minimal — verify StorePacking round-trips (pack then unpack returns original value). Add `tests/test_types.cairo` with 3 tests:
+- Pack/unpack Unit with edge values (hp=200, all fields set)
+- Pack/unpack City with edge values (buildings bitmask fully set)
+- Pack/unpack TileData with all fields set
 
-**Done when**: Project compiles with all type definitions.
+**Why StorePacking here**: Without packing, every struct field occupies a separate storage slot. Unit = 7 slots instead of 1. This multiplies gas costs ~4x. See `04_gas_estimation.md` §2.
+
+**Done when**: Project compiles with all type definitions. StorePacking round-trip tests pass.
 
 ---
 
@@ -288,7 +293,7 @@ Every module only depends on modules above it. We implement top-down through thi
 
 ## Feature 11: Contract — Glue Layer
 
-**What**: The StarkNet contract that ties everything together. Storage layout, action dispatch, access control, event emission.
+**What**: The StarkNet contract that ties everything together. Storage layout, action dispatch, access control, event emission. This is the **only** module that touches storage — all game logic is delegated to pure-function modules.
 
 **Files**:
 - `src/contract.cairo`
@@ -298,6 +303,11 @@ Every module only depends on modules above it. We implement top-down through thi
 **Tests (92)**: I1–I60 + all sub-lettered integration tests
 
 **Depends on**: ALL modules above
+
+**Gas optimization hooks** (see `04_gas_estimation.md`):
+- All storage reads/writes use internal helpers (`read_unit`, `write_unit`, `read_tile_owner`, `write_tile_owner`, etc.) — never raw `LegacyMap` access in action handlers. This isolates storage layout changes (packing, batching) to the helper functions.
+- Territory assignment uses `write_tile_owner(game_id, q, r, player_idx, city_id)` — internally writes to 1 or 2 maps depending on whether OPT-1 is applied.
+- Map generation is called via a wrapper that can be swapped for chunked generation (OPT-2) without changing `join_game`'s external interface.
 
 This is the integration layer. Split into sub-features matching the test plan sections:
 
@@ -390,18 +400,18 @@ These are end-to-end tests. Each scenario exercises a specific gameplay arc:
 ```
 Feature                      Tests    Cumulative    Milestone
 ─────────────────────────────────────────────────────────────
- 1. Types & Constants            0            0     Project compiles
- 2. Hex Math                    27           27     Spatial math works
- 3. Map Generation              23           50     Maps generate correctly
- 4. Tech Tree                   22           72     Research system works
- 5. Movement                    29          101     Units can move
- 6. Combat                      37          138     Units can fight
- 7. City & Buildings            58          196     Cities work fully
- 8. Economy                     15          211     Gold system works
- 9. End-of-Turn                 14          225     Turn processing works
-10. Victory                     14          239     Win conditions work
-11. Contract (integration)      92          331     Full contract works
-12. System Tests                21          352     Game plays end-to-end
+ 1. Types & Constants            3            3     Project compiles, packing works
+ 2. Hex Math                    27           30     Spatial math works
+ 3. Map Generation              23           53     Maps generate correctly
+ 4. Tech Tree                   22           75     Research system works
+ 5. Movement                    29          104     Units can move
+ 6. Combat                      37          141     Units can fight
+ 7. City & Buildings            58          199     Cities work fully
+ 8. Economy                     15          214     Gold system works
+ 9. End-of-Turn                 14          228     Turn processing works
+10. Victory                     14          242     Win conditions work
+11. Contract (integration)      92          334     Full contract works
+12. System Tests                21          355     Game plays end-to-end
                                         ───────
                              + 15 manual scenarios
 ```
@@ -448,3 +458,9 @@ Features 2–10 are pure functions (no storage, no side effects). This means:
 
 ### Contract is the only stateful layer
 Feature 11 is the only place with `LegacyMap`, storage reads/writes, and access control. All game logic is delegated to pure-function modules. The contract is just dispatch + storage wiring.
+
+### StorePacking goes in types.cairo (Feature 1)
+Implement `StorePacking<Unit, felt252>`, `StorePacking<TileData, felt252>`, and the City packing in types.cairo. This is essential for gas feasibility — without it, costs multiply ~4x. See `04_gas_estimation.md`.
+
+### Storage access via helpers (gas optimization compatibility)
+In contract.cairo, never access `LegacyMap` directly in action handlers. Use internal helpers like `read_unit(game_id, player, unit_id) -> Unit` and `write_unit(game_id, player, unit_id, unit: Unit)`. This isolates the storage layout so that optimizations (tile_owner packing, unit batching, chunked map gen) can be applied later by changing only the helpers — zero changes to game logic or action handlers.

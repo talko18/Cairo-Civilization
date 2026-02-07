@@ -15,7 +15,7 @@ The MVP is a **2-player duel** on a **small hex map** with these mechanics only:
 - Domination victory (capture opponent's capital)
 - Sequential turns
 
-**Explicitly deferred to post-MVP**: religion, espionage, great people, trade routes, city-states, cultural borders, multiple victory types, simultaneous turns, 3+ player games.
+**Explicitly deferred to post-MVP**: civilizations/leader abilities (Phase 3), religion, espionage, great people, trade routes, city-states, cultural borders, multiple victory types, simultaneous turns, 3+ player games.
 
 ## 2. Core Idea
 
@@ -146,6 +146,7 @@ All game state is stored in the contract — both players can see everything. Th
 | Production IDs | **Range-separated** (1-63 units, 64-127 buildings) | Adding units doesn't renumber buildings |
 | Territory | **Per-tile ownership map** (not per-city array) | O(1) tile conflict check, no array storage in LegacyMap |
 | Code reuse | **Phase 1 Cairo = Phase 2 ZK circuit** | No rewrite on ZK transition |
+| Civilizations | **Deferred to Phase 3** (modifier pattern) | Pure modules compute base values; contract applies civ modifiers after. Adding civs = new lookup entries, zero logic changes. |
 
 ## 8. Key Architectural Advantage: Phase 1 Code IS the Phase 2 ZK Circuit
 
@@ -183,6 +184,7 @@ These features are designed to be added incrementally without breaking the core:
 | Unit fog of war | Add zone bitmask to turn proof (zero extra txs, scales to any player count) + Merkle tree for combat non-membership proofs |
 | Encrypted DA backups | Add IPFS upload step after turn → enables cross-device play |
 | 3+ player games | Extend turn rotation logic, no contract changes |
+| Civilizations | `player_civilization` storage + `civ.cairo` modifier module + unique unit/building entries in constants. Zero changes to pure game logic modules — modifiers applied in contract glue layer. |
 | Religion / espionage / etc. | New action types in the state transition proof, new public action variants |
 
 ## 11. Document Index
@@ -218,6 +220,7 @@ These features are designed to be added incrementally without breaking the core:
 | `03_city_states.md` | Public NPCs, envoy system, suzerainty |
 | `04_encrypted_backups.md` | IPFS-based state recovery |
 | `05_expanded_units_and_techs.md` | Full Ancient–Renaissance era content |
+| `06_civilizations.md` | Civilization abilities, unique units/buildings, modifier pattern, 6 example civs |
 
 ### Future Features (`future/`)
 
@@ -243,8 +246,9 @@ These features are designed to be added incrementally without breaking the core:
 | Document | Contents |
 |---|---|
 | `01_interfaces.md` | All Cairo module interfaces (hex, map_gen, movement, combat, city, tech, economy, turn, victory) + contract view functions + client TypeScript interface |
-| `02_test_plan.md` | 352 automated tests (239 unit + 92 integration + 21 system) + 15 manual test scenarios + UI interaction guide |
+| `02_test_plan.md` | 355 automated tests (3 packing + 239 unit + 92 integration + 21 system) + 15 manual test scenarios + UI interaction guide |
 | `03_feature_map.md` | Implementation order: 12 features with dependency graph, TDD workflow, per-feature test counts |
+| `04_gas_estimation.md` | Per-turn and per-game gas costs, storage operation counts, 3 optimization opportunities with compatibility rules |
 
 ### Pre-Implementation
 

@@ -38,7 +38,10 @@ cairo_civ/
 
 ## Module 1: `types`
 
-All shared data types. No logic — pure definitions.
+All shared data types and `StorePacking` implementations. No game logic.
+
+`StorePacking` is required for gas feasibility (see `04_gas_estimation.md`).
+Without it, structs occupy 1 slot per field, multiplying storage costs ~4x.
 
 ```cairo
 // --- Coordinates ---
@@ -132,6 +135,17 @@ struct TileYield {
     production: u8,
     gold: u8,
 }
+
+// --- StorePacking implementations ---
+// These pack structs into minimal felt252 slots for gas efficiency.
+// All game logic modules work with unpacked structs. Packing/unpacking
+// happens only at the storage boundary (contract.cairo).
+//
+// Unit → 1 felt252 (7 × u8 = 56 bits)
+// City → 2 felt252 (name: felt252 + packed fields: 136 bits)
+// TileData → 1 felt252 (4 × u8 = 32 bits)
+//
+// See 04_gas_estimation.md §2 for bit layout.
 ```
 
 ---
@@ -192,6 +206,11 @@ Map generation from a seed. Called once per game during `join_game`.
 
 /// Generate the full map. Returns an array of (q, r, TileData) for all tiles.
 /// Called once during join_game.
+///
+/// Gas optimization note: if join_game exceeds gas limits, this function
+/// can be called in row chunks via generate_map_rows(seed, width, row_start,
+/// row_end). The function is pure and deterministic, so chunking produces
+/// identical results. See 04_gas_estimation.md OPT-2.
 fn generate_map(seed: felt252, width: u8, height: u8) -> Array<(u8, u8, TileData)>;
 
 /// Assign terrain type from hash values (h=height, m=moisture, t=temperature).
@@ -649,6 +668,8 @@ trait ICairoCivView<TContractState> {
     fn get_tile_improvement(self: @TContractState, game_id: u64, q: u8, r: u8) -> u8;
     fn get_tile_owner(self: @TContractState, game_id: u64, q: u8, r: u8) -> (u8, u32);
     // returns (player_idx, city_id). city_id = 0 means unclaimed.
+    // Internally may read from 1 or 2 storage maps (see OPT-1 in 04_gas_estimation.md).
+    // Callers always receive unpacked (player_idx, city_id) regardless of storage format.
 
     // --- Units ---
     fn get_unit(self: @TContractState, game_id: u64, player_idx: u8, unit_id: u32) -> Unit;

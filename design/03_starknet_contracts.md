@@ -99,6 +99,15 @@ struct Storage {
     // Both maps are set together when territory is assigned.
     // tile_owner gives the city_id, tile_owner_player gives the player.
     // This avoids ambiguity since city_ids are per-player (both players can have city_id 0).
+    //
+    // GAS OPTIMIZATION (OPT-1): These two maps can be merged into a single
+    // LegacyMap<(u64, u8, u8), u64> with packed encoding:
+    //   value = (player_idx as u64) << 32 | (city_id as u64), 0 = unclaimed
+    // This halves territory writes (FoundCity: 14 → 7, expansion: similar).
+    // To enable this later, all access goes through helpers:
+    //   read_tile_owner(game_id, q, r) -> (u8, u32)    // player, city_id
+    //   write_tile_owner(game_id, q, r, player, city_id)
+    //
     // Why per-tile instead of per-city array?
     //   - LegacyMap can't store arrays natively
     //   - Checking "is this tile already claimed?" is O(1) instead of scanning all cities
@@ -280,16 +289,18 @@ struct PendingCombat {
 // Bit 4: Market         (cost 100, requires Currency)
 // Bit 5: Barracks       (cost 90, requires Bronze Working)
 // Bit 6: Water Mill     (cost 80, requires The Wheel, requires river)
-// Bits 7-31: reserved for future buildings (districts, wonders, etc.)
+// Bits 7-31: reserved for future buildings (districts, wonders, civ-unique buildings)
+//   Civ-unique buildings (Phase 3): Bath, Sphinx, Ziggurat, etc. use bits 7+.
+//   See phase3_expansion/06_civilizations.md for the replacement pattern.
 //
 // Why u32? 8 bits (u8) only supports 8 buildings total.
-// Adding Medieval Walls, University, Workshop, etc. would immediately overflow.
+// Adding Medieval Walls, University, Workshop, civ-unique buildings, etc. would overflow.
 // u32 gives 32 building slots — enough through several phases of expansion.
 
 // --- Production item IDs (u8, range-separated for extensibility) ---
 // Range 0:       none/idle
-// Range 1-63:    UNITS  (1=Settler, 2=Builder, 3=Scout, 4=Warrior, 5=Slinger, 6=Archer)
-// Range 64-127:  BUILDINGS (64=Monument, 65=Granary, 66=Walls, 67=Library, 68=Market, 69=Barracks, 70=WaterMill)
+// Range 1-63:    UNITS  (1=Settler, 2=Builder, 3=Scout, 4=Warrior, 5=Slinger, 6=Archer; 7+ for civ-unique units)
+// Range 64-127:  BUILDINGS (64=Monument, 65=Granary, 66=Walls, 67=Library, 68=Market, 69=Barracks, 70=WaterMill; 71+ for civ-unique buildings)
 // Range 128-191: WONDERS (future)
 // Range 192-255: PROJECTS (future)
 //
