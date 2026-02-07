@@ -95,6 +95,10 @@ struct Storage {
 
     // Per game — tile ownership (which city owns each tile for territory)
     tile_owner: LegacyMap<(u64, u8, u8), u32>,     // (game, q, r) → city_id (0 = unclaimed)
+    tile_owner_player: LegacyMap<(u64, u8, u8), u8>, // (game, q, r) → player_idx
+    // Both maps are set together when territory is assigned.
+    // tile_owner gives the city_id, tile_owner_player gives the player.
+    // This avoids ambiguity since city_ids are per-player (both players can have city_id 0).
     // Why per-tile instead of per-city array?
     //   - LegacyMap can't store arrays natively
     //   - Checking "is this tile already claimed?" is O(1) instead of scanning all cities
@@ -160,7 +164,11 @@ fn submit_turn(game_id, actions):
         - SetProduction: verify city exists, belongs to caller, item is valid
         - SetResearch: verify tech prereqs met, tech not already completed
         - BuildImprovement: verify builder exists, has charges, valid tile,
-          store improvement in tile_improvements map
+          tile has NO existing improvement, valid improvement for terrain,
+          store improvement in tile_improvements map, consume all movement
+        - RemoveImprovement: verify builder exists, is on tile, tile has
+          improvement, remove from tile_improvements map, consume all movement
+          (costs 0 builder charges)
         - FortifyUnit: set unit fortify state
         - DeclareWar: update diplo_status
         apply state changes to on-chain storage
@@ -203,7 +211,8 @@ enum Action {
     FoundCity: (u32, felt252),           // settler_id, city_name
     SetProduction: (u32, u8),            // city_id, item_id
     SetResearch: u8,                     // tech_id
-    BuildImprovement: (u32, u8, u8),     // builder_id, q, r
+    BuildImprovement: (u32, u8, u8, u8),  // builder_id, q, r, improvement_type
+    RemoveImprovement: (u32, u8, u8),    // builder_id, q, r (0 charges, consumes all movement)
     FortifyUnit: u32,                    // unit_id
     SkipUnit: u32,                       // unit_id
     PurchaseWithGold: (u32, u8),         // city_id, item_id (buy instead of produce)
@@ -239,7 +248,7 @@ struct City {
     original_owner: u8,       // player index who founded it (for score: captured vs founded)
     is_capital: bool,         // true = this city is/was the player's original capital
 }
-// Palace bonus (+2 prod, +5 gold) is applied if is_capital == true.
+// Palace bonus (+2 prod, +2 science, +5 gold) is applied if is_capital == true.
 // No Palace in the buildings bitmask — it's intrinsic to the capital.
 
 struct TileData {
@@ -324,12 +333,26 @@ enum Event {
     TurnSubmitted: TurnSubmitted,
     CombatResolved: CombatResolved,
     CityFounded: CityFounded,
+    UnitKilled: UnitKilled,
+    TechCompleted: TechCompleted,
+    BuildingCompleted: BuildingCompleted,
     GameEnded: GameEnded,
 }
 
 struct GameCreated {
     #[key] game_id: u64,
     creator: ContractAddress,
+}
+
+struct PlayerJoined {
+    #[key] game_id: u64,
+    player: ContractAddress,
+    player_idx: u8,
+}
+
+struct GameStarted {
+    #[key] game_id: u64,
+    map_seed: felt252,
 }
 
 struct TurnSubmitted {
@@ -355,6 +378,28 @@ struct CityFounded {
     city_name: felt252,
     q: u8,
     r: u8,
+}
+
+struct UnitKilled {
+    #[key] game_id: u64,
+    player: u8,
+    unit_id: u32,
+    unit_type: u8,
+    q: u8,
+    r: u8,
+}
+
+struct TechCompleted {
+    #[key] game_id: u64,
+    player: ContractAddress,
+    tech_id: u8,
+}
+
+struct BuildingCompleted {
+    #[key] game_id: u64,
+    player: ContractAddress,
+    city_id: u32,
+    building_bit: u8,
 }
 
 struct GameEnded {

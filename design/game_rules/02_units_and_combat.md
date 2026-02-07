@@ -38,11 +38,15 @@ These are exact Civ VI base game values.
 
 ### Unit Rules
 
-- Each tile can hold 1 military unit + 1 civilian unit (stacking)
-- Civilian units are captured (not killed) when an enemy enters their tile
+- Each tile can hold at most 1 military unit + 1 civilian unit (stacking)
+- Two military units cannot share a tile; two civilian units cannot share a tile
+- Civilian units are captured (not killed) when an enemy military unit enters their tile
 - Units heal +10 HP per turn in friendly territory, +5 in neutral, +0 in enemy
 - Units heal +10 HP per turn extra when fortified (Fortify action)
+- Fortification resets to 0 when the unit moves OR attacks
 - Units cannot move and attack in the same turn (unless they have remaining movement after moving)
+- Melee attack requires at least 1 movement point remaining (attacking = moving into the enemy tile)
+- Ranged attack does NOT require movement points (the unit doesn't move)
 
 ---
 
@@ -198,5 +202,6 @@ To capture a city:
     2. A melee unit must then move onto the city tile (melee attack action)
     3. City is captured (ownership transfers)
     4. City cannot be captured by ranged units alone
-    5. On capture: city HP resets to 100, population -1
+    5. On capture: city HP resets to 100, population -1 (minimum 1)
+    6. On capture: all tile improvements in the captured city's territory are destroyed
 ```

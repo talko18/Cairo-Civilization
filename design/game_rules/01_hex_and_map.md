@@ -42,9 +42,12 @@ Closest to Civ VI's hex behavior with cleaner math. The symmetric neighbor formu
 Coordinate: (q: i16, r: i16)   // can be negative
 
 Distance(a, b):
-    dq = |a.q - b.q|
-    dr = |a.r - b.r|
-    return (dq + dr + |dq - dr|) / 2
+    dq = a.q - b.q    // SIGNED difference
+    dr = a.r - b.r    // SIGNED difference
+    return (|dq| + |dr| + |dq + dr|) / 2
+    // Equivalent to max(|dq|, |dr|, |dq + dr|)
+    // Example: (0,0) to (1,1) → dq=1, dr=1, |1|+|1|+|2| = 4/2 = 2 ✓
+    // Example: (0,0) to (1,-1) → dq=1, dr=-1, |1|+|1|+|0| = 2/2 = 1 ✓ (neighbor)
 
 Neighbors(q, r):
     E:  (q+1, r)     W:  (q-1, r)

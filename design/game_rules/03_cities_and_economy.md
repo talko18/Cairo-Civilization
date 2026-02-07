@@ -121,8 +121,8 @@ Each turn:
         food_stockpile -= food_for_growth
     if population >= housing:
         food_stockpile = min(food_stockpile, food_for_growth)  // excess food wasted
-    if food_stockpile < 0:
-        population -= 1  // starvation
+    if food_stockpile < 0 AND population > 1:
+        population -= 1  // starvation (population can't drop below 1)
         food_stockpile = 0
 ```
 
@@ -214,7 +214,7 @@ Districts are deferred to post-MVP. Buildings are built in the city center direc
 
 **Building design notes**:
 - **Monument**: Civ VI gives culture/loyalty — neither exists in MVP. Changed to +1 science/+1 production. A useful early building. Revisit when culture is added (Phase 3).
-- **Barracks**: Civ VI gives XP for promotions — not in MVP. Changed to +10 starting HP for military units. Simple, concrete bonus.
+- **Barracks**: Civ VI gives XP for promotions — not in MVP. Changed to +10 starting HP for military units. Simple, concrete bonus. Units start at 110 HP but their max HP remains 100 for healing purposes — if damaged, they heal toward 100, not back to 110. The 110 is a one-time overheal.
 - **Walls**: City ranged attack CS = city's own CS (not a fixed 15). Cities cannot attack without Walls.
 
 ### Tile Improvements (Builder-Constructed)
@@ -233,7 +233,10 @@ Improvements are built by Builders (1 charge per improvement). They modify tile 
 
 **Rules**:
 - Only one improvement per tile
-- Building an improvement on a tile with an existing improvement replaces it
+- Building an improvement on a tile that already has one **fails** — the player must first remove the existing improvement (separate action, separate turn), then build the new one
+- Removing an improvement: Builder on the tile, `RemoveImprovement` action. Costs 0 builder charges, but consumes all remaining movement (so the builder can't also build in the same turn)
+- Building an improvement: Builder on the tile, `BuildImprovement` action. Costs 1 builder charge, consumes all remaining movement
+- Because both actions consume all movement, replacing an improvement takes 2 turns: turn 1 remove, turn 2 build
 - Improvements are destroyed when an enemy captures the city that owns the tile
 - Improvement yield bonus is added to the tile's base yield when worked by a citizen
 
@@ -271,8 +274,9 @@ Per turn:
     if treasury < 0: disband a unit (lowest HP first)
 
 Gold purchases:
-    Units and buildings can be bought with gold
+    Units and buildings can be bought with gold (instant — appears immediately)
     Purchase cost = production_cost × 4 (Civ VI ratio)
+    Purchasing does not affect the current production queue
 ```
 
 ---

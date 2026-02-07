@@ -31,12 +31,15 @@ Every tech unlocks something usable in MVP. Two eras (Ancient + Classical) give 
                     ┌── Animal Husbandry (25) ── Horseback Riding
                     │
 START ──┬── Mining (25) ──┬── Bronze Working (50)
-        │                 │
-        ├── Pottery (25) ─┴── Irrigation (40)
+        │                 ├── Masonry (50) ──┐
+        │                 └── The Wheel (50) ┴── Construction (80)
         │
-        ├── Archery (35) ──── Construction (60)
+        ├── Pottery (25) ──── Irrigation (40)
+        │                └──── Writing (45)
         │
-        └── Sailing (40) ──── Celestial Nav. (60)
+        ├── Archery (35) ──── Machinery (100, + Engineering)
+        │
+        └── Sailing (40) ──── Celestial Nav. (80)
 ```
 
 | # | Tech | Cost | Prerequisites | Unlocks |

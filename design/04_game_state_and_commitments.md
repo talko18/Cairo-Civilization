@@ -64,6 +64,7 @@ struct City {
     production_stockpile: u16,
     current_production: u8,  // item ID, 0 = none (uses range-separated IDs)
     buildings: u32,          // *** bitmask — 32 building slots ***
+    founded_turn: u16,       // turn number when city was founded
     original_owner: u8,      // player index who founded it (for score tracking)
     is_capital: bool,        // true = original capital
 }
@@ -162,8 +163,8 @@ Defined in `03_starknet_contracts.md` § Data Types. The `Action` enum is:
 
 ```
 MoveUnit, AttackUnit, RangedAttack, FoundCity, SetProduction,
-SetResearch, BuildImprovement, FortifyUnit, SkipUnit,
-PurchaseWithGold, UpgradeUnit, DeclareWar, EndTurn
+SetResearch, BuildImprovement, RemoveImprovement, FortifyUnit,
+SkipUnit, PurchaseWithGold, UpgradeUnit, DeclareWar, EndTurn
 ```
 
 All use `u8` storage coordinates.

@@ -6,7 +6,7 @@
 
 The MVP is a **2-player duel** on a **small hex map** with these mechanics only:
 
-- Hex map with fog of war (terrain hidden until explored)
+- Hex map (Phase 1: fully public state; Phase 2: fog of war via ZK)
 - Units: Settler, Builder, Scout, Warrior, Slinger, Archer (6 types)
 - Cities: founding, population growth, production queue
 - Basic combat (melee + ranged, deterministic)
@@ -237,6 +237,14 @@ These features are designed to be added incrementally without breaking the core:
 | `03_cities_and_economy.md` | Terrain yields, 10 resources, 7 buildings, population growth, gold economy |
 | `04_tech_tree.md` | 18 techs across Ancient + Classical eras, prerequisites and unlocks |
 | `05_game_flow.md` | On-chain lobby, 5-min turn timer, domination + score victory |
+
+### Implementation (`implementation/`)
+
+| Document | Contents |
+|---|---|
+| `01_interfaces.md` | All Cairo module interfaces (hex, map_gen, movement, combat, city, tech, economy, turn, victory) + contract view functions + client TypeScript interface |
+| `02_test_plan.md` | 352 automated tests (239 unit + 92 integration + 21 system) + 15 manual test scenarios + UI interaction guide |
+| `03_feature_map.md` | Implementation order: 12 features with dependency graph, TDD workflow, per-feature test counts |
 
 ### Pre-Implementation
 
