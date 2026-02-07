@@ -1,0 +1,17 @@
+[package]
+name = "cairo_civ"
+version = "0.1.0"
+edition = "2024_07"
+cairo-version = "2.15.0"
+
+[dependencies]
+starknet = "2.15.0"
+
+[dev-dependencies]
+snforge_std = { git = "https://github.com/foundry-rs/starknet-foundry", tag = "v0.56.0" }
+
+[[target.starknet-contract]]
+sierra = true
+
+[scripts]
+test = "snforge test"

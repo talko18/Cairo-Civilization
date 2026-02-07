@@ -1,0 +1,3 @@
+cairo_civ_integrationtest::test_contract::test_action_found_city_on_water_reverts
+cairo_civ_integrationtest::test_contract::test_action_found_city_too_close_reverts
+cairo_civ_integrationtest::test_contract::test_action_set_research_already_done
