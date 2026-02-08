@@ -1,1 +1,1 @@
-{"version":1,"contracts":[{"id":"s9rqcur8dq1ki","package_name":"cairo_civ","contract_name":"CairoCiv","module_path":"cairo_civ::contract::CairoCiv","artifacts":{"sierra":"cairo_civ_CairoCiv.contract_class.json","casm":null}}]}
+{"version":1,"contracts":[{"id":"s9rqcur8dq1ki","package_name":"cairo_civ","contract_name":"CairoCiv","module_path":"cairo_civ::contract::CairoCiv","artifacts":{"sierra":"cairo_civ_CairoCiv.contract_class.json","casm":"cairo_civ_CairoCiv.compiled_contract_class.json"}}]}

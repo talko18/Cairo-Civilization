@@ -1,311 +1,508 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Civilization VI (Base Game) - Turn Actions</title>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    :root {
-      --bg:#1a1a2e; --bg-light:#16213e; --bg-panel:#0f3460;
-      --accent:#e94560; --gold:#f5c542; --text:#e0e0e0; --text-dim:#8899aa;
-      --science:#4fc3f7; --culture:#ba68c8; --faith:#e0e0e0;
-      --food:#66bb6a; --prod:#ff9800; --border:#2a3a5e; --radius:6px;
-    }
-    html,body{height:100%;overflow:hidden;}
-    body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);display:flex;flex-direction:column;}
-    button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--radius);transition:background .15s,transform .1s,box-shadow .15s;}
-    button:hover{transform:translateY(-1px);} button:active{transform:translateY(0);}
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cairo Civ</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#1a1a2e;--bg2:#16213e;--panel:#0f3460;--accent:#e94560;--accent2:#c73a52;
+--gold:#f5c542;--text:#e0e0e0;--dim:#8899aa;--border:#2a3a5e;
+--food:#66bb6a;--prod:#ff9800;--sci:#4fc3f7;--rad:6px;
+--p0:#3498db;--p0bg:rgba(52,152,219,.18);--p0txt:#5dade2;
+--p1:#e74c3c;--p1bg:rgba(231,76,60,.18);--p1txt:#ec7063}
+html,body{height:100%;overflow:hidden}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);display:flex;flex-direction:column}
+button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);transition:background .15s}
 
-    /* ── Top Bar ──────────────────────────────────────── */
-    #top-bar{display:flex;align-items:center;gap:6px;background:linear-gradient(180deg,#0d1b2a,var(--bg-light));padding:8px 16px;border-bottom:1px solid var(--border);flex-shrink:0;z-index:10;}
-    #turn-info{display:flex;align-items:center;gap:12px;margin-right:auto;font-weight:600;}
-    #turn-info .turn{font-size:1.1rem;color:var(--gold);}
-    #turn-info .era{font-size:.85rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;}
-    .yield-badge{display:flex;align-items:center;gap:4px;background:rgba(255,255,255,.06);padding:4px 10px;border-radius:20px;font-size:.82rem;font-weight:600;border:1px solid rgba(255,255,255,.08);}
-    .yield-badge .dot{width:10px;height:10px;border-radius:50%;flex-shrink:0;}
+/* ── Setup overlay ── */
+#setup{position:fixed;inset:0;background:var(--bg);z-index:100;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px}
+#setup h1{font-size:2.4rem;color:var(--gold);letter-spacing:2px}
+#setup p{color:var(--dim);max-width:500px;text-align:center;line-height:1.5}
+#setup-btn{padding:14px 40px;font-size:1.1rem;font-weight:700;background:var(--accent);color:#fff;border-radius:8px}
+#setup-btn:hover{background:var(--accent2)}
+#setup-btn:disabled{opacity:.5;cursor:wait}
+#setup-log{color:var(--dim);font-size:.82rem;min-height:1.2em}
+#setup-error{color:#e74c3c;font-size:.82rem;max-width:600px;word-break:break-all}
 
-    /* ── Main ─────────────────────────────────────────── */
-    #main{flex:1;display:flex;overflow:hidden;}
+/* ── Top bar ── */
+#top-bar{display:flex;align-items:center;gap:10px;background:linear-gradient(180deg,#0d1b2a,var(--bg2));
+  padding:8px 16px;border-bottom:1px solid var(--border);flex-shrink:0}
+.badge{display:flex;align-items:center;gap:4px;background:rgba(255,255,255,.06);
+  padding:4px 10px;border-radius:20px;font-size:.82rem;font-weight:600;border:1px solid rgba(255,255,255,.08)}
+.badge .dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+#turn-lbl{font-size:1.1rem;color:var(--gold);font-weight:700;margin-right:8px}
+#player-lbl{font-size:.85rem;padding:4px 12px;border-radius:20px;font-weight:700}
+.p0{background:var(--p0bg);color:var(--p0txt)}
+.p1{background:var(--p1bg);color:var(--p1txt)}
+#spacer{flex:1}
+#end-btn{padding:6px 18px;background:linear-gradient(135deg,#c0392b,#e74c3c);color:#fff;
+  font-size:.85rem;font-weight:700;border-radius:6px;box-shadow:0 2px 8px rgba(231,76,60,.3)}
+#end-btn:hover{background:linear-gradient(135deg,#a93226,#c0392b)}
+#end-btn:disabled{opacity:.5;cursor:wait}
 
-    /* ── Sidebar ──────────────────────────────────────── */
-    #sidebar{width:58px;background:var(--bg-light);border-right:1px solid var(--border);display:flex;flex-direction:column;align-items:center;padding:8px 0;gap:2px;flex-shrink:0;overflow-y:auto;}
-    .sb-btn{width:44px;height:44px;display:flex;align-items:center;justify-content:center;background:transparent;color:var(--text-dim);font-size:1.2rem;border-radius:var(--radius);position:relative;}
-    .sb-btn:hover,.sb-btn.active{background:var(--bg-panel);color:#fff;}
-    .sb-btn.active::after{content:'';position:absolute;left:0;top:25%;bottom:25%;width:3px;background:var(--accent);border-radius:0 3px 3px 0;}
-    .sb-btn .tooltip{display:none;position:absolute;left:54px;background:#111;color:#fff;padding:4px 10px;border-radius:4px;font-size:.75rem;white-space:nowrap;z-index:100;pointer-events:none;}
-    .sb-btn:hover .tooltip{display:block;}
-    .sb-divider{width:30px;height:1px;background:var(--border);margin:4px 0;}
+/* ── Main layout ── */
+#main{flex:1;display:flex;overflow:hidden}
 
-    /* ── Center ───────────────────────────────────────── */
-    #center{flex:1;display:flex;flex-direction:column;min-width:0;}
+/* ── Left sidebar ── */
+#sidebar{width:260px;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0;overflow:hidden}
+#sidebar-tabs{display:flex;border-bottom:1px solid var(--border);flex-shrink:0}
+.stab{flex:1;padding:8px 0;text-align:center;font-size:.78rem;font-weight:700;text-transform:uppercase;
+  letter-spacing:.5px;background:transparent;color:var(--dim);border-bottom:2px solid transparent;border-radius:0}
+.stab.active{color:var(--gold);border-bottom-color:var(--gold);background:rgba(245,197,66,.06)}
+.stab:hover{color:var(--text);background:rgba(255,255,255,.04)}
+#sidebar-body{flex:1;overflow-y:auto;padding:6px}
 
-    /* ── Map ──────────────────────────────────────────── */
-    #map-area{flex:1;position:relative;overflow:hidden;background:#0a1628;cursor:grab;}
-    #map-area.dragging{cursor:grabbing;}
-    #map-canvas{position:absolute;top:0;left:0;}
+/* sidebar cards */
+.s-section{margin-bottom:10px}
+.s-section-title{font-size:.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--dim);
+  padding:4px 8px;margin-bottom:2px}
+.s-card{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:var(--rad);cursor:pointer;
+  border:1px solid transparent;margin-bottom:2px;transition:all .12s}
+.s-card:hover{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.08)}
+.s-card.selected{background:rgba(245,197,66,.1);border-color:var(--gold)}
+.s-card.dead{opacity:.35;cursor:default}
+.s-icon{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-size:14px;flex-shrink:0;border:2px solid rgba(255,255,255,.15)}
+.s-icon.p0{background:rgba(52,152,219,.25);border-color:rgba(52,152,219,.4)}
+.s-icon.p1{background:rgba(231,76,60,.25);border-color:rgba(231,76,60,.4)}
+.s-info{flex:1;min-width:0}
+.s-name{font-size:.82rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.s-detail{font-size:.7rem;color:var(--dim)}
+.s-hp{width:40px;text-align:right;flex-shrink:0}
+.s-hp-bar{height:4px;border-radius:2px;background:#333;margin-top:2px}
+.s-hp-fill{height:100%;border-radius:2px}
 
-    /* Tile tooltip */
-    #tile-tooltip{position:absolute;pointer-events:none;background:rgba(10,22,40,.94);border:1px solid var(--border);border-radius:var(--radius);padding:8px 12px;font-size:.78rem;color:var(--text);z-index:20;display:none;max-width:220px;backdrop-filter:blur(4px);}
-    #tile-tooltip .tt-title{font-weight:700;color:var(--gold);margin-bottom:3px;}
-    #tile-tooltip .tt-yields{display:flex;gap:8px;margin-top:4px;}
-    #tile-tooltip .tt-yields span{display:flex;align-items:center;gap:2px;}
+/* ── Map ── */
+#map-area{flex:1;position:relative;overflow:hidden;background:#0a1628;cursor:grab}
+#map-area.dragging{cursor:grabbing}
+#map-canvas{position:absolute;top:0;left:0}
+#tile-tip{position:absolute;pointer-events:none;background:rgba(10,22,40,.94);border:1px solid var(--border);
+  border-radius:var(--rad);padding:8px 12px;font-size:.78rem;z-index:20;display:none;max-width:240px;backdrop-filter:blur(4px)}
+#tile-tip b{color:var(--gold)}
 
-    /* Minimap */
-    #minimap{position:absolute;bottom:10px;right:10px;border:2px solid var(--border);border-radius:var(--radius);overflow:hidden;z-index:15;background:#0a1628;box-shadow:0 4px 16px rgba(0,0,0,.5);}
-    #minimap-canvas{display:block;}
-    #minimap-viewport{position:absolute;border:1.5px solid var(--gold);pointer-events:none;border-radius:2px;}
+/* ── Action mode banner ── */
+#mode-banner{position:absolute;top:10px;left:50%;transform:translateX(-50%);background:rgba(233,69,96,.9);
+  color:#fff;padding:6px 20px;border-radius:20px;font-size:.82rem;font-weight:600;z-index:15;display:none}
 
-    /* Notifications */
-    #notifications{position:absolute;top:12px;right:12px;display:flex;flex-direction:column;gap:6px;width:260px;z-index:15;}
-    .notif{background:rgba(15,52,96,.92);border:1px solid var(--border);border-left:3px solid var(--gold);padding:8px 12px;border-radius:var(--radius);font-size:.78rem;backdrop-filter:blur(6px);animation:slideIn .3s ease;}
-    @keyframes slideIn{from{opacity:0;transform:translateX(30px);}to{opacity:1;transform:translateX(0);}}
+/* ── Bottom action bar ── */
+#action-bar{display:flex;align-items:center;gap:6px;background:linear-gradient(0deg,#0d1b2a,var(--bg2));
+  border-top:1px solid var(--border);padding:8px 16px;flex-shrink:0;min-height:52px;flex-wrap:wrap}
+#action-bar .label{font-size:.78rem;color:var(--dim);margin-right:4px}
+#action-bar .sel-name{font-size:.88rem;font-weight:700;color:var(--gold);margin-right:12px}
+.ab{display:inline-flex;align-items:center;gap:4px;padding:6px 12px;font-size:.76rem;font-weight:600;
+  background:rgba(255,255,255,.07);color:var(--text);border:1px solid rgba(255,255,255,.1);border-radius:var(--rad)}
+.ab:hover{background:var(--panel);border-color:var(--accent)}
+.ab.pri{background:var(--accent);color:#fff;border-color:var(--accent)}
+.ab.pri:hover{background:var(--accent2)}
+.ab.cancel{background:rgba(231,76,60,.15);color:#ec7063;border-color:rgba(231,76,60,.3)}
+.ab.cancel:hover{background:rgba(231,76,60,.25)}
 
-    /* ── Bottom Bar ───────────────────────────────────── */
-    #bottom-bar{display:flex;align-items:stretch;background:linear-gradient(0deg,#0d1b2a,var(--bg-light));border-top:1px solid var(--border);flex-shrink:0;z-index:10;}
-    #context-panel{flex:1;padding:10px 16px;min-height:110px;max-height:150px;overflow-y:auto;}
-    #context-panel h3{font-size:.85rem;text-transform:uppercase;letter-spacing:1px;color:var(--gold);margin-bottom:6px;}
-    .action-grid{display:flex;flex-wrap:wrap;gap:5px;}
-    .action-btn{display:flex;align-items:center;gap:5px;padding:5px 10px;font-size:.76rem;font-weight:600;background:rgba(255,255,255,.07);color:var(--text);border:1px solid rgba(255,255,255,.1);}
-    .action-btn:hover{background:var(--bg-panel);border-color:var(--accent);box-shadow:0 0 8px rgba(233,69,96,.25);}
-    .action-btn.primary{background:var(--accent);color:#fff;border-color:var(--accent);}
-    .action-btn.primary:hover{background:#d63050;box-shadow:0 0 12px rgba(233,69,96,.4);}
-    .action-btn .icon{font-size:.95rem;}
-    #end-turn-area{display:flex;align-items:center;padding:10px 16px;border-left:1px solid var(--border);}
-    #end-turn-btn{width:100px;height:70px;background:linear-gradient(135deg,#c0392b,#e74c3c);color:#fff;font-size:.95rem;font-weight:700;letter-spacing:.5px;border-radius:8px;box-shadow:0 4px 16px rgba(231,76,60,.35);}
-    #end-turn-btn:hover{background:linear-gradient(135deg,#a93226,#c0392b);box-shadow:0 6px 20px rgba(231,76,60,.5);}
-    #end-turn-btn .sub{display:block;font-size:.62rem;font-weight:400;opacity:.8;margin-top:2px;}
+/* ── Right panel (tech / production) ── */
+#rpanel{width:300px;background:var(--bg2);border-left:1px solid var(--border);display:none;flex-direction:column;flex-shrink:0;overflow:hidden}
+#rpanel.open{display:flex}
+#rp-head{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border)}
+#rp-head h2{font-size:.9rem;font-weight:700;text-transform:uppercase;color:var(--gold)}
+#rp-close{width:28px;height:28px;display:flex;align-items:center;justify-content:center;
+  background:rgba(255,255,255,.08);color:var(--text);font-size:1rem;border-radius:var(--rad)}
+#rp-body{flex:1;overflow-y:auto;padding:10px}
+.rp-item{padding:8px 10px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.06);
+  border-radius:var(--rad);font-size:.8rem;cursor:pointer;margin-bottom:4px;
+  display:flex;justify-content:space-between;align-items:center}
+.rp-item:hover{background:var(--panel);border-color:var(--accent)}
+.rp-item .meta{font-size:.7rem;color:var(--dim)}
 
-    /* ── Right Panel ──────────────────────────────────── */
-    #right-panel{width:360px;background:var(--bg-light);border-left:1px solid var(--border);display:none;flex-direction:column;flex-shrink:0;overflow:hidden;}
-    #right-panel.open{display:flex;}
-    #rp-header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);background:rgba(0,0,0,.2);}
-    #rp-header h2{font-size:.95rem;font-weight:700;text-transform:uppercase;letter-spacing:1px;}
-    #rp-close{width:28px;height:28px;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.08);color:var(--text);font-size:1rem;}
-    #rp-body{flex:1;overflow-y:auto;padding:14px;}
-    .panel-section{margin-bottom:18px;}
-    .panel-section h4{font-size:.78rem;color:var(--gold);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid var(--border);}
-    .panel-list{list-style:none;display:flex;flex-direction:column;gap:4px;}
-    .panel-list li{padding:7px 10px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.06);border-radius:var(--radius);font-size:.8rem;cursor:pointer;display:flex;align-items:center;gap:8px;transition:background .15s;}
-    .panel-list li:hover{background:var(--bg-panel);border-color:var(--accent);}
-    .panel-list li .meta{margin-left:auto;font-size:.7rem;color:var(--text-dim);}
-    .panel-list li .icon{font-size:1rem;}
-    .policy-slots{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;}
-    .policy-slot{width:100%;padding:7px 10px;border-radius:var(--radius);font-size:.76rem;cursor:pointer;border:1px dashed;display:flex;align-items:center;gap:6px;}
-    .policy-slot.military{border-color:#e74c3c;background:rgba(231,76,60,.08);}
-    .policy-slot.economic{border-color:#f1c40f;background:rgba(241,196,15,.08);}
-    .policy-slot.diplomatic{border-color:#2ecc71;background:rgba(46,204,113,.08);}
-    .policy-slot.wildcard{border-color:#9b59b6;background:rgba(155,89,182,.08);}
-    .policy-slot:hover{opacity:.8;}
-    .slot-label{font-weight:600;} .slot-card{color:var(--text-dim);font-style:italic;}
-    .civ-card{display:flex;align-items:center;gap:10px;padding:10px 12px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.06);border-radius:var(--radius);margin-bottom:6px;cursor:pointer;transition:background .15s;}
-    .civ-card:hover{background:var(--bg-panel);border-color:var(--accent);}
-    .civ-avatar{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:1.1rem;flex-shrink:0;}
-    .civ-info{flex:1;} .civ-info .name{font-weight:700;font-size:.83rem;} .civ-info .leader{font-size:.7rem;color:var(--text-dim);}
-    .diplo-actions{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px;} .diplo-actions .action-btn{font-size:.73rem;}
-    ::-webkit-scrollbar{width:5px;} ::-webkit-scrollbar-track{background:transparent;} ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px;}
-  </style>
+::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+</style>
 </head>
 <body>
 
-<!-- ═══ TOP BAR ═══ -->
-<div id="top-bar">
-  <div id="turn-info"><span class="turn">Turn 42</span><span class="era">Classical Era</span></div>
-  <div class="yield-badge"><span class="dot" style="background:var(--food)"></span><span>+12</span></div>
-  <div class="yield-badge"><span class="dot" style="background:var(--prod)"></span><span>+18</span></div>
-  <div class="yield-badge"><span class="dot" style="background:var(--gold)"></span><span>230</span></div>
-  <div class="yield-badge"><span class="dot" style="background:var(--science)"></span><span>+24</span></div>
-  <div class="yield-badge"><span class="dot" style="background:var(--culture)"></span><span>+16</span></div>
-  <div class="yield-badge"><span class="dot" style="background:var(--faith)"></span><span>+8</span></div>
+<!-- ═══ SETUP SCREEN ═══ -->
+<div id="setup">
+  <h1>CAIRO CIV</h1>
+  <p>A fully on-chain Civilization game built with Cairo and StarkNet.<br>
+     Make sure <code>katana --dev --dev.no-fee --dev.no-account-validation</code> is running.</p>
+  <button id="setup-btn" onclick="doSetup()">Deploy &amp; Start Game</button>
+  <div id="setup-log"></div>
+  <div id="setup-error"></div>
 </div>
 
-<!-- ═══ MAIN ═══ -->
-<div id="main">
-  <nav id="sidebar">
-    <button class="sb-btn" data-panel="research">🔬<span class="tooltip">Research</span></button>
-    <button class="sb-btn" data-panel="civics">📜<span class="tooltip">Civics</span></button>
-    <div class="sb-divider"></div>
-    <button class="sb-btn" data-panel="government">🏛️<span class="tooltip">Government</span></button>
-    <button class="sb-btn" data-panel="diplomacy">🤝<span class="tooltip">Diplomacy</span></button>
-    <button class="sb-btn" data-panel="religion">⛪<span class="tooltip">Religion</span></button>
-    <div class="sb-divider"></div>
-    <button class="sb-btn" data-panel="greatpeople">⭐<span class="tooltip">Great People</span></button>
-    <button class="sb-btn" data-panel="trade">🚢<span class="tooltip">Trade Routes</span></button>
-    <button class="sb-btn" data-panel="espionage">🕵️<span class="tooltip">Espionage</span></button>
-    <button class="sb-btn" data-panel="citystates">🏘️<span class="tooltip">City-States</span></button>
-    <div class="sb-divider"></div>
-    <button class="sb-btn" data-panel="rankings">📊<span class="tooltip">Rankings</span></button>
-  </nav>
+<!-- ═══ GAME SCREEN ═══ -->
+<div id="top-bar" style="display:none">
+  <span id="turn-lbl">Turn 0</span>
+  <span id="player-lbl" class="p0">Player A</span>
+  <div class="badge"><span class="dot" style="background:var(--gold)"></span><span id="gold-lbl">0</span></div>
+  <div class="badge"><span class="dot" style="background:var(--sci)"></span><span id="tech-lbl">--</span></div>
+  <div class="badge"><span class="dot" style="background:var(--p1)"></span><span id="diplo-lbl">Peace</span></div>
+  <div id="spacer"></div>
+  <button class="ab" onclick="openPanel('tech')">Research</button>
+  <button class="ab" onclick="openPanel('prod')">Production</button>
+  <button id="end-btn" onclick="endTurn()">END TURN</button>
+</div>
 
-  <div id="center">
-    <!-- ═══ MAP ═══ -->
-    <div id="map-area">
-      <canvas id="map-canvas"></canvas>
-      <div id="tile-tooltip"></div>
-      <div id="notifications">
-        <div class="notif">⚔️ Barbarian Outpost spotted to the north</div>
-        <div class="notif">🔬 Research: Archery complete — choose next tech</div>
-        <div class="notif">🏗️ Rome needs a new production order</div>
-      </div>
-      <div id="minimap">
-        <canvas id="minimap-canvas" width="180" height="120"></canvas>
-        <div id="minimap-viewport"></div>
-      </div>
+<div id="main" style="display:none">
+  <!-- Left sidebar -->
+  <div id="sidebar">
+    <div id="sidebar-tabs">
+      <button class="stab active" data-tab="mine" onclick="switchTab('mine')">My Forces</button>
+      <button class="stab" data-tab="enemy" onclick="switchTab('enemy')">Enemy</button>
     </div>
-
-    <!-- ═══ BOTTOM BAR ═══ -->
-    <div id="bottom-bar">
-      <div id="context-panel">
-        <h3>No Selection</h3>
-        <p style="font-size:.8rem;color:var(--text-dim);">Click a unit or city on the map to see available actions.</p>
-      </div>
-      <div id="end-turn-area">
-        <button id="end-turn-btn" onclick="endTurn()">END TURN<span class="sub">Turn 42 → 43</span></button>
-      </div>
-    </div>
+    <div id="sidebar-body"></div>
   </div>
 
-  <!-- ═══ RIGHT PANEL ═══ -->
-  <div id="right-panel">
-    <div id="rp-header"><h2 id="rp-title">Panel</h2><button id="rp-close" onclick="closePanel()">✕</button></div>
+  <!-- Map -->
+  <div id="map-area">
+    <canvas id="map-canvas"></canvas>
+    <div id="tile-tip"></div>
+    <div id="mode-banner"></div>
+  </div>
+
+  <!-- Right panel (tech/prod picker) -->
+  <div id="rpanel">
+    <div id="rp-head"><h2 id="rp-title">Panel</h2><button id="rp-close" onclick="closePanel()">&#x2715;</button></div>
     <div id="rp-body"></div>
   </div>
 </div>
 
+<!-- Bottom action bar -->
+<div id="action-bar" style="display:none">
+  <span class="label">No selection</span>
+</div>
+
 <script>
-// ═══════════════════════════════════════════════════════════
-// HEX MAP ENGINE
-// ═══════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════════════
+let G = null;           // game state from /api/state
+let selected = null;    // {type:'unit'|'city', player, id, ...}
+let actionMode = null;  // 'move'|'attack'|'ranged'|null
+let loading = false;
+let sidebarTab = 'mine';
 
-const COLS = 26, ROWS = 18;
-const HEX_W = 64, HEX_H = 56;
-const HEX_SIDE = HEX_H / 2;
-
-// Terrain types
-const T = {
-  OCEAN:0, COAST:1, GRASSLAND:2, PLAINS:3, DESERT:4, TUNDRA:5,
-  GRASS_HILL:6, PLAINS_HILL:7, MOUNTAIN:8, WOODS:9, RAINFOREST:10, MARSH:11
-};
-const TERRAIN_META = {
-  [T.OCEAN]:      {name:'Ocean',       color:'#0b3d6e', food:1,prod:0,gold:0},
-  [T.COAST]:      {name:'Coast',       color:'#1a6fa0', food:1,prod:0,gold:1},
-  [T.GRASSLAND]:  {name:'Grassland',   color:'#4a8c3f', food:2,prod:0,gold:0},
-  [T.PLAINS]:     {name:'Plains',      color:'#8a9a3b', food:1,prod:1,gold:0},
-  [T.DESERT]:     {name:'Desert',      color:'#c2a84e', food:0,prod:0,gold:0},
-  [T.TUNDRA]:     {name:'Tundra',      color:'#7a9a8a', food:1,prod:0,gold:0},
-  [T.GRASS_HILL]: {name:'Grassland Hills',color:'#3d7a33', food:2,prod:1,gold:0},
-  [T.PLAINS_HILL]:{name:'Plains Hills',color:'#7a8833', food:1,prod:2,gold:0},
-  [T.MOUNTAIN]:   {name:'Mountain',    color:'#6b6b78', food:0,prod:0,gold:0},
-  [T.WOODS]:      {name:'Woods',       color:'#2d6b2d', food:0,prod:1,gold:0},
-  [T.RAINFOREST]: {name:'Rainforest',  color:'#1a5a2a', food:1,prod:0,gold:0},
-  [T.MARSH]:      {name:'Marsh',       color:'#4a7a5a', food:0,prod:-1,gold:0},
-};
-
-// Map seed (procedural but deterministic)
-function seededRandom(seed) { let s=seed; return ()=>{s=(s*16807+0)%2147483647; return (s-1)/2147483646;} }
-const rand = seededRandom(42);
-
-// Generate terrain
-const map = [];
-for (let r = 0; r < ROWS; r++) {
-  map[r] = [];
-  for (let c = 0; c < COLS; c++) {
-    // Ocean border
-    if (r < 1 || r >= ROWS-1 || c < 1 || c >= COLS-1) { map[r][c] = T.OCEAN; continue; }
-    if (r < 2 || r >= ROWS-2 || c < 2 || c >= COLS-2) { map[r][c] = rand() < .6 ? T.COAST : T.OCEAN; continue; }
-    // Interior
-    const v = rand();
-    if (v < .02) map[r][c] = T.MOUNTAIN;
-    else if (v < .08) map[r][c] = T.GRASS_HILL;
-    else if (v < .14) map[r][c] = T.PLAINS_HILL;
-    else if (v < .20) map[r][c] = T.WOODS;
-    else if (v < .24) map[r][c] = T.RAINFOREST;
-    else if (v < .26) map[r][c] = T.MARSH;
-    else if (v < .30) map[r][c] = T.DESERT;
-    else if (v < .32) map[r][c] = T.TUNDRA;
-    else if (v < .33) map[r][c] = T.COAST;
-    else if (v < .60) map[r][c] = T.GRASSLAND;
-    else map[r][c] = T.PLAINS;
-  }
-}
-// Carve a river path (visual only - mark some tiles as coast-adjacent)
-const riverTiles = new Set();
-let rx = 5, ry = 3;
-for (let i = 0; i < 12; i++) { riverTiles.add(`${ry},${rx}`); rx += rand()>.4?1:0; ry += rand()>.3?1:0; if(ry>=ROWS-2)break; }
-
-// Resources (bonus/luxury/strategic)
-const resources = {};
-const RES_ICONS = {wheat:'🌾',cattle:'🐄',iron:'⛏️',horses:'🐴',gold_res:'💎',fish:'🐟',stone:'🪨',silk:'🧵'};
-const resTypes = Object.keys(RES_ICONS);
-for (let i = 0; i < 20; i++) {
-  const rr = 3+Math.floor(rand()*(ROWS-6)), rc = 3+Math.floor(rand()*(COLS-6));
-  const t = map[rr][rc];
-  if (t >= T.GRASSLAND && t !== T.MOUNTAIN) {
-    resources[`${rr},${rc}`] = resTypes[Math.floor(rand()*resTypes.length)];
-  }
-}
-
-// Improvements
-const improvements = {};
-
-// Units & Cities
-const entities = [
-  {type:'city', name:'Rome',   r:8,  c:10, civ:'rome', pop:7},
-  {type:'city', name:'Antium', r:12, c:14, civ:'rome', pop:4},
-  {type:'unit', name:'Warrior',r:7,  c:9,  icon:'⚔️', cls:'warrior', hp:85, hpMax:100, cs:20, mp:2, mpMax:2},
-  {type:'unit', name:'Archer', r:9,  c:11, icon:'🏹', cls:'archer',  hp:100,hpMax:100, cs:15, mp:2, mpMax:2},
-  {type:'unit', name:'Settler',r:6,  c:12, icon:'🏕️', cls:'settler', hp:0,  hpMax:0,   cs:0,  mp:2, mpMax:2},
-  {type:'unit', name:'Builder',r:9,  c:9,  icon:'🔨', cls:'builder', hp:0,  hpMax:0,   cs:0,  mp:2, mpMax:2, charges:3},
-  {type:'unit', name:'Scout',  r:5,  c:7,  icon:'🔍', cls:'scout',   hp:100,hpMax:100, cs:10, mp:3, mpMax:3},
-  {type:'unit', name:'Trader', r:8,  c:11, icon:'📦', cls:'trader',  hp:0,  hpMax:0,   cs:0,  mp:1, mpMax:1},
-  // Enemy / barbarian
-  {type:'barb', name:'Barbarian Outpost', r:4, c:8, icon:'🏴'},
-  {type:'barb', name:'Barbarian Warrior', r:5, c:8, icon:'🗡️'},
-  // Other civ
-  {type:'foreign',name:'Thebes',r:6, c:19, icon:'🏛️', civ:'egypt'},
-  {type:'foreign',name:'Egyptian Warrior',r:7, c:18, icon:'⚔️', civ:'egypt'},
-];
-
-// Fog of war: tiles visible from your units/cities (simplified: 3-tile radius from own stuff)
-const visible = new Set();
-const explored = new Set();
-entities.filter(e => e.civ === 'rome' || e.cls).forEach(e => {
-  if (!e.r && e.r!==0) return;
-  const sight = e.type === 'city' ? 4 : (e.cls === 'scout' ? 4 : 3);
-  for (let dr = -sight; dr <= sight; dr++)
-    for (let dc = -sight; dc <= sight; dc++) {
-      const nr = e.r+dr, nc = e.c+dc;
-      if (nr>=0 && nr<ROWS && nc>=0 && nc<COLS && Math.abs(dr)+Math.abs(dc) <= sight+1) {
-        visible.add(`${nr},${nc}`);
-        explored.add(`${nr},${nc}`);
-      }
-    }
-});
-// Also mark some extra explored tiles
-for (let r = 0; r < ROWS; r++)
-  for (let c = 0; c < COLS; c++)
-    if (rand() < .35 || (r > 2 && r < ROWS-2 && c > 2 && c < COLS-2)) explored.add(`${r},${c}`);
-
-// Districts (show as colored markers on city tiles)
-const districts = [
-  {r:7, c:10, type:'Campus',       icon:'🔬'},
-  {r:8, c:9,  type:'Holy Site',    icon:'⛪'},
-  {r:9, c:10, type:'Commercial Hub',icon:'💰'},
-  {r:11,c:14, type:'Encampment',   icon:'🏰'},
-  {r:12,c:13, type:'Theater Sq.',  icon:'🎭'},
-];
-
-// ── Canvas setup ──
-const canvas = document.getElementById('map-canvas');
-const ctx = canvas.getContext('2d');
-const mapW = COLS * HEX_W * 0.75 + HEX_W * 0.25;
-const mapH = ROWS * HEX_H + HEX_H / 2;
-
-let camX = -(mapW/2 - window.innerWidth/2 + 58);
-let camY = -(mapH/2 - window.innerHeight/2 + 50);
-let selectedEntity = null;
+// Map rendering
+const COLS=32, ROWS=20, HW=52, HH=46;
+let camX=0, camY=0;
 let hoveredHex = null;
 
+const TERRAIN_COLORS = [
+  '#0b3d6e','#1a6fa0','#4a8c3f','#3d7a33','#8a9a3b','#7a8833',
+  '#c2a84e','#b89840','#7a9a8a','#6a8a7a','#c8d8e0','#a8b8c0','#6b6b78'
+];
+const TERRAIN_NAMES = [
+  'Ocean','Coast','Grassland','Grassland Hills','Plains','Plains Hills',
+  'Desert','Desert Hills','Tundra','Tundra Hills','Snow','Snow Hills','Mountain'
+];
+const FEATURE_NAMES = ['','Woods','Marsh'];
+const RESOURCE_NAMES = ['','Wheat','Cattle','Stone','Iron','Silver','Horses','Dyes'];
+// Unit type indices match contract: 0=Settler, 1=Builder, 2=Scout, 3=Warrior, 4=Slinger, 5=Archer
+const UNIT_NAMES  = ['Settler','Builder','Scout','Warrior','Slinger','Archer','Spearman','Horseman','Swordsman','Crossbowman','Catapult'];
+const UNIT_ICONS  = ['\u{1F3D5}','\u{1F528}','\u{1F50D}','\u2694\uFE0F','\u{1F3AF}','\u{1F3F9}','\u{1F6E1}','\u{1F40E}','\u2694\uFE0F','\u{1F3F9}','\u{1F4A3}'];
+const TECH_NAMES  = {1:'Mining',2:'Pottery',3:'Animal Husb.',4:'Archery',5:'Sailing',6:'Irrigation',7:'Writing',
+  8:'Masonry',9:'Bronze Working',10:'The Wheel',11:'Currency',12:'Construction',13:'Horseback',14:'Iron Working',
+  15:'Celestial Nav.',16:'Mathematics',17:'Engineering',18:'Machinery'};
+const BUILDING_NAMES = {0:'Monument',1:'Granary',2:'Walls',3:'Library',4:'Market',5:'Barracks',6:'Water Mill'};
+// Production item IDs match contract: PROD_SETTLER=1, PROD_BUILDER=2, PROD_SCOUT=3,
+// PROD_WARRIOR=4, PROD_SLINGER=5, PROD_ARCHER=6, buildings start at 64
+const PROD_ITEM_NAMES = {
+  0:'None', 1:'Settler', 2:'Builder', 3:'Scout', 4:'Warrior', 5:'Slinger', 6:'Archer',
+  64:'Monument', 65:'Granary', 66:'Walls', 67:'Library', 68:'Market', 69:'Barracks', 70:'Water Mill'
+};
+const PROD_ITEM_COST = {
+  1:80, 2:50, 3:30, 4:40, 5:35, 6:60,
+  64:60, 65:65, 66:80, 67:90, 68:100, 69:90, 70:80
+};
+function getBuildingList(bitmask) {
+  const list = [];
+  for (let i = 0; i < 7; i++) { if (bitmask & (1 << i)) list.push(BUILDING_NAMES[i]); }
+  return list;
+}
+
+const canvas = document.getElementById('map-canvas');
+const ctx2d = canvas.getContext('2d');
+
+// ═══════════════════════════════════════════════════════════════
+// SETUP
+// ═══════════════════════════════════════════════════════════════
+async function doSetup() {
+  const btn = document.getElementById('setup-btn');
+  const log = document.getElementById('setup-log');
+  const err = document.getElementById('setup-error');
+  btn.disabled = true; err.textContent = '';
+  log.textContent = 'Connecting to Katana & deploying contract...';
+  try {
+    const res = await fetch('/api/setup', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    log.textContent = 'Loading game state...';
+    await refreshState();
+    document.getElementById('setup').style.display = 'none';
+    document.getElementById('top-bar').style.display = 'flex';
+    document.getElementById('main').style.display = 'flex';
+    document.getElementById('action-bar').style.display = 'flex';
+    centerCamera();
+    resizeCanvas();
+  } catch (e) {
+    err.textContent = 'Error: ' + e.message;
+    btn.disabled = false;
+    log.textContent = '';
+  }
+}
+
+async function refreshState() {
+  const res = await fetch('/api/state');
+  G = await res.json();
+  updateTopBar();
+  renderSidebar();
+  updateActionBar();
+  drawMap();
+}
+
+function updateTopBar() {
+  if (!G) return;
+  document.getElementById('turn-lbl').textContent = 'Turn ' + G.turn;
+  const pl = document.getElementById('player-lbl');
+  pl.textContent = G.currentPlayer === 0 ? 'Player A' : 'Player B';
+  pl.className = G.currentPlayer === 0 ? 'p0' : 'p1';
+  const cp = G.players[G.currentPlayer];
+  document.getElementById('gold-lbl').textContent = cp.treasury + ' gold';
+  const techId = cp.currentResearch;
+  document.getElementById('tech-lbl').textContent = techId ? TECH_NAMES[techId] || 'Tech '+techId : '--';
+  document.getElementById('diplo-lbl').textContent = G.players[0].diplomacy === 1 ? 'WAR' : 'Peace';
+}
+
+// ═══════════════════════════════════════════════════════════════
+// LEFT SIDEBAR
+// ═══════════════════════════════════════════════════════════════
+function switchTab(tab) {
+  sidebarTab = tab;
+  document.querySelectorAll('.stab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  renderSidebar();
+}
+
+function renderSidebar() {
+  if (!G) return;
+  const body = document.getElementById('sidebar-body');
+  const cp = G.currentPlayer;
+  const p = sidebarTab === 'mine' ? cp : (1 - cp);
+  const isMine = sidebarTab === 'mine';
+  const pData = G.players[p];
+  let html = '';
+
+  // Cities section
+  if (pData.cities.length > 0) {
+    html += '<div class="s-section"><div class="s-section-title">Cities (' + pData.cities.length + ')</div>';
+    for (const c of pData.cities) {
+      const isSel = selected && selected.type === 'city' && selected.player === p && selected.id === c.id;
+      const prodName = PROD_ITEM_NAMES[c.production] || 'None';
+      const prodCost = PROD_ITEM_COST[c.production] || 0;
+      const prodPct = prodCost > 0 ? Math.min(100, Math.round(c.prodStockpile / prodCost * 100)) : 0;
+      const buildings = getBuildingList(c.buildings);
+      html += `<div class="s-card${isSel ? ' selected' : ''}" onclick="selectFromSidebar('city',${p},${c.id})" style="flex-direction:column;align-items:stretch;gap:4px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <div class="s-icon p${p}">\u{1F3DB}</div>
+          <div class="s-info">
+            <div class="s-name">${c.name}${c.isCapital ? ' \u2605' : ''}</div>
+            <div class="s-detail">Pop ${c.population} \u2022 (${c.q},${c.r})</div>
+          </div>
+          <div class="s-hp">
+            <div style="font-size:.7rem;text-align:right;color:var(--dim)">${c.hp}/200</div>
+            <div class="s-hp-bar"><div class="s-hp-fill" style="width:${c.hp/2}%;background:${c.hp>100?'var(--food)':c.hp>50?'var(--prod)':'var(--p1)'}"></div></div>
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;font-size:.7rem;padding:0 4px">
+          <span style="color:var(--food)">\u{1F33E} ${c.foodStockpile}</span>
+          <span style="color:var(--prod)">\u2692 ${c.prodStockpile}${prodCost>0?'/'+prodCost:''}</span>
+        </div>
+        <div style="font-size:.68rem;padding:0 4px;color:var(--dim)">
+          Producing: <b style="color:var(--prod)">${prodName}</b>${prodCost>0?' ('+prodPct+'%)':''}
+        </div>
+        <div style="padding:0 4px">
+          <div class="s-hp-bar" style="height:3px"><div class="s-hp-fill" style="width:${prodPct}%;background:var(--prod)"></div></div>
+        </div>
+        ${buildings.length>0?'<div style="font-size:.65rem;padding:0 4px;color:var(--dim)">Buildings: '+buildings.join(', ')+'</div>':''}
+      </div>`;
+    }
+    html += '</div>';
+  }
+
+  // Units section
+  const alive = pData.units.filter(u => u.hp > 0);
+  const dead = pData.units.filter(u => u.hp <= 0);
+  if (alive.length > 0 || dead.length > 0) {
+    html += '<div class="s-section"><div class="s-section-title">Units (' + alive.length + ' alive)</div>';
+    for (const u of alive) {
+      const isSel = selected && selected.type === 'unit' && selected.player === p && selected.id === u.id;
+      const uname = UNIT_NAMES[u.unitType] || 'Unit';
+      html += `<div class="s-card${isSel ? ' selected' : ''}" onclick="selectFromSidebar('unit',${p},${u.id})">
+        <div class="s-icon p${p}">${UNIT_ICONS[u.unitType] || '?'}</div>
+        <div class="s-info">
+          <div class="s-name">${uname}</div>
+          <div class="s-detail">MP:${u.mp}${u.charges ? ' Ch:'+u.charges : ''} \u2022 (${u.q},${u.r})</div>
+        </div>
+        <div class="s-hp">
+          <div style="font-size:.7rem;text-align:right;color:var(--dim)">${u.hp}/100</div>
+          <div class="s-hp-bar"><div class="s-hp-fill" style="width:${u.hp}%;background:${u.hp>50?'var(--food)':u.hp>25?'var(--prod)':'var(--p1)'}"></div></div>
+        </div>
+      </div>`;
+    }
+    for (const u of dead) {
+      const uname = UNIT_NAMES[u.unitType] || 'Unit';
+      html += `<div class="s-card dead">
+        <div class="s-icon p${p}">${UNIT_ICONS[u.unitType] || '?'}</div>
+        <div class="s-info"><div class="s-name">${uname}</div><div class="s-detail">Dead</div></div>
+      </div>`;
+    }
+    html += '</div>';
+  }
+
+  // Treasury & research
+  html += '<div class="s-section"><div class="s-section-title">Economy</div>';
+  html += `<div style="padding:4px 10px;font-size:.78rem;color:var(--dim)">
+    \u{1F4B0} Treasury: <b style="color:var(--gold)">${pData.treasury}</b><br>
+    \u{1F52C} Research: <b style="color:var(--sci)">${TECH_NAMES[pData.currentResearch] || 'None'}</b><br>
+    \u{1F3F3} Diplomacy: <b style="color:${pData.diplomacy===1?'var(--p1)':'var(--food)'}">${pData.diplomacy===1?'At War':'Peace'}</b>
+  </div></div>`;
+
+  if (html === '') html = '<div style="padding:20px;color:var(--dim);text-align:center;font-size:.82rem">No data yet</div>';
+  body.innerHTML = html;
+}
+
+function selectFromSidebar(type, player, id) {
+  if (!G) return;
+  actionMode = null;
+  setModeBanner(null);
+
+  if (type === 'unit') {
+    const u = G.players[player].units.find(x => x.id === id);
+    if (!u || u.hp <= 0) return;
+    selected = { ...u, type: 'unit', player };
+    panToHex(u.q, u.r);
+  } else {
+    const c = G.players[player].cities.find(x => x.id === id);
+    if (!c) return;
+    selected = { ...c, type: 'city', player };
+    panToHex(c.q, c.r);
+  }
+  updateActionBar();
+  renderSidebar();
+  drawMap();
+}
+
+function panToHex(q, r) {
+  const [hx, hy] = hexCenter(q, r);
+  camX = -hx + canvas.width / 2;
+  camY = -hy + canvas.height / 2;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// BOTTOM ACTION BAR
+// ═══════════════════════════════════════════════════════════════
+function updateActionBar() {
+  const bar = document.getElementById('action-bar');
+  if (!selected) {
+    bar.innerHTML = '<span class="label">Click a unit or city on the map, or select from the sidebar.</span>';
+    return;
+  }
+
+  const isMine = selected.player === G.currentPlayer;
+
+  if (selected.type === 'unit') {
+    const u = selected;
+    const name = UNIT_NAMES[u.unitType] || 'Unit';
+    const icon = UNIT_ICONS[u.unitType] || '?';
+    const isCivilian = u.unitType === 0 || u.unitType === 1; // 0=Settler, 1=Builder
+    let html = `<span class="sel-name">${icon} ${name}</span>
+      <span class="label">HP:${u.hp} MP:${u.mp}${u.charges ? ' Ch:'+u.charges : ''} (${u.q},${u.r})</span>`;
+
+    if (isMine) {
+      if (actionMode) {
+        const modeName = actionMode === 'move' ? 'Move' : actionMode === 'attack' ? 'Attack' : 'Ranged Attack';
+        html += `<button class="ab cancel" onclick="cancelMode()">Cancel ${modeName}</button>`;
+      } else {
+        html += `<button class="ab pri" onclick="startMove()">Move</button>`;
+        if (u.unitType === 0) html += `<button class="ab pri" onclick="foundCity()">Found City</button>`;
+        if (!isCivilian) {
+          html += `<button class="ab" onclick="startAttack()">Attack</button>`;
+          html += `<button class="ab" onclick="fortifyUnit()">Fortify</button>`;
+          if (u.unitType === 4 || u.unitType === 5) html += `<button class="ab" onclick="startRanged()">Ranged</button>`; // 4=Slinger, 5=Archer
+        }
+        html += `<button class="ab" onclick="skipUnit()">Skip</button>`;
+        html += `<button class="ab" onclick="declareWar()">Declare War</button>`;
+      }
+    } else {
+      html += '<span class="label" style="margin-left:8px">Enemy unit</span>';
+    }
+
+    bar.innerHTML = html;
+  } else if (selected.type === 'city') {
+    const c = selected;
+    const prodName = PROD_ITEM_NAMES[c.production] || 'None';
+    const prodCost = PROD_ITEM_COST[c.production] || 0;
+    const prodPct = prodCost > 0 ? Math.min(100, Math.round(c.prodStockpile / prodCost * 100)) : 0;
+    const turnsLeft = prodCost > 0 && c.population > 0
+      ? Math.max(1, Math.ceil((prodCost - c.prodStockpile) / Math.max(1, c.population)))
+      : '\u221E';
+    const buildings = getBuildingList(c.buildings);
+    let html = `<span class="sel-name">\u{1F3DB} ${c.name}${c.isCapital?' \u2605':''}</span>`;
+    html += `<span class="label">Pop:${c.population} HP:${c.hp} (${c.q},${c.r})</span>`;
+    html += `<span class="badge" style="margin-left:4px"><span class="dot" style="background:var(--food)"></span>\u{1F33E} ${c.foodStockpile}</span>`;
+    html += `<span class="badge"><span class="dot" style="background:var(--prod)"></span>\u2692 ${c.prodStockpile}/${prodCost} ${prodName} (~${turnsLeft}T)</span>`;
+    if (buildings.length > 0) {
+      html += `<span class="badge"><span class="dot" style="background:var(--sci)"></span>${buildings.join(', ')}</span>`;
+    }
+    if (isMine) {
+      html += `<button class="ab pri" onclick="openPanel('prod')">Set Production</button>`;
+      html += `<button class="ab" onclick="openPanel('tech')">Set Research</button>`;
+    } else {
+      html += '<span class="label" style="margin-left:8px">Enemy city</span>';
+    }
+    bar.innerHTML = html;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// HEX GEOMETRY
+// ═══════════════════════════════════════════════════════════════
+function hexCenter(q, r) {
+  const x = q * HW * 0.75 + HW / 2;
+  const y = r * HH + HH / 2 + (q % 2 === 1 ? HH / 2 : 0);
+  return [x, y];
+}
+function hexPts(cx, cy, s) {
+  const p = [];
+  for (let i = 0; i < 6; i++) { const a = Math.PI/6 + i*Math.PI/3; p.push([cx+s*Math.cos(a), cy+s*Math.sin(a)]); }
+  return p;
+}
+function pixelToHex(px, py) {
+  let best=null, bd=Infinity;
+  for (let q=0;q<COLS;q++) for (let r=0;r<ROWS;r++) {
+    const [hx,hy]=hexCenter(q,r); const d=(px-hx)**2+(py-hy)**2;
+    if(d<bd){bd=d;best={q,r};}
+  }
+  return bd < HH*HH ? best : null;
+}
+function centerCamera() {
+  if (!G) return;
+  const cp = G.currentPlayer;
+  const u = G.players[cp].units.find(u => u.hp > 0);
+  if (u) panToHex(u.q, u.r);
+}
+function hexDist(q1,r1,q2,r2) {
+  // offset hex distance
+  function toAxial(q,r) {
+    const aq = q;
+    const ar = r - Math.floor(q / 2);
+    return [aq, ar];
+  }
+  const [aq1,ar1] = toAxial(q1,r1);
+  const [aq2,ar2] = toAxial(q2,r2);
+  const dq = aq2-aq1, dr = ar2-ar1;
+  return Math.max(Math.abs(dq), Math.abs(dr), Math.abs(dq+dr));
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MAP DRAWING
+// ═══════════════════════════════════════════════════════════════
 function resizeCanvas() {
   const area = document.getElementById('map-area');
   canvas.width = area.clientWidth;
@@ -314,502 +511,376 @@ function resizeCanvas() {
 }
 window.addEventListener('resize', resizeCanvas);
 
-// Hex geometry (pointy-top)
-function hexCenter(r, c) {
-  const x = c * HEX_W * 0.75 + HEX_W / 2;
-  const y = r * HEX_H + HEX_H / 2 + (c % 2 === 1 ? HEX_H / 2 : 0);
-  return [x, y];
-}
-function hexPath(cx, cy, size) {
-  const pts = [];
-  for (let i = 0; i < 6; i++) {
-    const a = Math.PI / 6 + i * Math.PI / 3;
-    pts.push([cx + size * Math.cos(a), cy + size * Math.sin(a)]);
-  }
-  return pts;
-}
-function pixelToHex(px, py) {
-  // Brute-force: find closest hex center
-  let best = null, bestDist = Infinity;
-  for (let r = 0; r < ROWS; r++)
-    for (let c = 0; c < COLS; c++) {
-      const [hx, hy] = hexCenter(r, c);
-      const dx = px - hx, dy = py - hy;
-      const d = dx*dx + dy*dy;
-      if (d < bestDist) { bestDist = d; best = {r, c}; }
-    }
-  if (bestDist < (HEX_H*HEX_H)) return best;
-  return null;
+function getTile(q,r) {
+  if (!G) return null;
+  return G.tiles.find(t => t.q===q && t.r===r);
 }
 
-// ── Draw ──
 function drawMap() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.save();
-  ctx.translate(camX, camY);
+  if (!G) return;
+  ctx2d.clearRect(0,0,canvas.width,canvas.height);
+  ctx2d.save();
+  ctx2d.translate(camX, camY);
+  const sz = HH * 0.52;
 
-  const size = HEX_H * 0.52;
+  // Terrain
+  for (const t of G.tiles) {
+    const [cx,cy] = hexCenter(t.q, t.r);
+    const pts = hexPts(cx,cy,sz);
+    ctx2d.beginPath(); ctx2d.moveTo(pts[0][0],pts[0][1]);
+    for(let i=1;i<6;i++) ctx2d.lineTo(pts[i][0],pts[i][1]);
+    ctx2d.closePath();
+    ctx2d.fillStyle = TERRAIN_COLORS[t.terrain] || '#333';
+    ctx2d.fill();
+    if (t.riverEdges) { ctx2d.strokeStyle='#3a9fd8'; ctx2d.lineWidth=2.5; }
+    else { ctx2d.strokeStyle='rgba(0,0,0,.25)'; ctx2d.lineWidth=1; }
+    ctx2d.stroke();
 
-  for (let r = 0; r < ROWS; r++) {
-    for (let c = 0; c < COLS; c++) {
-      const key = `${r},${c}`;
-      const [cx, cy] = hexCenter(r, c);
-      const pts = hexPath(cx, cy, size);
-
-      // Visibility
-      const isVisible = visible.has(key);
-      const isExplored = explored.has(key);
-
-      // Terrain color
-      const terrain = map[r][c];
-      const meta = TERRAIN_META[terrain];
-      let color = meta.color;
-
-      // Draw hex
-      ctx.beginPath();
-      ctx.moveTo(pts[0][0], pts[0][1]);
-      for (let i = 1; i < 6; i++) ctx.lineTo(pts[i][0], pts[i][1]);
-      ctx.closePath();
-
-      if (!isExplored) {
-        ctx.fillStyle = '#080e18';
-        ctx.fill();
-        continue;
-      }
-
-      ctx.fillStyle = color;
-      ctx.fill();
-
-      // River edge highlight
-      if (riverTiles.has(key)) {
-        ctx.strokeStyle = '#3a9fd8';
-        ctx.lineWidth = 2.5;
-        ctx.stroke();
-      } else {
-        ctx.strokeStyle = 'rgba(0,0,0,.25)';
-        ctx.lineWidth = 1;
-        ctx.stroke();
-      }
-
-      // Fog overlay for explored but not visible
-      if (!isVisible) {
-        ctx.fillStyle = 'rgba(8,14,24,.55)';
-        ctx.fill();
-      }
-
-      if (!isVisible) continue;
-
-      // Resource icon
-      const res = resources[key];
-      if (res) {
-        ctx.font = '14px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText(RES_ICONS[res], cx + 12, cy - 8);
-      }
-
-      // Yield dots (small colored dots at bottom of hex)
-      const f = meta.food, p = meta.prod, g = meta.gold;
-      let dots = [];
-      for (let i=0;i<f;i++) dots.push('#66bb6a');
-      for (let i=0;i<p;i++) dots.push('#ff9800');
-      for (let i=0;i<g;i++) dots.push('#f5c542');
-      const dotY = cy + size * 0.55;
-      const dotStart = cx - (dots.length - 1) * 4;
-      dots.forEach((dc, i) => {
-        ctx.beginPath();
-        ctx.arc(dotStart + i * 8, dotY, 2.5, 0, Math.PI * 2);
-        ctx.fillStyle = dc;
-        ctx.fill();
-      });
-
-      // Mountain symbol
-      if (terrain === T.MOUNTAIN) {
-        ctx.font = '20px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText('⛰️', cx, cy + 6);
-      }
-      // Woods / Rainforest tree
-      if (terrain === T.WOODS || terrain === T.RAINFOREST) {
-        ctx.font = '16px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText(terrain === T.WOODS ? '🌲' : '🌴', cx - 8, cy - 4);
-      }
-    }
+    if (t.feature===1) { ctx2d.font='12px sans-serif'; ctx2d.textAlign='center'; ctx2d.fillText('\u{1F332}',cx-6,cy-4); }
+    if (t.feature===2) { ctx2d.font='12px sans-serif'; ctx2d.textAlign='center'; ctx2d.fillText('\u{1F33F}',cx-6,cy-4); }
+    if (t.resource) { ctx2d.font='11px sans-serif'; ctx2d.textAlign='center'; ctx2d.fillText([,'\u{1F33E}','\u{1F404}','\u{1FAA8}','\u26CF\uFE0F','\u{1F48E}','\u{1F40E}','\u{1F3A8}'][t.resource]||'',cx+10,cy-6); }
+    if (t.terrain===12) { ctx2d.font='16px sans-serif'; ctx2d.textAlign='center'; ctx2d.fillText('\u26F0\uFE0F',cx,cy+5); }
   }
-
-  // Districts
-  districts.forEach(d => {
-    const [cx, cy] = hexCenter(d.r, d.c);
-    if (!visible.has(`${d.r},${d.c}`)) return;
-    ctx.font = '14px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(d.icon, cx, cy + 5);
-    ctx.font = '8px sans-serif';
-    ctx.fillStyle = '#aaa';
-    ctx.fillText(d.type, cx, cy + 16);
-  });
 
   // Selected hex highlight
-  if (selectedEntity) {
-    const [cx, cy] = hexCenter(selectedEntity.r, selectedEntity.c);
-    const pts = hexPath(cx, cy, size + 2);
-    ctx.beginPath();
-    ctx.moveTo(pts[0][0], pts[0][1]);
-    for (let i = 1; i < 6; i++) ctx.lineTo(pts[i][0], pts[i][1]);
-    ctx.closePath();
-    ctx.strokeStyle = '#f5c542';
-    ctx.lineWidth = 3;
-    ctx.stroke();
+  if (selected) {
+    const [cx,cy] = hexCenter(selected.q, selected.r);
+    const pts = hexPts(cx,cy,sz+2);
+    ctx2d.beginPath(); ctx2d.moveTo(pts[0][0],pts[0][1]);
+    for(let i=1;i<6;i++) ctx2d.lineTo(pts[i][0],pts[i][1]);
+    ctx2d.closePath(); ctx2d.strokeStyle='#f5c542'; ctx2d.lineWidth=3; ctx2d.stroke();
+  }
 
-    // Movement range highlight
-    if (selectedEntity.mpMax) {
-      const range = selectedEntity.mpMax;
-      for (let dr = -range; dr <= range; dr++)
-        for (let dc = -range; dc <= range; dc++) {
-          if (dr === 0 && dc === 0) continue;
-          const nr = selectedEntity.r + dr, nc = selectedEntity.c + dc;
-          if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) continue;
-          if (Math.abs(dr) + Math.abs(dc) > range + 1) continue;
-          const t = map[nr][nc];
-          if (t === T.OCEAN || t === T.COAST || t === T.MOUNTAIN) continue;
-          const [hx, hy] = hexCenter(nr, nc);
-          const hpts = hexPath(hx, hy, size);
-          ctx.beginPath();
-          ctx.moveTo(hpts[0][0], hpts[0][1]);
-          for (let i = 1; i < 6; i++) ctx.lineTo(hpts[i][0], hpts[i][1]);
-          ctx.closePath();
-          ctx.fillStyle = 'rgba(245,197,66,.12)';
-          ctx.fill();
-          ctx.strokeStyle = 'rgba(245,197,66,.35)';
-          ctx.lineWidth = 1.5;
-          ctx.stroke();
-        }
+  // Movement range highlight
+  if (selected && selected.type==='unit' && actionMode==='move') {
+    const range = selected.mp || 1;
+    for (let dq=-range*2;dq<=range*2;dq++) for (let dr=-range*2;dr<=range*2;dr++) {
+      const nq=selected.q+dq, nr=selected.r+dr;
+      if(nq<0||nq>=COLS||nr<0||nr>=ROWS) continue;
+      if(dq===0&&dr===0) continue;
+      const tile = getTile(nq,nr);
+      if(!tile || tile.terrain===0||tile.terrain===1||tile.terrain===12) continue;
+      const dist = hexDist(selected.q,selected.r,nq,nr);
+      if(dist>range) continue;
+      const [hx,hy]=hexCenter(nq,nr);
+      const hp=hexPts(hx,hy,sz);
+      ctx2d.beginPath(); ctx2d.moveTo(hp[0][0],hp[0][1]);
+      for(let i=1;i<6;i++) ctx2d.lineTo(hp[i][0],hp[i][1]);
+      ctx2d.closePath(); ctx2d.fillStyle='rgba(245,197,66,.12)'; ctx2d.fill();
+      ctx2d.strokeStyle='rgba(245,197,66,.35)'; ctx2d.lineWidth=1.5; ctx2d.stroke();
     }
   }
 
-  // Hovered hex highlight
+  // Attack range highlight
+  if (selected && selected.type==='unit' && (actionMode==='attack'||actionMode==='ranged')) {
+    const range = actionMode==='ranged' ? 2 : 1;
+    for (let dq=-range*2;dq<=range*2;dq++) for (let dr=-range*2;dr<=range*2;dr++) {
+      const nq=selected.q+dq, nr=selected.r+dr;
+      if(nq<0||nq>=COLS||nr<0||nr>=ROWS) continue;
+      if(dq===0&&dr===0) continue;
+      const dist = hexDist(selected.q,selected.r,nq,nr);
+      if(dist>range) continue;
+      // Check if enemy unit here
+      const enemy = 1 - G.currentPlayer;
+      const hasEnemy = G.players[enemy].units.some(u => u.hp>0 && u.q===nq && u.r===nr);
+      if (!hasEnemy) continue;
+      const [hx,hy]=hexCenter(nq,nr);
+      const hp=hexPts(hx,hy,sz);
+      ctx2d.beginPath(); ctx2d.moveTo(hp[0][0],hp[0][1]);
+      for(let i=1;i<6;i++) ctx2d.lineTo(hp[i][0],hp[i][1]);
+      ctx2d.closePath(); ctx2d.fillStyle='rgba(231,76,60,.15)'; ctx2d.fill();
+      ctx2d.strokeStyle='rgba(231,76,60,.5)'; ctx2d.lineWidth=2; ctx2d.stroke();
+    }
+  }
+
+  // Hover highlight
   if (hoveredHex) {
-    const [cx, cy] = hexCenter(hoveredHex.r, hoveredHex.c);
-    const pts = hexPath(cx, cy, size + 1);
-    ctx.beginPath();
-    ctx.moveTo(pts[0][0], pts[0][1]);
-    for (let i = 1; i < 6; i++) ctx.lineTo(pts[i][0], pts[i][1]);
-    ctx.closePath();
-    ctx.strokeStyle = 'rgba(255,255,255,.35)';
-    ctx.lineWidth = 2;
-    ctx.stroke();
+    const [cx,cy] = hexCenter(hoveredHex.q, hoveredHex.r);
+    const pts = hexPts(cx,cy,sz+1);
+    ctx2d.beginPath(); ctx2d.moveTo(pts[0][0],pts[0][1]);
+    for(let i=1;i<6;i++) ctx2d.lineTo(pts[i][0],pts[i][1]);
+    ctx2d.closePath(); ctx2d.strokeStyle='rgba(255,255,255,.3)'; ctx2d.lineWidth=2; ctx2d.stroke();
   }
 
-  // Entities
-  entities.forEach(e => {
-    if (e.r === undefined) return;
-    const key = `${e.r},${e.c}`;
-    if (!visible.has(key) && e.type !== 'city') return;
-    // Foreign stuff in fog: skip if not explored
-    if (!explored.has(key)) return;
-    // Foreign units only in visible
-    if ((e.type === 'foreign' || e.type === 'barb') && !visible.has(key)) return;
-
-    const [cx, cy] = hexCenter(e.r, e.c);
-
-    if (e.type === 'city') {
-      // City circle
-      ctx.beginPath();
-      ctx.arc(cx, cy, 16, 0, Math.PI * 2);
-      ctx.fillStyle = e.civ === 'rome' ? '#8b0000' : '#c0a030';
-      ctx.fill();
-      ctx.strokeStyle = '#fff';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      ctx.font = 'bold 10px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillStyle = '#fff';
-      ctx.fillText(e.name, cx, cy - 20);
-      ctx.font = '9px sans-serif';
-      ctx.fillText('Pop ' + (e.pop||'?'), cx, cy + 4);
-    } else {
-      // Unit badge
-      const isSelected = selectedEntity === e;
-      const bgColor = e.type === 'barb' ? '#8b4513' : e.type === 'foreign' ? '#b8860b' : '#1a5276';
-      ctx.beginPath();
-      ctx.arc(cx, cy - 2, 13, 0, Math.PI * 2);
-      ctx.fillStyle = bgColor;
-      ctx.fill();
-      if (isSelected) { ctx.strokeStyle = '#f5c542'; ctx.lineWidth = 2.5; }
-      else { ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.lineWidth = 1.5; }
-      ctx.stroke();
-      ctx.font = '14px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText(e.icon, cx, cy + 3);
-      // HP bar
-      if (e.hp > 0 && e.hpMax > 0 && e.hp < e.hpMax) {
-        const bw = 20, bh = 3;
-        ctx.fillStyle = '#333';
-        ctx.fillRect(cx - bw/2, cy + 12, bw, bh);
-        ctx.fillStyle = e.hp > 50 ? '#66bb6a' : e.hp > 25 ? '#ff9800' : '#e74c3c';
-        ctx.fillRect(cx - bw/2, cy + 12, bw * e.hp / e.hpMax, bh);
+  // Cities
+  for (let p=0;p<2;p++) {
+    for (const c of G.players[p].cities) {
+      const [cx,cy]=hexCenter(c.q,c.r);
+      ctx2d.beginPath(); ctx2d.arc(cx,cy,14,0,Math.PI*2);
+      ctx2d.fillStyle=p===0?'#2874a6':'#c0392b'; ctx2d.fill();
+      ctx2d.strokeStyle='#fff'; ctx2d.lineWidth=2; ctx2d.stroke();
+      ctx2d.font='bold 9px sans-serif'; ctx2d.textAlign='center'; ctx2d.fillStyle='#fff';
+      ctx2d.fillText(c.name,cx,cy-18);
+      ctx2d.font='8px sans-serif'; ctx2d.fillText('Pop '+c.population,cx,cy+4);
+      // Production bar under city circle
+      const prodCost = PROD_ITEM_COST[c.production] || 0;
+      if (prodCost > 0) {
+        const bw = 22, bh = 3, by = cy + 16;
+        const pct = Math.min(1, c.prodStockpile / prodCost);
+        ctx2d.fillStyle = '#333'; ctx2d.fillRect(cx-bw/2, by, bw, bh);
+        ctx2d.fillStyle = '#ff9800'; ctx2d.fillRect(cx-bw/2, by, bw*pct, bh);
       }
-      // Name label
-      ctx.font = '8px sans-serif';
-      ctx.fillStyle = '#ccc';
-      ctx.fillText(e.name, cx, cy + 22);
-    }
-  });
-
-  ctx.restore();
-  drawMinimap();
-}
-
-// ── Minimap ──
-function drawMinimap() {
-  const mc = document.getElementById('minimap-canvas');
-  const mctx = mc.getContext('2d');
-  const scale = mc.width / mapW;
-  mctx.clearRect(0, 0, mc.width, mc.height);
-  for (let r = 0; r < ROWS; r++) {
-    for (let c = 0; c < COLS; c++) {
-      const key = `${r},${c}`;
-      if (!explored.has(key)) continue;
-      const [hx, hy] = hexCenter(r, c);
-      const meta = TERRAIN_META[map[r][c]];
-      mctx.fillStyle = visible.has(key) ? meta.color : '#223';
-      mctx.fillRect(hx * scale - 2, hy * scale - 2, 4, 4);
     }
   }
-  // Units/cities
-  entities.filter(e=>e.civ==='rome'||e.cls).forEach(e=>{
-    const [hx,hy]=hexCenter(e.r,e.c);
-    mctx.fillStyle = e.type==='city'?'#ff4444':'#ffcc00';
-    mctx.fillRect(hx*scale-2,hy*scale-2, e.type==='city'?5:3, e.type==='city'?5:3);
-  });
-  // Viewport rect
-  const vp = document.getElementById('minimap-viewport');
-  const vw = canvas.width / 1 * scale;
-  const vh = canvas.height / 1 * scale;
-  vp.style.width = Math.min(vw, mc.width) + 'px';
-  vp.style.height = Math.min(vh, mc.height) + 'px';
-  vp.style.left = Math.max(0, -camX * scale) + 'px';
-  vp.style.top = Math.max(0, -camY * scale) + 'px';
+
+  // Units
+  for (let p=0;p<2;p++) {
+    for (const u of G.players[p].units) {
+      if (u.hp<=0) continue;
+      const [cx,cy]=hexCenter(u.q,u.r);
+      let ox=0, oy=0;
+      const cityHere = G.players[p].cities.some(c=>c.q===u.q&&c.r===u.r);
+      if(cityHere){ox=14;oy=-10;}
+      ctx2d.beginPath(); ctx2d.arc(cx+ox,cy+oy-2,11,0,Math.PI*2);
+      ctx2d.fillStyle=p===0?'#1a5276':'#922b21'; ctx2d.fill();
+      const isSel = selected&&selected.type==='unit'&&selected.player===p&&selected.id===u.id;
+      ctx2d.strokeStyle=isSel?'#f5c542':'rgba(255,255,255,.5)'; ctx2d.lineWidth=isSel?2.5:1.5; ctx2d.stroke();
+      ctx2d.font='12px sans-serif'; ctx2d.textAlign='center';
+      ctx2d.fillText(UNIT_ICONS[u.unitType]||'?',cx+ox,cy+oy+3);
+      if (u.hp<100 && u.hp>0) {
+        const bw=18;
+        ctx2d.fillStyle='#333'; ctx2d.fillRect(cx+ox-bw/2,cy+oy+10,bw,3);
+        ctx2d.fillStyle=u.hp>50?'#66bb6a':u.hp>25?'#ff9800':'#e74c3c';
+        ctx2d.fillRect(cx+ox-bw/2,cy+oy+10,bw*u.hp/100,3);
+      }
+      ctx2d.font='7px sans-serif'; ctx2d.fillStyle='#ccc';
+      ctx2d.fillText((UNIT_NAMES[u.unitType]||'Unit')+(p===1?' (B)':''),cx+ox,cy+oy+20);
+    }
+  }
+
+  ctx2d.restore();
 }
 
-// ── Mouse interaction ──
-let isDragging = false, dragStartX, dragStartY, dragCamX, dragCamY, dragMoved;
+// ═══════════════════════════════════════════════════════════════
+// MOUSE INTERACTION
+// ═══════════════════════════════════════════════════════════════
+let isDrag=false, dragSX,dragSY,dragCX,dragCY,dragMoved;
 const mapArea = document.getElementById('map-area');
 
 mapArea.addEventListener('mousedown', e => {
-  if (e.button !== 0) return;
-  isDragging = true; dragMoved = false;
-  dragStartX = e.clientX; dragStartY = e.clientY;
-  dragCamX = camX; dragCamY = camY;
+  if(e.button!==0) return;
+  isDrag=true; dragMoved=false;
+  dragSX=e.clientX; dragSY=e.clientY; dragCX=camX; dragCY=camY;
   mapArea.classList.add('dragging');
 });
 window.addEventListener('mousemove', e => {
-  const rect = canvas.getBoundingClientRect();
-  const mx = e.clientX - rect.left - camX;
-  const my = e.clientY - rect.top - camY;
+  const rect=canvas.getBoundingClientRect();
+  const mx=e.clientX-rect.left-camX, my=e.clientY-rect.top-camY;
+  if(isDrag){
+    const dx=e.clientX-dragSX,dy=e.clientY-dragSY;
+    if(Math.abs(dx)+Math.abs(dy)>4) dragMoved=true;
+    camX=dragCX+dx; camY=dragCY+dy; drawMap();
+    return;
+  }
+  const hex=pixelToHex(mx,my);
+  if(hex&&(hex.q!==hoveredHex?.q||hex.r!==hoveredHex?.r)){
+    hoveredHex=hex; drawMap(); showTooltip(e.clientX,e.clientY,hex);
+  } else if(!hex){ hoveredHex=null; document.getElementById('tile-tip').style.display='none'; drawMap(); }
+  else { const tt=document.getElementById('tile-tip'); tt.style.left=(e.clientX+14)+'px'; tt.style.top=(e.clientY+14)+'px'; }
+});
+window.addEventListener('mouseup', e => {
+  if(isDrag&&!dragMoved){
+    const rect=canvas.getBoundingClientRect();
+    const mx=e.clientX-rect.left-camX,my=e.clientY-rect.top-camY;
+    const hex=pixelToHex(mx,my);
+    if(hex) handleClick(hex);
+  }
+  isDrag=false; mapArea.classList.remove('dragging');
+});
+mapArea.addEventListener('wheel', e => {
+  camX -= e.deltaX; camY -= e.deltaY; drawMap(); e.preventDefault();
+}, {passive:false});
 
-  if (isDragging) {
-    const dx = e.clientX - dragStartX, dy = e.clientY - dragStartY;
-    if (Math.abs(dx) + Math.abs(dy) > 4) dragMoved = true;
-    camX = dragCamX + dx;
-    camY = dragCamY + dy;
-    drawMap();
+function showTooltip(mx,my,hex) {
+  const tt=document.getElementById('tile-tip');
+  const t=getTile(hex.q,hex.r);
+  if(!t){tt.style.display='none';return;}
+  let html=`<b>${TERRAIN_NAMES[t.terrain]||'?'}</b> (${hex.q},${hex.r})`;
+  if(t.feature) html+=` \u2014 ${FEATURE_NAMES[t.feature]}`;
+  if(t.resource) html+=`<br>Resource: ${RESOURCE_NAMES[t.resource]}`;
+  for(let p=0;p<2;p++){
+    for(const u of G.players[p].units){
+      if(u.hp>0&&u.q===hex.q&&u.r===hex.r) html+=`<br>${p===0?'A':'B'}: ${UNIT_NAMES[u.unitType]} HP:${u.hp} MP:${u.mp}`;
+    }
+    for(const c of G.players[p].cities){
+      if(c.q===hex.q&&c.r===hex.r) html+=`<br>${p===0?'A':'B'}: ${c.name} Pop:${c.population}`;
+    }
+  }
+  tt.innerHTML=html; tt.style.display='block';
+  tt.style.left=(mx+14)+'px'; tt.style.top=(my+14)+'px';
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CLICK / SELECTION / ACTIONS
+// ═══════════════════════════════════════════════════════════════
+function handleClick(hex) {
+  if(loading) return;
+
+  // If in action mode, execute the action
+  if(actionMode==='move' && selected && selected.type==='unit') {
+    doAction({type:'MoveUnit', unitId:selected.id, destQ:hex.q, destR:hex.r});
+    return;
+  }
+  if(actionMode==='attack' && selected && selected.type==='unit') {
+    doAction({type:'AttackUnit', unitId:selected.id, targetQ:hex.q, targetR:hex.r});
+    return;
+  }
+  if(actionMode==='ranged' && selected && selected.type==='unit') {
+    doAction({type:'RangedAttack', unitId:selected.id, targetQ:hex.q, targetR:hex.r});
     return;
   }
 
-  // Hover
-  const hex = pixelToHex(mx, my);
-  if (hex && (hex.r !== hoveredHex?.r || hex.c !== hoveredHex?.c)) {
-    hoveredHex = hex;
-    drawMap();
-    showTooltip(e.clientX, e.clientY, hex);
-  } else if (!hex) {
-    hoveredHex = null;
-    document.getElementById('tile-tooltip').style.display = 'none';
-    drawMap();
-  } else {
-    // Update tooltip position
-    const tt = document.getElementById('tile-tooltip');
-    tt.style.left = (e.clientX + 14) + 'px';
-    tt.style.top = (e.clientY + 14) + 'px';
+  // Try to select entity at this hex (prefer current player, then enemy)
+  for (const p of [G.currentPlayer, 1 - G.currentPlayer]) {
+    const unit = G.players[p].units.find(u => u.hp>0 && u.q===hex.q && u.r===hex.r);
+    if (unit) {
+      selected = {...unit, type:'unit', player:p};
+      actionMode=null; setModeBanner(null);
+      updateActionBar(); renderSidebar(); drawMap();
+      return;
+    }
+    const city = G.players[p].cities.find(c => c.q===hex.q && c.r===hex.r);
+    if (city) {
+      selected = {...city, type:'city', player:p};
+      actionMode=null; setModeBanner(null);
+      updateActionBar(); renderSidebar(); drawMap();
+      return;
+    }
   }
-});
-window.addEventListener('mouseup', e => {
-  if (isDragging && !dragMoved) {
-    // Click on map
-    const rect = canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left - camX;
-    const my = e.clientY - rect.top - camY;
-    const hex = pixelToHex(mx, my);
-    if (hex) handleClick(hex);
-  }
-  isDragging = false;
-  mapArea.classList.remove('dragging');
-});
 
-function showTooltip(mx, my, hex) {
-  const tt = document.getElementById('tile-tooltip');
-  const key = `${hex.r},${hex.c}`;
-  if (!explored.has(key)) { tt.style.display = 'none'; return; }
-  const terrain = map[hex.r][hex.c];
-  const meta = TERRAIN_META[terrain];
-  const res = resources[key];
-  const ent = entities.find(e => e.r === hex.r && e.c === hex.c);
-  const dist = districts.find(d => d.r === hex.r && d.c === hex.c);
-
-  let html = `<div class="tt-title">${meta.name}${res ? ' — ' + RES_ICONS[res] + ' ' + res.charAt(0).toUpperCase() + res.slice(1) : ''}</div>`;
-  if (dist) html += `<div style="font-size:.72rem;color:#ba68c8;">District: ${dist.type}</div>`;
-  if (ent) html += `<div style="font-size:.72rem;color:#4fc3f7;">${ent.name}${ent.hp?' (HP: '+ent.hp+'/'+ent.hpMax+')':''}</div>`;
-  html += `<div class="tt-yields">`;
-  if (meta.food) html += `<span><span style="color:var(--food)">●</span>${meta.food}F</span>`;
-  if (meta.prod) html += `<span><span style="color:var(--prod)">●</span>${meta.prod}P</span>`;
-  if (meta.gold) html += `<span><span style="color:var(--gold)">●</span>${meta.gold}G</span>`;
-  html += `</div>`;
-
-  tt.innerHTML = html;
-  tt.style.display = 'block';
-  tt.style.left = (mx + 14) + 'px';
-  tt.style.top = (my + 14) + 'px';
+  // Nothing at this hex
+  selected=null; actionMode=null; setModeBanner(null);
+  updateActionBar(); renderSidebar(); drawMap();
 }
 
-function handleClick(hex) {
-  const ent = entities.find(e => e.r === hex.r && e.c === hex.c && (e.cls || e.type === 'city'));
-  if (ent) {
-    selectedEntity = ent;
-    showContext(ent);
-  } else {
-    selectedEntity = null;
-    document.getElementById('context-panel').innerHTML = '<h3>No Selection</h3><p style="font-size:.8rem;color:var(--text-dim);">Click a unit or city on the map to see available actions.</p>';
-  }
-  drawMap();
+function setModeBanner(text) {
+  const b = document.getElementById('mode-banner');
+  if(!text){ b.style.display='none'; return; }
+  b.textContent=text; b.style.display='block';
 }
 
-// ── Init ──
-setTimeout(() => { resizeCanvas(); drawMap(); }, 50);
+function cancelMode() { actionMode=null; setModeBanner(null); updateActionBar(); drawMap(); }
+function startMove()  { actionMode='move';   setModeBanner('Click destination hex to move'); updateActionBar(); drawMap(); }
+function startAttack(){ actionMode='attack'; setModeBanner('Click enemy unit to attack (melee)'); updateActionBar(); drawMap(); }
+function startRanged(){ actionMode='ranged'; setModeBanner('Click enemy unit for ranged attack'); updateActionBar(); drawMap(); }
 
-
-// ═══════════════════════════════════════════════════════════
-// CONTEXT ACTIONS (same as before)
-// ═══════════════════════════════════════════════════════════
-const contextActions = {
-  warrior:{title:'Warrior — Melee (CS 20, HP 85/100, MP 2/2)',actions:[
-    {icon:'🚶',label:'Move',p:0},{icon:'⚔️',label:'Attack',p:1},{icon:'🛡️',label:'Fortify',p:0},{icon:'🛡️',label:'Fortify Until Healed',p:0},
-    {icon:'⏸️',label:'Skip Turn',p:0},{icon:'😴',label:'Sleep',p:0},{icon:'🔄',label:'Upgrade → Swordsman',p:0},{icon:'⬆️',label:'Promote',p:0},
-    {icon:'🤝',label:'Form Corps',p:0},{icon:'🤝',label:'Escort Formation',p:0},{icon:'🔥',label:'Pillage',p:0},{icon:'⚡',label:'Condemn Heretic',p:0},
-    {icon:'🚫',label:'Alert',p:0},{icon:'❌',label:'Delete Unit',p:0}]},
-  archer:{title:'Archer — Ranged (CS 15, RS 25, Range 2, HP 100/100, MP 2/2)',actions:[
-    {icon:'🚶',label:'Move',p:0},{icon:'🏹',label:'Ranged Attack',p:1},{icon:'🛡️',label:'Fortify',p:0},{icon:'🛡️',label:'Fortify Until Healed',p:0},
-    {icon:'⏸️',label:'Skip Turn',p:0},{icon:'😴',label:'Sleep',p:0},{icon:'🔄',label:'Upgrade → Crossbowman',p:0},{icon:'⬆️',label:'Promote',p:0},
-    {icon:'🤝',label:'Form Corps',p:0},{icon:'🤝',label:'Escort Formation',p:0},{icon:'🔥',label:'Pillage',p:0},{icon:'🚫',label:'Alert',p:0},{icon:'❌',label:'Delete Unit',p:0}]},
-  settler:{title:'Settler — Civilian (MP 2/2)',actions:[
-    {icon:'🚶',label:'Move',p:0},{icon:'🏙️',label:'Found City',p:1},{icon:'😴',label:'Sleep',p:0},{icon:'⏸️',label:'Skip Turn',p:0},{icon:'❌',label:'Delete Unit',p:0}]},
-  builder:{title:'Builder — Civilian (Charges: 3, MP 2/2)',actions:[
-    {icon:'🚶',label:'Move',p:0},{icon:'🌾',label:'Build Farm',p:1},{icon:'⛏️',label:'Build Mine',p:0},{icon:'🪵',label:'Build Lumber Mill',p:0},
-    {icon:'🎣',label:'Build Fishing Boats',p:0},{icon:'🐄',label:'Build Pasture',p:0},{icon:'🌴',label:'Build Plantation',p:0},{icon:'⛺',label:'Build Camp',p:0},
-    {icon:'🪨',label:'Build Quarry',p:0},{icon:'🪓',label:'Harvest Resource',p:0},{icon:'🌳',label:'Remove Woods',p:0},{icon:'🌿',label:'Remove Rainforest',p:0},
-    {icon:'💧',label:'Remove Marsh',p:0},{icon:'🔧',label:'Repair Improvement',p:0},{icon:'😴',label:'Sleep',p:0},{icon:'⏸️',label:'Skip Turn',p:0},{icon:'❌',label:'Delete Unit',p:0}]},
-  scout:{title:'Scout — Recon (CS 10, MP 3/3)',actions:[
-    {icon:'🚶',label:'Move',p:0},{icon:'⚔️',label:'Attack',p:1},{icon:'🛡️',label:'Fortify',p:0},{icon:'⏸️',label:'Skip Turn',p:0},
-    {icon:'😴',label:'Sleep',p:0},{icon:'⬆️',label:'Promote',p:0},{icon:'🔄',label:'Upgrade → Skirmisher',p:0},{icon:'🚫',label:'Alert',p:0},{icon:'❌',label:'Delete Unit',p:0}]},
-  trader:{title:'Trader — Civilian (MP 1/1)',actions:[
-    {icon:'🚶',label:'Move',p:0},{icon:'📦',label:'Establish Trade Route',p:1},{icon:'😴',label:'Sleep',p:0},{icon:'⏸️',label:'Skip Turn',p:0},{icon:'❌',label:'Delete Unit',p:0}]},
-  missionary:{title:'Missionary — Religious (RS 100, Charges: 3, MP 4/4)',actions:[
-    {icon:'🚶',label:'Move',p:0},{icon:'✝️',label:'Spread Religion',p:1},{icon:'😴',label:'Sleep',p:0},{icon:'⏸️',label:'Skip Turn',p:0},{icon:'❌',label:'Delete Unit',p:0}]},
-  apostle:{title:'Apostle — Religious (RS 110, Charges: 3, MP 4/4)',actions:[
-    {icon:'🚶',label:'Move',p:0},{icon:'✝️',label:'Spread Religion',p:1},{icon:'⚡',label:'Theological Combat',p:0},{icon:'📿',label:'Evangelize Belief',p:0},
-    {icon:'🔱',label:'Launch Inquisition',p:0},{icon:'😴',label:'Sleep',p:0},{icon:'⏸️',label:'Skip Turn',p:0},{icon:'❌',label:'Delete Unit',p:0}]},
-  spy:{title:'Spy — Agent Viper (Level 2, MP 1/1)',actions:[
-    {icon:'🚶',label:'Move to City',p:0},{icon:'🔍',label:'Gain Sources',p:1},{icon:'⚗️',label:'Steal Tech Boost',p:0},{icon:'💰',label:'Siphon Funds',p:0},
-    {icon:'🖼️',label:'Great Work Heist',p:0},{icon:'🔧',label:'Sabotage Production',p:0},{icon:'🚀',label:'Disrupt Rocketry',p:0},
-    {icon:'🗡️',label:'Recruit Partisans',p:0},{icon:'🛡️',label:'Counterspy',p:0},{icon:'⏸️',label:'Skip Turn',p:0}]},
-};
-const cityActions = {title:'Rome — Pop: 7 | Housing: 8 | Amenities: Happy (+1)',actions:[
-  {icon:'🏗️',label:'Build Unit',p:1},{icon:'🏛️',label:'Build Building',p:1},{icon:'📐',label:'Build District',p:1},{icon:'🗿',label:'Build Wonder',p:0},
-  {icon:'📋',label:'Run Project',p:0},{icon:'💰',label:'Purchase (Gold)',p:0},{icon:'⛪',label:'Purchase (Faith)',p:0},{icon:'👥',label:'Manage Citizens',p:0},
-  {icon:'🗺️',label:'Buy Tile',p:0},{icon:'🏰',label:'Walls & Defenses',p:0},{icon:'🔄',label:'Change Production',p:0},{icon:'📊',label:'City Details',p:0},
-  {icon:'🏙️',label:'Rename City',p:0},{icon:'🔥',label:'Raze City',p:0},{icon:'🕊️',label:'Liberate City',p:0}]};
-
-function showContext(ent) {
-  let data;
-  if (ent.type === 'city') {
-    data = {...cityActions, title: `${ent.name} — Pop: ${ent.pop} | Housing: ${ent.pop+1} | Amenities: Happy (+1)`};
-  } else {
-    data = contextActions[ent.cls];
-  }
-  if (!data) { document.getElementById('context-panel').innerHTML = '<h3>'+ent.name+'</h3><p style="font-size:.8rem;color:var(--text-dim);">No actions available for this unit.</p>'; return; }
-  const panel = document.getElementById('context-panel');
-  panel.innerHTML = `<h3>${data.title}</h3><div class="action-grid">${data.actions.map(a =>
-    `<button class="action-btn${a.p?' primary':''}" onclick="alert('Action: ${a.label}')"><span class="icon">${a.icon}</span> ${a.label}</button>`
-  ).join('')}</div>`;
+// Single action — does NOT auto-end the turn
+async function doAction(action) {
+  actionMode=null; setModeBanner(null);
+  await submitActions([action]);
 }
 
+async function foundCity() {
+  if(!selected||selected.unitType!==0) return;
+  const name = prompt('City name:', 'City');
+  if(!name) return;
+  await submitActions([{type:'FoundCity', settlerId:selected.id, name}]);
+}
 
-// ═══════════════════════════════════════════════════════════
-// SIDEBAR PANELS (unchanged content)
-// ═══════════════════════════════════════════════════════════
-let activePanel = null;
-document.querySelectorAll('.sb-btn[data-panel]').forEach(btn => {
-  btn.addEventListener('click', () => {
-    const p = btn.dataset.panel;
-    if (activePanel === p) { closePanel(); return; }
-    openPanel(p);
-  });
-});
-function openPanel(name) {
-  activePanel = name;
-  document.querySelectorAll('.sb-btn').forEach(b => b.classList.remove('active'));
-  document.querySelector(`.sb-btn[data-panel="${name}"]`)?.classList.add('active');
-  document.getElementById('right-panel').classList.add('open');
-  document.getElementById('rp-title').textContent = panelTitles[name] || name;
-  document.getElementById('rp-body').innerHTML = panelContent[name] || '<p>No content</p>';
+async function fortifyUnit() {
+  if(!selected) return;
+  await submitActions([{type:'FortifyUnit', unitId:selected.id}]);
+}
+
+async function skipUnit() {
+  if(!selected) return;
+  await submitActions([{type:'SkipUnit', unitId:selected.id}]);
+}
+
+async function declareWar() {
+  if (!confirm('Declare war on the other player?')) return;
+  const target = G.currentPlayer === 0 ? 1 : 0;
+  await submitActions([{type:'DeclareWar', target}]);
+}
+
+async function endTurn() {
+  await submitActions([{type:'EndTurn'}]);
+}
+
+async function submitActions(actions) {
+  if(loading) return;
+  loading=true;
+  document.getElementById('end-btn').disabled=true;
+  try {
+    const res = await fetch('/api/turn', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({player: G.currentPlayer, actions})
+    });
+    const data = await res.json();
+    if(!res.ok) { alert('Error: ' + data.error); loading=false; document.getElementById('end-btn').disabled=false; return; }
+    selected=null; actionMode=null; setModeBanner(null);
+    await refreshState();
+    // Only re-center on End Turn
+    if (actions.some(a => a.type === 'EndTurn')) centerCamera();
+  } catch(e) { alert('Error: '+e.message); }
+  loading=false;
+  document.getElementById('end-btn').disabled=false;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// RIGHT PANEL (Tech / Production)
+// ═══════════════════════════════════════════════════════════════
+function openPanel(type) {
+  const panel = document.getElementById('rpanel');
+  const title = document.getElementById('rp-title');
+  const body  = document.getElementById('rp-body');
+  panel.classList.add('open');
+
+  if(type==='tech') {
+    title.textContent='Set Research';
+    let html='';
+    for(let id=1;id<=18;id++){
+      html+=`<div class="rp-item" onclick="setResearch(${id})"><span>\u{1F52C} ${TECH_NAMES[id]}</span><span class="meta">ID ${id}</span></div>`;
+    }
+    body.innerHTML=html;
+  } else if(type==='prod') {
+    title.textContent='Set Production';
+    // IDs match contract: PROD_SETTLER=1, PROD_BUILDER=2, PROD_SCOUT=3,
+    // PROD_WARRIOR=4, PROD_SLINGER=5, PROD_ARCHER=6, buildings at 64+
+    const items = [
+      {id:1,name:'Settler',cost:80},{id:2,name:'Builder',cost:50},{id:3,name:'Scout',cost:30},
+      {id:4,name:'Warrior',cost:40},{id:5,name:'Slinger',cost:35},{id:6,name:'Archer',cost:60},
+      {id:64,name:'Monument',cost:60},{id:65,name:'Granary',cost:65},
+      {id:66,name:'Walls',cost:80},{id:67,name:'Library',cost:90},{id:68,name:'Market',cost:100},
+      {id:69,name:'Barracks',cost:90},{id:70,name:'Water Mill',cost:80},
+    ];
+    let html='';
+    for(const it of items){
+      const cat = it.id >= 64 ? 'Building' : 'Unit';
+      html+=`<div class="rp-item" onclick="setProduction(${it.id})"><span>\u{1F3D7} ${it.name}</span><span class="meta">${cat} \u2022 \u2692${it.cost}</span></div>`;
+    }
+    body.innerHTML=html;
+  }
   setTimeout(resizeCanvas, 50);
 }
 function closePanel() {
-  activePanel = null;
-  document.querySelectorAll('.sb-btn').forEach(b => b.classList.remove('active'));
-  document.getElementById('right-panel').classList.remove('open');
+  document.getElementById('rpanel').classList.remove('open');
   setTimeout(resizeCanvas, 50);
 }
 
-const panelTitles = {research:'Research — Technology',civics:'Civics',government:'Government & Policies',diplomacy:'Diplomacy',religion:'Religion',greatpeople:'Great People',trade:'Trade Routes',espionage:'Espionage',citystates:'City-States',rankings:'Rankings & Victory'};
-const panelContent = {};
-
-panelContent.research = `<div class="panel-section"><h4>Current Research</h4><div style="padding:10px 12px;background:rgba(79,195,247,.1);border:1px solid var(--science);border-radius:var(--radius);margin-bottom:10px;"><div style="font-weight:700;">Iron Working</div><div style="font-size:.72rem;color:var(--text-dim);margin-top:2px;">5 / 12 turns — 24 / 67 ⚗️</div><div style="height:4px;background:rgba(255,255,255,.1);border-radius:2px;margin-top:6px;"><div style="height:100%;width:36%;background:var(--science);border-radius:2px;"></div></div></div><h4>Available Technologies</h4><ul class="panel-list"><li><span class="icon">⚗️</span> Mathematics <span class="meta">8 turns</span></li><li><span class="icon">⚗️</span> Construction <span class="meta">10 turns</span></li><li><span class="icon">⚗️</span> Engineering <span class="meta">12 turns</span></li><li><span class="icon">⚗️</span> Horseback Riding <span class="meta">7 turns</span></li><li><span class="icon">⚗️</span> Currency <span class="meta">9 turns</span></li><li><span class="icon">⚗️</span> Shipbuilding <span class="meta">11 turns</span></li></ul></div><div class="panel-section"><h4>Eureka Boosts</h4><ul class="panel-list"><li>🎯 Mathematics — Build 3 specialty districts <span class="meta">2/3</span></li><li>🎯 Construction — Build a Water Mill <span class="meta">0/1</span></li><li>🎯 Horseback Riding — Build a Pasture <span class="meta">1/1 ✓</span></li></ul></div>`;
-
-panelContent.civics = `<div class="panel-section"><h4>Current Civic</h4><div style="padding:10px 12px;background:rgba(186,104,200,.1);border:1px solid var(--culture);border-radius:var(--radius);margin-bottom:10px;"><div style="font-weight:700;">Recorded History</div><div style="font-size:.72rem;color:var(--text-dim);margin-top:2px;">3 / 8 turns — 16 / 60 🎭</div><div style="height:4px;background:rgba(255,255,255,.1);border-radius:2px;margin-top:6px;"><div style="height:100%;width:27%;background:var(--culture);border-radius:2px;"></div></div></div><h4>Available Civics</h4><ul class="panel-list"><li><span class="icon">🎭</span> Drama and Poetry <span class="meta">6 turns</span></li><li><span class="icon">🎭</span> Military Training <span class="meta">5 turns</span></li><li><span class="icon">🎭</span> Defensive Tactics <span class="meta">7 turns</span></li><li><span class="icon">🎭</span> Theology <span class="meta">9 turns</span></li><li><span class="icon">🎭</span> Games and Recreation <span class="meta">6 turns</span></li></ul></div><div class="panel-section"><h4>Inspiration Boosts</h4><ul class="panel-list"><li>🎯 Drama and Poetry — Build a Wonder <span class="meta">0/1</span></li><li>🎯 Military Training — Build an Encampment <span class="meta">0/1</span></li><li>🎯 Theology — Earn a Great Prophet <span class="meta">0/1</span></li></ul></div>`;
-
-panelContent.government = `<div class="panel-section"><h4>Current Government — Oligarchy</h4><div style="padding:10px 12px;background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:var(--radius);font-size:.8rem;margin-bottom:8px;"><div style="color:var(--gold);font-weight:600;">+4 Combat Strength for melee, anti-cavalry, and naval melee</div><div style="color:var(--text-dim);margin-top:4px;">Legacy: +1 Production per turn in Capital</div></div><button class="action-btn primary" onclick="alert('Change Government')">🏛️ Change Government</button></div><div class="panel-section"><h4>Policy Card Slots</h4><div class="policy-slots"><div class="policy-slot military" onclick="alert('Select Military policy')"><span class="slot-label" style="color:#e74c3c">🔴 Military:</span><span class="slot-card">Agoge (+50% Ancient/Classical melee & ranged)</span></div><div class="policy-slot economic" onclick="alert('Select Economic policy')"><span class="slot-label" style="color:#f1c40f">🟡 Economic:</span><span class="slot-card">Urban Planning (+1 Production all cities)</span></div><div class="policy-slot diplomatic" onclick="alert('Select Diplomatic policy')"><span class="slot-label" style="color:#2ecc71">🟢 Diplomatic:</span><span class="slot-card">Diplomatic League (+1 Envoy on meet)</span></div><div class="policy-slot wildcard" onclick="alert('Select Wildcard policy')"><span class="slot-label" style="color:#9b59b6">🟣 Wildcard:</span><span class="slot-card">Revelation (+2 Great Prophet pts/turn)</span></div></div></div><div class="panel-section"><h4>Available Governments</h4><ul class="panel-list"><li><span class="icon">👑</span> Autocracy <span class="meta">2M 1E 1W</span></li><li><span class="icon">🏛️</span> Classical Republic <span class="meta">1M 1E 1D 1W</span></li></ul></div>`;
-
-panelContent.diplomacy = `<div class="panel-section"><h4>Known Civilizations</h4><div id="civ-list"><div class="civ-card" onclick="toggleDiploActions(this)"><div class="civ-avatar" style="background:#2c3e50;">🇪🇬</div><div class="civ-info"><div class="name">Egypt</div><div class="leader">Cleopatra — Friendly</div></div></div><div class="diplo-actions" style="display:none;"><button class="action-btn">📨 Send Delegation</button><button class="action-btn">🤝 Declare Friendship</button><button class="action-btn">🏛️ Establish Embassy</button><button class="action-btn">🔓 Open Borders</button><button class="action-btn">💰 Propose Trade Deal</button><button class="action-btn">⚔️ Surprise War</button><button class="action-btn">⚔️ Formal War</button><button class="action-btn">👎 Denounce</button><button class="action-btn">📜 Alliance</button><button class="action-btn">🗡️ Joint War</button></div><div class="civ-card" onclick="toggleDiploActions(this)"><div class="civ-avatar" style="background:#1a5276;">🇩🇪</div><div class="civ-info"><div class="name">Germany</div><div class="leader">Frederick — Unfriendly</div></div></div><div class="diplo-actions" style="display:none;"><button class="action-btn">📨 Send Delegation</button><button class="action-btn">🔓 Open Borders</button><button class="action-btn">💰 Trade Deal</button><button class="action-btn">⚔️ Surprise War</button><button class="action-btn">⚔️ Formal War</button><button class="action-btn">⚔️ Holy War</button><button class="action-btn">⚔️ Liberation War</button><button class="action-btn">⚔️ Protectorate War</button><button class="action-btn">⚔️ Colonial War</button><button class="action-btn">👎 Denounce</button><button class="action-btn">🕊️ Make Peace</button></div><div class="civ-card" onclick="toggleDiploActions(this)"><div class="civ-avatar" style="background:#6c3483;">🇬🇷</div><div class="civ-info"><div class="name">Greece</div><div class="leader">Pericles — Neutral</div></div></div><div class="diplo-actions" style="display:none;"><button class="action-btn">📨 Send Delegation</button><button class="action-btn">🤝 Declare Friendship</button><button class="action-btn">🏛️ Embassy</button><button class="action-btn">🔓 Open Borders</button><button class="action-btn">💰 Trade Deal</button><button class="action-btn">⚔️ Surprise War</button><button class="action-btn">⚔️ Formal War</button><button class="action-btn">👎 Denounce</button></div></div></div><div class="panel-section"><h4>Active Agreements</h4><ul class="panel-list"><li>🔓 Open Borders with Egypt <span class="meta">18 turns left</span></li><li>📜 Alliance with Egypt <span class="meta">22 turns left</span></li></ul></div>`;
-
-panelContent.religion = `<div class="panel-section"><h4>Your Religion — Catholicism</h4><div style="padding:10px 12px;background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:var(--radius);font-size:.8rem;margin-bottom:8px;"><div>🕊️ <strong>Pantheon:</strong> God of the Forge (+25% military Production)</div><div>🏛️ <strong>Founder:</strong> Tithe (+1 Gold per 4 followers)</div><div>🙏 <strong>Follower:</strong> Choral Music (Shrines/Temples give Culture = Faith)</div><div>📿 <strong>Enhancer:</strong> <em>— Not yet selected —</em></div><div>🏗️ <strong>Worship:</strong> <em>— Not yet selected —</em></div></div></div><div class="panel-section"><h4>Religious Actions</h4><div class="action-grid"><button class="action-btn" onclick="alert('Evangelize Belief')">📿 Evangelize Belief</button><button class="action-btn" onclick="alert('Launch Inquisition')">⚡ Launch Inquisition</button><button class="action-btn" onclick="alert('Purchase Missionary')">✝️ Buy Missionary</button><button class="action-btn" onclick="alert('Purchase Apostle')">🙏 Buy Apostle</button><button class="action-btn" onclick="alert('Purchase Inquisitor')">🔱 Buy Inquisitor</button><button class="action-btn" onclick="alert('Purchase Guru')">💚 Buy Guru</button></div></div><div class="panel-section"><h4>Religious Spread</h4><ul class="panel-list"><li>🏙️ Rome — 8/10 followers <span class="meta">Majority ✓</span></li><li>🏙️ Antium — 5/7 followers <span class="meta">Majority ✓</span></li><li>🏙️ Cumae — 2/5 followers <span class="meta">Minority</span></li></ul></div>`;
-
-panelContent.greatpeople = `<div class="panel-section"><h4>Available to Recruit</h4><ul class="panel-list"><li><span class="icon">🔬</span><div><div style="font-weight:600;">Hypatia</div><div style="font-size:.7rem;color:var(--text-dim);">Great Scientist — Libraries +1 Science</div></div><span class="meta">60/120 GPP</span></li><li><span class="icon">⚙️</span><div><div style="font-weight:600;">Isidore of Miletus</div><div style="font-size:.7rem;color:var(--text-dim);">Great Engineer — +215 Production toward Wonder</div></div><span class="meta">20/80 GPP</span></li><li><span class="icon">⚔️</span><div><div style="font-weight:600;">Sun Tzu</div><div style="font-size:.7rem;color:var(--text-dim);">Great General — +5 CS and +1 MP in 2 tiles</div></div><span class="meta">45/60 GPP</span></li></ul></div><div class="panel-section"><h4>Actions</h4><div class="action-grid"><button class="action-btn" onclick="alert('Recruit')">⭐ Recruit</button><button class="action-btn" onclick="alert('Patronize Gold')">💰 Patronize (Gold)</button><button class="action-btn" onclick="alert('Patronize Faith')">⛪ Patronize (Faith)</button><button class="action-btn" onclick="alert('Pass')">⏭️ Pass</button></div></div><div class="panel-section"><h4>Great Works</h4><ul class="panel-list"><li>📖 "The Republic" — Theater Square, Rome <span class="meta">+2C +2T</span></li><li>🖼️ "Starry Night" — Theater Square, Antium <span class="meta">+3C +3T</span></li></ul></div>`;
-
-panelContent.trade = `<div class="panel-section"><h4>Active Trade Routes (2 / 3)</h4><ul class="panel-list"><li><span class="icon">📦</span><div><div style="font-weight:600;">Rome → Thebes (Egypt)</div><div style="font-size:.7rem;color:var(--text-dim);">+3 Gold, +1 Science, +1 Culture</div></div><span class="meta">8 turns</span></li><li><span class="icon">📦</span><div><div style="font-weight:600;">Rome → Antium (Domestic)</div><div style="font-size:.7rem;color:var(--text-dim);">+1 Food, +1 Production</div></div><span class="meta">4 turns</span></li></ul></div><div class="panel-section"><h4>Assign New Route</h4><ul class="panel-list"><li onclick="alert('Route to Athens')">🏙️ → Athens (Greece) <span class="meta">+4G +1S</span></li><li onclick="alert('Route to Berlin')">🏙️ → Berlin (Germany) <span class="meta">+3G +2C</span></li><li onclick="alert('Domestic to Cumae')">🏠 → Cumae (Domestic) <span class="meta">+2F +2P</span></li></ul></div>`;
-
-panelContent.espionage = `<div class="panel-section"><h4>Your Spies (1 / 2)</h4><ul class="panel-list"><li><span class="icon">🕵️</span><div><div style="font-weight:600;">Agent Viper — Level 2</div><div style="font-size:.7rem;color:var(--text-dim);">Thebes, Egypt — Gaining Sources</div></div><span class="meta">3 turns</span></li></ul></div><div class="panel-section"><h4>Available Missions</h4><ul class="panel-list"><li onclick="alert('Gain Sources')">🔍 Gain Sources <span class="meta">+1 Visibility</span></li><li onclick="alert('Steal Tech')">⚗️ Steal Tech Boost <span class="meta">Campus</span></li><li onclick="alert('Siphon Funds')">💰 Siphon Funds <span class="meta">Commercial Hub</span></li><li onclick="alert('Great Work Heist')">🖼️ Great Work Heist <span class="meta">Theater Sq.</span></li><li onclick="alert('Sabotage')">🔧 Sabotage Production <span class="meta">Ind. Zone</span></li><li onclick="alert('Disrupt')">🚀 Disrupt Rocketry <span class="meta">Spaceport</span></li><li onclick="alert('Partisans')">🗡️ Recruit Partisans <span class="meta">Neighborhood</span></li><li onclick="alert('Counterspy')">🛡️ Counterspy <span class="meta">Defend</span></li></ul></div>`;
-
-panelContent.citystates = `<div class="panel-section"><h4>Known City-States</h4><ul class="panel-list"><li><span class="icon" style="color:var(--science);">🔵</span><div><div style="font-weight:600;">Geneva (Scientific)</div><div style="font-size:.7rem;color:var(--text-dim);">Your Envoys: 3 — Suzerain ✓</div></div><span class="meta">+15% Sci</span></li><li><span class="icon" style="color:#e74c3c;">🔴</span><div><div style="font-weight:600;">Kabul (Militaristic)</div><div style="font-size:.7rem;color:var(--text-dim);">Your Envoys: 1</div></div><span class="meta">+50% XP</span></li><li><span class="icon" style="color:#f1c40f;">🟡</span><div><div style="font-weight:600;">Zanzibar (Trade)</div><div style="font-size:.7rem;color:var(--text-dim);">Your Envoys: 0</div></div><span class="meta">—</span></li></ul></div><div class="panel-section"><h4>Actions</h4><div class="action-grid"><button class="action-btn" onclick="alert('Send Envoy')">📤 Send Envoy (2)</button><button class="action-btn" onclick="alert('Levy Military')">⚔️ Levy Military</button><button class="action-btn" onclick="alert('View Quests')">📋 View Quests</button><button class="action-btn" onclick="alert('Declare War')">🗡️ Declare War</button></div></div>`;
-
-panelContent.rankings = `<div class="panel-section"><h4>Victory Progress</h4><ul class="panel-list"><li>🔬 <strong>Science</strong> <span class="meta">0/5 projects</span></li><li>🎭 <strong>Culture</strong> <span class="meta">12% Tourism</span></li><li>⚔️ <strong>Domination</strong> <span class="meta">1/4 capitals</span></li><li>⛪ <strong>Religious</strong> <span class="meta">1/4 civs</span></li><li>📊 <strong>Score</strong> <span class="meta">285</span></li></ul></div><div class="panel-section"><h4>Rankings</h4><ul class="panel-list"><li>🥇 Rome (You) <span class="meta">285</span></li><li>🥈 Egypt <span class="meta">260</span></li><li>🥉 Greece <span class="meta">240</span></li><li>4. Germany <span class="meta">215</span></li></ul></div>`;
-
-function toggleDiploActions(el) {
-  const a = el.nextElementSibling;
-  if (a?.classList.contains('diplo-actions')) a.style.display = a.style.display === 'none' ? 'flex' : 'none';
+async function setResearch(techId) {
+  closePanel();
+  await submitActions([{type:'SetResearch', techId}]);
 }
 
-// ── End Turn ──
-let currentTurn = 42;
-function endTurn() {
-  currentTurn++;
-  document.querySelector('#turn-info .turn').textContent = `Turn ${currentTurn}`;
-  document.querySelector('#end-turn-btn .sub').textContent = `Turn ${currentTurn} → ${currentTurn + 1}`;
-  selectedEntity = null;
-  document.getElementById('context-panel').innerHTML = '<h3>No Selection</h3><p style="font-size:.8rem;color:var(--text-dim);">Click a unit or city on the map to see available actions.</p>';
-  document.getElementById('notifications').innerHTML = `<div class="notif">🔄 Turn ${currentTurn} — All units refreshed</div><div class="notif">🏗️ Rome completed Granary — choose next production</div>`;
-  drawMap();
+async function setProduction(itemId) {
+  if(!selected || selected.type!=='city') {
+    const cp = G.currentPlayer;
+    const city = G.players[cp].cities[0];
+    if(!city){ alert('No city to set production'); closePanel(); return; }
+    closePanel();
+    await submitActions([{type:'SetProduction', cityId:city.id, itemId}]);
+  } else {
+    closePanel();
+    await submitActions([{type:'SetProduction', cityId:selected.id, itemId}]);
+  }
 }
+
+// ═══════════════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════════════
+setTimeout(resizeCanvas, 50);
 </script>
 </body>
 </html>

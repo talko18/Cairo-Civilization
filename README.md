@@ -49,9 +49,28 @@ cairo_civ/
 │   ├── phase2_zk_privacy/             # ZK transition design (future)
 │   ├── phase3_expansion/              # Unit fog of war, barbarians, etc.
 │   └── future/                        # Religion, espionage, great people
-├── base_game_mechanics/               # Civ VI rules reference
-├── game_mechanics/                    # Adapted mechanics reference
-└── ui/                                # Browser client prototype
+├── src/                              # Cairo source modules
+│   ├── lib.cairo                     # Module declarations
+│   ├── types.cairo                   # Shared types & StorePacking
+│   ├── constants.cairo               # Game balance constants
+│   ├── hex.cairo                     # Hex math (distance, neighbors, LOS)
+│   ├── map_gen.cairo                 # Procedural map generation
+│   ├── movement.cairo                # Unit movement validation
+│   ├── combat.cairo                  # Damage calculation & resolution
+│   ├── city.cairo                    # City yields, growth, production
+│   ├── tech.cairo                    # Tech tree & research
+│   ├── economy.cairo                 # Gold accounting
+│   ├── turn.cairo                    # End-of-turn processing
+│   ├── victory.cairo                 # Victory conditions
+│   └── contract.cairo                # StarkNet contract (only stateful module)
+├── tests/                            # 402 automated tests
+├── ui/                               # Browser game client
+│   ├── index.html                    # Game UI (hex map, actions, panels)
+│   ├── server.js                     # Express + starknet.js backend
+│   └── package.json                  # Node.js dependencies
+├── docs/                             # Developer documentation
+├── base_game_mechanics/              # Civ VI rules reference
+└── game_mechanics/                   # Adapted mechanics reference
 ```
 
 ## Key Design Decisions
@@ -69,6 +88,82 @@ cairo_civ/
 | Science tracking | Half-points (u16) | Preserves 0.5 science/citizen precision |
 | Turns | Sequential alternation | Eliminates conflict resolution |
 | Code reuse | Phase 1 Cairo = Phase 2 ZK circuit | No rewrite on ZK transition |
+
+## Running the UI
+
+The project includes a browser-based game UI that connects to the actual deployed contract on a local StarkNet devnet.
+
+### Prerequisites
+
+| Tool | Version | Install |
+|------|---------|---------|
+| [Scarb](https://docs.swmansion.com/scarb/) | 2.15.1 | `curl --proto '=https' --tlsv1.2 -sSf https://docs.swmansion.com/scarb/install.sh \| sh` |
+| [Starknet Foundry](https://foundry-rs.github.io/starknet-foundry/) | 0.56.0 | `curl -L https://raw.githubusercontent.com/foundry-rs/starknet-foundry/master/scripts/install.sh \| sh && snfoundryup` |
+| [Katana](https://book.dojoengine.org/toolchain/katana) | latest | `curl -L https://install.dojoengine.org \| bash && dojoup` |
+| [Node.js](https://nodejs.org/) | 18+ | `nvm install 22` or from nodejs.org |
+
+### Steps
+
+**1. Build the contract** (generates Sierra + CASM artifacts):
+
+```bash
+scarb build
+```
+
+**2. Start Katana** (local StarkNet devnet) in a dedicated terminal:
+
+```bash
+katana --dev --dev.no-fee --dev.no-account-validation
+```
+
+The `--dev` flag enables the dev RPC endpoints (account detection).
+`--dev.no-fee` disables gas fees. `--dev.no-account-validation` skips signature checks, which is needed because starknet.js V3 transaction hashing can differ from Katana's expectations.
+
+Leave this running. It will print predeployed account addresses — the UI server auto-detects them.
+
+**3. Install UI dependencies** (one-time):
+
+```bash
+cd ui
+npm install
+```
+
+**4. Start the UI server**:
+
+```bash
+npm start
+```
+
+This starts an Express server at `http://localhost:3000`.
+
+**5. Open your browser** to [http://localhost:3000](http://localhost:3000) and click **"Deploy & Start Game"**.
+
+The server will declare the contract, deploy it, create a 2-player game, and auto-join both players. The full 32x20 hex map is read from the contract and rendered in the browser.
+
+### Playing
+
+- **Pan** the map by clicking and dragging, or with the scroll wheel.
+- **Select a unit** by clicking on it. Action buttons appear at the bottom.
+- **Move**: click the Move button, then click a destination hex.
+- **Found City**: select a settler, click "Found City", enter a name.
+- **Fortify / Skip**: instant action buttons on military units.
+- **Declare War**: enables attacking the other player's units.
+- **Attack**: select a military unit, click Attack, then click an adjacent enemy.
+- **Ranged Attack**: select an archer, click Ranged, then click an enemy within range.
+- **Set Research**: click the Research button in the top bar to pick a tech.
+- **Set Production**: select a city, click Set Production, choose an item.
+- **End Turn**: advances to the next player. You control both players from the same browser.
+
+Each action submits a real transaction to the contract on Katana. The game state (map, units, cities, treasury, research) is read back from the contract after every turn.
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `KATANA_URL` | `http://localhost:5050` | Katana RPC endpoint |
+| `PORT` | `3000` | UI server port |
+
+Example: `KATANA_URL=http://localhost:5050 PORT=8080 npm start`
 
 ## Tech Stack
 
