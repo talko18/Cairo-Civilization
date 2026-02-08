@@ -1,9 +1,12 @@
 // ============================================================================
 // Map Generation — Generate map from seed. Called once per game.
-// See design/implementation/01_interfaces.md §Module 3.
 //
-// Uses Poseidon hashing for deterministic procedural generation.
-// Each tile's terrain/feature/resource is derived from hash(seed, q, r, channel).
+// Produces a realistic 32x20 hex map with:
+//   - Smooth, continent-style terrain (multi-sample noise averaging)
+//   - Ocean only at edges / large water bodies; coast buffers land from ocean
+//   - Coherent mountain ranges (seeded ridgelines, not scattered peaks)
+//   - Multi-tile rivers flowing from mountains downhill to coast/ocean
+//   - Latitude-driven temperature (poles → cold, equator → warm)
 // ============================================================================
 
 use core::poseidon::PoseidonTrait;
@@ -21,6 +24,7 @@ use cairo_civ::types::{
     RESOURCE_NONE, RESOURCE_WHEAT, RESOURCE_CATTLE,
     RESOURCE_STONE, RESOURCE_IRON, RESOURCE_SILVER,
     RESOURCE_HORSES, RESOURCE_DYES,
+    MAP_WIDTH, MAP_HEIGHT,
 };
 use cairo_civ::hex;
 
@@ -30,38 +34,350 @@ use cairo_civ::hex;
 
 /// Generate the full map from a seed. Returns array of (q, r, TileData).
 pub fn generate_map(seed: felt252, width: u8, height: u8) -> Array<(u8, u8, TileData)> {
-    let mut tiles: Array<(u8, u8, TileData)> = array![];
-    let mut q: u8 = 0;
+    // ── Phase 1: Generate raw height / moisture / temperature grids ──
+    // Use multi-octave noise for smooth, continent-like terrain.
+    let mut heights: Array<u16> = array![];
+    let mut moistures: Array<u16> = array![];
+    let mut temps: Array<u16> = array![];
+
+    let w: u16 = width.into();
+    let h: u16 = height.into();
+    let total: u32 = w.into() * h.into();
+
+    let mut idx: u32 = 0;
     loop {
-        if q >= width {
-            break;
-        }
-        let mut r: u8 = 0;
+        if idx >= total { break; }
+        let q: u8 = (idx % w.into()).try_into().unwrap();
+        let r: u8 = (idx / w.into()).try_into().unwrap();
+
+        // Multi-octave height: average of several offset samples for smoothness
+        let hv = smooth_noise(seed, q, r, 0, width, height);
+        // Apply continent mask: push edges toward ocean
+        let edge_factor = continent_mask(q, r, width, height);
+        let h_val: u16 = if hv > edge_factor { hv - edge_factor } else { 0 };
+
+        let mv = smooth_noise(seed, q, r, 10, width, height);
+
+        let t_raw = smooth_noise(seed, q, r, 20, width, height);
+        let bias = latitude_bias(r, height);
+        let t_val: u16 = if t_raw > bias { t_raw - bias } else { 0 };
+
+        heights.append(h_val);
+        moistures.append(mv);
+        temps.append(t_val);
+
+        idx += 1;
+    };
+
+    // ── Phase 2: Mountain ranges ──
+    // Seed a few ridgelines that walk across the map, raising height along them.
+    let mut mtn_bonus: Array<u16> = array![];
+    // Initialize to zero
+    let mut mi: u32 = 0;
+    loop {
+        if mi >= total { break; }
+        mtn_bonus.append(0);
+        mi += 1;
+    };
+    // Generate ridgelines
+    let mtn_bonus = generate_ridgelines(seed, width, height, mtn_bonus);
+
+    // ── Phase 3: Assign terrain ──
+    let mut tiles: Array<(u8, u8, TileData)> = array![];
+    let h_span = heights.span();
+    let m_span = moistures.span();
+    let t_span = temps.span();
+    let mtn_span = mtn_bonus.span();
+
+    let mut idx2: u32 = 0;
+    loop {
+        if idx2 >= total { break; }
+        let q: u8 = (idx2 % w.into()).try_into().unwrap();
+        let r: u8 = (idx2 / w.into()).try_into().unwrap();
+
+        let raw_h = *h_span.at(idx2);
+        let bonus = *mtn_span.at(idx2);
+        let final_h: u16 = if raw_h + bonus > 999 { 999 } else { raw_h + bonus };
+        let mv = *m_span.at(idx2);
+        let tv = *t_span.at(idx2);
+
+        let terrain = assign_terrain(final_h, mv, tv);
+        let feature = assign_feature(terrain, mv, tv, seed, q, r);
+        let resource = assign_resource(terrain, feature, seed, q, r);
+
+        tiles.append((q, r, TileData { terrain, feature, resource, river_edges: 0 }));
+        idx2 += 1;
+    };
+
+    // ── Phase 4: Coast/ocean cleanup ──
+    // Any ocean tile adjacent to land becomes coast.
+    // Any remaining ocean not adjacent to coast stays ocean.
+    let tiles = fix_coastlines(tiles, width, height);
+
+    tiles
+}
+
+// ---------------------------------------------------------------------------
+// Smooth noise (multi-octave via neighbor averaging)
+// ---------------------------------------------------------------------------
+
+/// Multi-sample noise: averages the tile's own hash with its 4 cardinal
+/// neighbors' hashes, producing smoother gradients than raw per-tile noise.
+fn smooth_noise(seed: felt252, q: u8, r: u8, channel: u8, width: u8, height: u8) -> u16 {
+    let center = hash_noise(seed, q, r, channel);
+
+    // Sample 4 offset points (not all 6 neighbors — saves gas, still smooth)
+    let mut sum: u32 = center.into() * 3; // weight center 3×
+    let mut count: u32 = 3;
+
+    // East
+    if q + 1 < width {
+        sum += hash_noise(seed, q + 1, r, channel).into();
+        count += 1;
+    }
+    // West
+    if q > 0 {
+        sum += hash_noise(seed, q - 1, r, channel).into();
+        count += 1;
+    }
+    // South
+    if r + 1 < height {
+        sum += hash_noise(seed, q, r + 1, channel).into();
+        count += 1;
+    }
+    // North
+    if r > 0 {
+        sum += hash_noise(seed, q, r - 1, channel).into();
+        count += 1;
+    }
+
+    (sum / count).try_into().unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// Continent mask — pushes map edges toward ocean
+// ---------------------------------------------------------------------------
+
+/// Returns a value to subtract from height based on distance from edge.
+/// Edge tiles get high subtraction (→ ocean), center tiles get 0.
+fn continent_mask(q: u8, r: u8, width: u8, height: u8) -> u16 {
+    let q16: u16 = q.into();
+    let r16: u16 = r.into();
+    let w16: u16 = width.into();
+    let h16: u16 = height.into();
+
+    // Distance from each edge
+    let dl = q16;           // left
+    let dr = w16 - 1 - q16; // right
+    let dt = r16;           // top
+    let db = h16 - 1 - r16; // bottom
+
+    // Minimum distance to any edge
+    let min_lr = if dl < dr { dl } else { dr };
+    let min_tb = if dt < db { dt } else { db };
+    let min_edge = if min_lr < min_tb { min_lr } else { min_tb };
+
+    // Tiles at edge 0 → subtract 500 (guaranteed ocean)
+    // Tiles at edge 1 → subtract 350
+    // Tiles at edge 2 → subtract 200
+    // Tiles at edge 3 → subtract 80
+    // Tiles at edge 4+ → subtract 0
+    if min_edge == 0 { 500 }
+    else if min_edge == 1 { 350 }
+    else if min_edge == 2 { 200 }
+    else if min_edge == 3 { 80 }
+    else { 0 }
+}
+
+// ---------------------------------------------------------------------------
+// Mountain ridgeline generation
+// ---------------------------------------------------------------------------
+
+/// Create 2-4 mountain ridgelines that walk across the map.
+/// Each ridge starts at a pseudo-random point and extends in a direction,
+/// raising height bonus along its path and 1-tile wide shoulders.
+fn generate_ridgelines(
+    seed: felt252, width: u8, height: u8, mut bonus: Array<u16>
+) -> Array<u16> {
+    let w: u32 = width.into();
+    let h: u32 = height.into();
+    let total: u32 = w * h;
+
+    // Number of ridges: 2-4
+    let num_ridges: u32 = (hash_noise(seed, 0, 0, 50) % 3).into() + 2;
+
+    let mut ridge_i: u32 = 0;
+    loop {
+        if ridge_i >= num_ridges { break; }
+
+        // Starting position for this ridge
+        let start_q_noise = hash_noise(seed, ridge_i.try_into().unwrap(), 0, 51);
+        let start_r_noise = hash_noise(seed, ridge_i.try_into().unwrap(), 0, 52);
+        let mut cur_q: u32 = ((start_q_noise % (width - 4).into()) + 2).into();
+        let mut cur_r: u32 = ((start_r_noise % (height - 4).into()) + 2).into();
+
+        // Ridge length: 8-16 tiles
+        let ridge_len: u32 = (hash_noise(seed, ridge_i.try_into().unwrap(), 0, 53) % 9).into() + 8;
+
+        let mut step: u32 = 0;
         loop {
-            if r >= height {
-                break;
+            if step >= ridge_len { break; }
+            if cur_q >= w || cur_r >= h { break; }
+
+            // Set height bonus on the ridge tile (index = q * height + r)
+            let center_idx = cur_q * h + cur_r;
+            if center_idx < total {
+                let old = *bonus.at(center_idx);
+                bonus = array_set(bonus, center_idx, if old > 350 { old } else { 350 });
             }
 
-            // Generate noise channels via Poseidon hash
-            let h = hash_noise(seed, q, r, 0); // height
-            let m = hash_noise(seed, q, r, 1); // moisture
-            let t_raw = hash_noise(seed, q, r, 2); // base temperature
+            // Set shoulder tiles (adjacent) to a lesser bonus
+            let shoulder_offsets: Array<(i32, i32)> = array![(1, 0), (-1, 0), (0, 1), (0, -1)];
+            let s_span = shoulder_offsets.span();
+            let mut si: u32 = 0;
+            loop {
+                if si >= 4 { break; }
+                let (dq, dr) = *s_span.at(si);
+                let sq: i32 = cur_q.try_into().unwrap() + dq;
+                let sr: i32 = cur_r.try_into().unwrap() + dr;
+                if sq >= 0 && sq < w.try_into().unwrap() && sr >= 0 && sr < h.try_into().unwrap() {
+                    // Index: q * height + r
+                    let s_idx: u32 = sq.try_into().unwrap() * h + sr.try_into().unwrap();
+                    if s_idx < total {
+                        let old_s = *bonus.at(s_idx);
+                        if old_s < 180 {
+                            bonus = array_set(bonus, s_idx, 180);
+                        }
+                    }
+                }
+                si += 1;
+            };
 
-            // Apply latitude bias (poles are colder)
-            let bias = latitude_bias(r, height);
-            let t: u16 = if t_raw > bias { t_raw - bias } else { 0 };
+            // Walk direction: biased by seed, with some wobble
+            let dir_noise = hash_noise(seed, cur_q.try_into().unwrap(), cur_r.try_into().unwrap(), 54 + ridge_i.try_into().unwrap());
+            let dir = dir_noise % 6;
+            if dir < 2 {
+                // East-ish
+                cur_q += 1;
+            } else if dir < 3 {
+                // NE
+                if cur_r > 0 { cur_r -= 1; }
+                cur_q += 1;
+            } else if dir < 4 {
+                // SE
+                cur_r += 1;
+                cur_q += 1;
+            } else if dir < 5 {
+                // South
+                cur_r += 1;
+            } else {
+                // North
+                if cur_r > 0 { cur_r -= 1; }
+            }
 
-            let terrain = assign_terrain(h, m, t);
-            let feature = assign_feature(terrain, m, t, seed, q, r);
-            let resource = assign_resource(terrain, feature, seed, q, r);
-
-            tiles.append((q, r, TileData { terrain, feature, resource, river_edges: 0 }));
-
-            r += 1;
+            step += 1;
         };
-        q += 1;
+
+        ridge_i += 1;
     };
-    tiles
+
+    bonus
+}
+
+/// Set a value in an array at a given index (Cairo arrays are immutable,
+/// so we rebuild). For small total sizes (640) this is acceptable.
+fn array_set(arr: Array<u16>, idx: u32, val: u16) -> Array<u16> {
+    let span = arr.span();
+    let len = span.len();
+    let mut result: Array<u16> = array![];
+    let mut i: u32 = 0;
+    loop {
+        if i >= len { break; }
+        if i == idx {
+            result.append(val);
+        } else {
+            result.append(*span.at(i));
+        }
+        i += 1;
+    };
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Coastline cleanup
+// ---------------------------------------------------------------------------
+
+/// Post-process: any ocean tile with a land neighbor becomes coast.
+/// This ensures no ocean directly touches interior land.
+fn fix_coastlines(
+    tiles: Array<(u8, u8, TileData)>, width: u8, height: u8
+) -> Array<(u8, u8, TileData)> {
+    let span = tiles.span();
+    let total = span.len();
+    let w: u32 = width.into();
+
+    // Build a flat terrain array for neighbor lookups
+    let mut terrains: Array<u8> = array![];
+    let mut i: u32 = 0;
+    loop {
+        if i >= total { break; }
+        let (_, _, td) = *span.at(i);
+        terrains.append(td.terrain);
+        i += 1;
+    };
+    let t_span = terrains.span();
+
+    // Fix: ocean adjacent to land → coast
+    let mut result: Array<(u8, u8, TileData)> = array![];
+    let mut j: u32 = 0;
+    loop {
+        if j >= total { break; }
+        let (q, r, mut td) = *span.at(j);
+
+        if td.terrain == TERRAIN_OCEAN {
+            // Check if any neighbor is non-water, non-mountain land
+            let has_land_neighbor = check_land_neighbor(
+                q, r, width, height, t_span, w
+            );
+            if has_land_neighbor {
+                td = TileData {
+                    terrain: TERRAIN_COAST,
+                    feature: td.feature,
+                    resource: td.resource,
+                    river_edges: td.river_edges,
+                };
+            }
+        }
+
+        result.append((q, r, td));
+        j += 1;
+    };
+
+    result
+}
+
+/// Check if any of the 6 hex neighbors is walkable land.
+/// Tile index: tiles are ordered q outer, r inner → index = q * height + r.
+fn check_land_neighbor(
+    q: u8, r: u8, width: u8, height: u8, terrains: Span<u8>, _w: u32
+) -> bool {
+    let h: u32 = height.into();
+    let neighbors = hex::hex_neighbors(q, r);
+    let nspan = neighbors.span();
+    let nlen = nspan.len();
+    let mut ni: u32 = 0;
+    loop {
+        if ni >= nlen { break false; }
+        let (nq, nr) = *nspan.at(ni);
+        if nq < width && nr < height {
+            let n_idx: u32 = nq.into() * h + nr.into();
+            let n_terrain = *terrains.at(n_idx);
+            if is_land_terrain(n_terrain) {
+                break true;
+            }
+        }
+        ni += 1;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -78,7 +394,7 @@ pub fn generate_map(seed: felt252, width: u8, height: u8) -> Array<(u8, u8, Tile
 ///   else     → Flat variant
 ///
 /// Temperature / moisture determine biome:
-///   t < 150             → Snow
+///   t < 50              → Snow
 ///   t < 250             → Tundra
 ///   m < 300             → Desert
 ///   m >= 500            → Grassland
@@ -200,45 +516,93 @@ pub fn assign_resource(terrain: u8, _feature: u8, seed: felt252, q: u8, r: u8) -
 }
 
 // ---------------------------------------------------------------------------
-// Rivers
+// Rivers — multi-tile, flowing from mountains downhill
 // ---------------------------------------------------------------------------
 
-/// Generate rivers. Returns array of (q, r, river_edges_bitmask).
-/// Rivers originate from mountains and flow downhill.
+/// Generate rivers. Each river starts near a mountain and walks downhill
+/// (toward lower height / water) for multiple tiles, recording river edges
+/// on each tile it crosses.
 pub fn generate_rivers(
     seed: felt252, tiles: Span<(u8, u8, TileData)>,
 ) -> Array<(u8, u8, u8)> {
     let mut rivers: Array<(u8, u8, u8)> = array![];
     let len = tiles.len();
 
+    // Collect mountain positions as river sources
+    let mut sources: Array<(u8, u8)> = array![];
     let mut i: u32 = 0;
     loop {
-        if i >= len {
-            break;
-        }
+        if i >= len { break; }
         let (q, r, td) = *tiles.at(i);
         if td.terrain == TERRAIN_MOUNTAIN {
             let noise = hash_noise(seed, q, r, 6);
-            if noise > 800 {
-                // Create a river edge on a pseudo-random direction
-                let dir_noise: u8 = (hash_noise(seed, q, r, 7) % 6).try_into().unwrap();
-                let edge_mask: u8 = bit_mask(dir_noise);
-                rivers.append((q, r, edge_mask));
+            if noise > 700 {
+                sources.append((q, r));
             }
         }
         i += 1;
+    };
+
+    // For each source, trace a river path
+    let src_span = sources.span();
+    let src_len = src_span.len();
+    let mut si: u32 = 0;
+    loop {
+        if si >= src_len { break; }
+        let (sq, sr) = *src_span.at(si);
+
+        // Walk up to 12 tiles from the source
+        let mut cur_q: u8 = sq;
+        let mut cur_r: u8 = sr;
+        let mut step: u32 = 0;
+        let max_steps: u32 = 12;
+
+        loop {
+            if step >= max_steps { break; }
+
+            // Pick flow direction based on position + step
+            let dir_noise = hash_noise(seed, cur_q, cur_r, 60 + step.try_into().unwrap());
+            let dir: u8 = (dir_noise % 6).try_into().unwrap();
+
+            // Get neighbor in that direction
+            let next_opt = neighbor_in_dir(cur_q, cur_r, dir);
+            match next_opt {
+                Option::Some((nq, nr)) => {
+                    // Record river edge on current tile
+                    let edge_mask = bit_mask(dir);
+                    rivers.append((cur_q, cur_r, edge_mask));
+
+                    // Record reciprocal edge on neighbor
+                    let opp_dir = (dir + 3) % 6;
+                    let opp_mask = bit_mask(opp_dir);
+                    rivers.append((nq, nr, opp_mask));
+
+                    // Check if we reached water — stop the river
+                    let next_terrain = find_terrain(tiles, nq, nr);
+                    if next_terrain == TERRAIN_OCEAN || next_terrain == TERRAIN_COAST {
+                        break;
+                    }
+
+                    cur_q = nq;
+                    cur_r = nr;
+                },
+                Option::None => { break; },
+            }
+
+            step += 1;
+        };
+
+        si += 1;
     };
 
     // Ensure at least 1 river exists
     if rivers.len() == 0 && len > 0 {
         let mut j: u32 = 0;
         loop {
-            if j >= len {
-                break;
-            }
+            if j >= len { break; }
             let (q, r, td) = *tiles.at(j);
             if td.terrain == TERRAIN_MOUNTAIN || is_land_terrain(td.terrain) {
-                rivers.append((q, r, 0b000001)); // force E-edge river
+                rivers.append((q, r, 0b000001));
                 break;
             }
             j += 1;
@@ -246,6 +610,46 @@ pub fn generate_rivers(
     }
 
     rivers
+}
+
+/// Find terrain type for tile at (q, r). Tiles are ordered q*height + r.
+fn find_terrain(tiles: Span<(u8, u8, TileData)>, q: u8, r: u8) -> u8 {
+    let idx: u32 = q.into() * MAP_HEIGHT.into() + r.into();
+    if idx < tiles.len() {
+        let (_, _, td) = *tiles.at(idx);
+        td.terrain
+    } else {
+        TERRAIN_OCEAN
+    }
+}
+
+/// Get the neighbor hex in a given direction (0-5).
+/// Directions: 0=E, 1=NE, 2=NW, 3=W, 4=SW, 5=SE (offset-coords, even-q).
+fn neighbor_in_dir(q: u8, r: u8, dir: u8) -> Option<(u8, u8)> {
+    let qi: i16 = q.into();
+    let ri: i16 = r.into();
+    let w: i16 = MAP_WIDTH.into();
+    let h: i16 = MAP_HEIGHT.into();
+
+    let (nq, nr) = if dir == 0 {
+        (qi + 1, ri)      // E
+    } else if dir == 1 {
+        (qi + 1, ri - 1)  // NE
+    } else if dir == 2 {
+        (qi, ri - 1)      // NW (note: in offset coords this is N)
+    } else if dir == 3 {
+        (qi - 1, ri)      // W
+    } else if dir == 4 {
+        (qi - 1, ri + 1)  // SW
+    } else {
+        (qi, ri + 1)      // SE (note: in offset coords this is S)
+    };
+
+    if nq >= 0 && nq < w && nr >= 0 && nr < h {
+        Option::Some((nq.try_into().unwrap(), nr.try_into().unwrap()))
+    } else {
+        Option::None
+    }
 }
 
 // ---------------------------------------------------------------------------

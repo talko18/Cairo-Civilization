@@ -13,6 +13,7 @@ pub trait ICairoCiv<TContractState> {
     fn join_game(ref self: TContractState, game_id: u64) -> u8;
     fn start_game(ref self: TContractState, game_id: u64);
     fn submit_turn(ref self: TContractState, game_id: u64, actions: Array<Action>);
+    fn submit_actions(ref self: TContractState, game_id: u64, actions: Array<Action>);
     fn forfeit(ref self: TContractState, game_id: u64);
     fn claim_timeout_victory(ref self: TContractState, game_id: u64);
     fn get_game_status(self: @TContractState, game_id: u64) -> u8;
@@ -203,6 +204,50 @@ mod CairoCiv {
                         self.game_current_turn.write(game_id, new_t);
                         self.game_last_action_ts.write(game_id, ts);
                         InternalImpl::reset_movement_for(ref self, game_id, next_p);
+                        self.emit(TurnSubmitted { game_id, player_idx: cur_p, turn_number: new_t });
+                        break;
+                    },
+                    _ => InternalImpl::handle_action(ref self, game_id, cur_p, action),
+                }
+                i += 1;
+            };
+        }
+
+        /// Process actions mid-turn without ending the turn.
+        /// Used for batching predicted actions with unpredicted ones.
+        fn submit_actions(ref self: ContractState, game_id: u64, actions: Array<Action>) {
+            let status = self.game_status.read(game_id);
+            assert(status == STATUS_ACTIVE, 'Game not active');
+            let caller = get_caller_address();
+            let cur_p = self.game_current_player.read(game_id);
+            let p_addr = self.player_address.read((game_id, cur_p));
+            assert(caller == p_addr, 'Not your turn');
+            // Timer check
+            let ts = get_block_timestamp();
+            let last_ts = self.game_last_action_ts.read(game_id);
+            assert(
+                !turn::check_timeout(last_ts, ts, constants::TURN_TIMEOUT_SECONDS),
+                'Turn timed out',
+            );
+            // Process actions (no end-of-turn, no player switch)
+            let span = actions.span();
+            let mut i: u32 = 0;
+            let len = span.len();
+            loop {
+                if i >= len { break; }
+                let action = *span.at(i);
+                match action {
+                    Action::EndTurn => {
+                        // EndTurn in submit_actions triggers full end-of-turn
+                        InternalImpl::process_end_of_turn(ref self, game_id, cur_p);
+                        let np = self.game_num_players.read(game_id);
+                        let next_p = turn::next_player(cur_p, np);
+                        self.game_current_player.write(game_id, next_p);
+                        let new_t = self.game_current_turn.read(game_id) + 1;
+                        self.game_current_turn.write(game_id, new_t);
+                        self.game_last_action_ts.write(game_id, ts);
+                        InternalImpl::reset_movement_for(ref self, game_id, next_p);
+                        self.game_consecutive_timeouts.write(game_id, 0);
                         self.emit(TurnSubmitted { game_id, player_idx: cur_p, turn_number: new_t });
                         break;
                     },
@@ -572,10 +617,18 @@ mod CairoCiv {
             // Validate item
             let cost = constants::production_cost(item);
             assert(cost > 0, 'Invalid production item');
-            // If building, check can_build
+            let techs = self.player_completed_techs.read((game_id, player));
+            // If unit, check required tech
+            if item >= 1 && item <= 63 {
+                let unit_type = item - 1;
+                let req = constants::unit_required_tech(unit_type);
+                if req != 0 {
+                    assert(tech::is_researched(req, techs), 'Tech not researched');
+                }
+            }
+            // If building, check can_build (includes tech + already-built checks)
             if item >= 64 && item <= 127 {
                 let bbit = item - 64;
-                let techs = self.player_completed_techs.read((game_id, player));
                 assert(city::can_build(@c, bbit, techs), 'Cannot build this');
             }
             c.current_production = item;
@@ -656,6 +709,20 @@ mod CairoCiv {
             let cost = constants::purchase_cost(item);
             assert(cost > 0, 'Invalid item');
             assert(gold >= cost, 'Not enough gold');
+            let techs = self.player_completed_techs.read((game_id, player));
+            // Tech checks
+            if item >= 1 && item <= 63 {
+                let ut = item - 1;
+                let req = constants::unit_required_tech(ut);
+                if req != 0 {
+                    assert(tech::is_researched(req, techs), 'Tech not researched');
+                }
+            }
+            if item >= 64 && item <= 127 {
+                let bbit = item - 64;
+                let c = self.cities.read((game_id, player, cid));
+                assert(city::can_build(@c, bbit, techs), 'Cannot build this');
+            }
             self.player_treasury.write((game_id, player), gold - cost);
             // Create unit or building
             if item >= 1 && item <= 63 {
@@ -697,6 +764,37 @@ mod CairoCiv {
         // ---- End of turn processing ----
         fn process_end_of_turn(ref self: ContractState, game_id: u64, player: u8) {
             let cc = self.player_city_count.read((game_id, player));
+
+            // If the player has at least one city, research must be set
+            if cc > 0 {
+                let cur_research = self.player_current_research.read((game_id, player));
+                // research 0 = none; also allow if all techs already done
+                if cur_research == 0 {
+                    let techs = self.player_completed_techs.read((game_id, player));
+                    // Check if there's any tech left to research (IDs 1..18)
+                    let mut has_available: bool = false;
+                    let mut tid: u8 = 1;
+                    loop {
+                        if tid > 18 { break; }
+                        if !tech::is_researched(tid, techs) && tech::can_research(tid, techs) {
+                            has_available = true;
+                            break;
+                        }
+                        tid += 1;
+                    };
+                    assert(!has_available, 'Must set research target');
+                }
+            }
+
+            // Every city must have a production target
+            let mut pi: u32 = 0;
+            loop {
+                if pi >= cc { break; }
+                let c = self.cities.read((game_id, player, pi));
+                assert(c.current_production != 0, 'City has no production');
+                pi += 1;
+            };
+
             let mut total_gold_income: u32 = 0;
             let mut total_half_science: u32 = 0;
             let mut military_count: u32 = 0;
@@ -724,7 +822,12 @@ mod CairoCiv {
                     let (tq, tr) = *tspan.at(ti);
                     let td = self.tiles.read((game_id, tq, tr));
                     let imp = self.tile_improvement.read((game_id, tq, tr));
-                    let y = city::compute_tile_yield(@td, imp);
+                    // City center tile gets guaranteed minimum 2 food / 1 production
+                    let y = if tq == c.q && tr == c.r {
+                        city::compute_city_center_yield(@td, imp)
+                    } else {
+                        city::compute_tile_yield(@td, imp)
+                    };
                     food += y.food.into();
                     prod += y.production.into();
                     gold += y.gold.into();
@@ -778,6 +881,9 @@ mod CairoCiv {
                     c.production_stockpile = new_stockpile;
                     if completed > 0 {
                         Self::handle_production_complete(ref self, game_id, player, ci, completed, c.q, c.r);
+                        // Re-read city to pick up building bit changes from handle_production_complete
+                        c = self.cities.read((game_id, player, ci));
+                        c.production_stockpile = new_stockpile;
                         c.current_production = 0; // reset after completion
                     }
                 } else {

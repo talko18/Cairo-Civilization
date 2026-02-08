@@ -82,6 +82,19 @@ pub fn is_civilian(unit_type: u8) -> bool {
     unit_type == 0 || unit_type == 1 // Settler, Builder
 }
 
+/// Tech required to produce a unit. 0 = no tech needed.
+pub fn unit_required_tech(unit_type: u8) -> u8 {
+    match unit_type {
+        0 => 0,   // Settler: no tech
+        1 => 0,   // Builder: no tech
+        2 => 0,   // Scout: no tech
+        3 => 0,   // Warrior: no tech
+        4 => 0,   // Slinger: no tech
+        5 => 4,   // Archer: Archery
+        _ => 0,
+    }
+}
+
 pub fn is_ranged_unit(unit_type: u8) -> bool {
     unit_type == 4 || unit_type == 5 // Slinger, Archer
 }

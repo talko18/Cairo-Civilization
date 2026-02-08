@@ -5,7 +5,7 @@
 
 use cairo_civ::types::{City, TileData, TileYield, CityFoundError,
     TERRAIN_GRASSLAND, TERRAIN_GRASSLAND_HILLS, TERRAIN_PLAINS, TERRAIN_PLAINS_HILLS,
-    TERRAIN_DESERT, TERRAIN_DESERT_HILLS, TERRAIN_MOUNTAIN, TERRAIN_OCEAN, TERRAIN_COAST,
+    TERRAIN_DESERT, TERRAIN_DESERT_HILLS, TERRAIN_TUNDRA, TERRAIN_MOUNTAIN, TERRAIN_OCEAN, TERRAIN_COAST,
     FEATURE_NONE, FEATURE_WOODS,
     RESOURCE_NONE, RESOURCE_WHEAT, RESOURCE_SILVER,
     IMPROVEMENT_NONE, IMPROVEMENT_FARM, IMPROVEMENT_MINE,
@@ -391,6 +391,73 @@ fn test_auto_assign_food_priority() {
 #[test]
 fn test_city_center_always_worked() {
     assert!(city::max_worked_tiles(1) == 1);
+}
+
+// ===========================================================================
+// 7f-center: City center tile yield guarantees
+// ===========================================================================
+
+// City center on grassland (2 food, 0 prod) → (2 food, 1 prod)
+#[test]
+fn test_city_center_yield_grassland() {
+    let tile = flat_grassland();
+    let y = city::compute_city_center_yield(@tile, IMPROVEMENT_NONE);
+    assert!(y.food == 2);
+    assert!(y.production == 1); // boosted from 0
+}
+
+// City center on plains hills (1 food, 2 prod) → (2 food, 2 prod)
+#[test]
+fn test_city_center_yield_plains_hills() {
+    let tile = make_tile(TERRAIN_PLAINS_HILLS, FEATURE_NONE, RESOURCE_NONE);
+    let y = city::compute_city_center_yield(@tile, IMPROVEMENT_NONE);
+    assert!(y.food == 2);       // boosted from 1
+    assert!(y.production == 2); // kept (already > 1)
+}
+
+// City center on desert (0 food, 0 prod) → (2 food, 1 prod)
+#[test]
+fn test_city_center_yield_desert() {
+    let tile = make_tile(TERRAIN_DESERT, FEATURE_NONE, RESOURCE_NONE);
+    let y = city::compute_city_center_yield(@tile, IMPROVEMENT_NONE);
+    assert!(y.food == 2);
+    assert!(y.production == 1);
+}
+
+// City center on tundra (1 food, 0 prod) → (2 food, 1 prod)
+#[test]
+fn test_city_center_yield_tundra() {
+    let tile = make_tile(TERRAIN_TUNDRA, FEATURE_NONE, RESOURCE_NONE);
+    let y = city::compute_city_center_yield(@tile, IMPROVEMENT_NONE);
+    assert!(y.food == 2);
+    assert!(y.production == 1);
+}
+
+// City center with resource — wheat on grassland (3 food, 0 prod) → (3 food, 1 prod)
+#[test]
+fn test_city_center_yield_with_resource() {
+    let tile = make_tile(TERRAIN_GRASSLAND, FEATURE_NONE, RESOURCE_WHEAT);
+    let y = city::compute_city_center_yield(@tile, IMPROVEMENT_NONE);
+    assert!(y.food == 3);       // kept (already > 2)
+    assert!(y.production == 1); // boosted
+}
+
+// City center on plains (1 food, 1 prod) → (2 food, 1 prod)
+#[test]
+fn test_city_center_yield_plains() {
+    let tile = make_tile(TERRAIN_PLAINS, FEATURE_NONE, RESOURCE_NONE);
+    let y = city::compute_city_center_yield(@tile, IMPROVEMENT_NONE);
+    assert!(y.food == 2);       // boosted from 1
+    assert!(y.production == 1); // kept
+}
+
+// Regular (non-center) tile unchanged — grassland still 2 food, 0 prod
+#[test]
+fn test_non_center_tile_unchanged() {
+    let tile = flat_grassland();
+    let y = city::compute_tile_yield(@tile, IMPROVEMENT_NONE);
+    assert!(y.food == 2);
+    assert!(y.production == 0); // NOT boosted
 }
 
 // ===========================================================================

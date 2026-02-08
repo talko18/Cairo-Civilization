@@ -112,6 +112,23 @@ pub fn compute_tile_yield(
     TileYield { food, production, gold }
 }
 
+/// Compute yields for the city center tile.
+/// Guarantees at least 2 food and 1 production (like Civ VI).
+/// Resources/features/improvements that push yields above the minimums are kept.
+pub fn compute_city_center_yield(
+    tile: @TileData,
+    improvement: u8,
+) -> TileYield {
+    let mut y = compute_tile_yield(tile, improvement);
+    if y.food < 2 {
+        y.food = 2;
+    }
+    if y.production < 1 {
+        y.production = 1;
+    }
+    y
+}
+
 /// Compute aggregate yields for a city: sum of tile yields + building bonuses + palace.
 pub fn compute_city_yields(
     city: @City,

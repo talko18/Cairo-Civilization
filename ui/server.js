@@ -409,6 +409,36 @@ app.post('/api/turn', async (req, res) => {
   }
 });
 
+// ---- Submit actions mid-turn (no end-of-turn) ----
+app.post('/api/actions', async (req, res) => {
+  if (!contract || !gameId) return res.status(400).json({ error: 'Game not set up yet' });
+  const { player, actions } = req.body;
+  if (player !== 0 && player !== 1) return res.status(400).json({ error: 'Invalid player' });
+  if (!Array.isArray(actions) || actions.length === 0) return res.status(400).json({ error: 'No actions' });
+
+  try {
+    const actionFelts = [];
+    for (const a of actions) {
+      actionFelts.push(...encodeAction(a).map(String));
+    }
+    const calldata = [String(gameId), String(actions.length), ...actionFelts];
+
+    const tx = await accounts[player].execute(
+      { contractAddress: contractAddr, entrypoint: 'submit_actions', calldata },
+      { resourceBounds: RESOURCE_BOUNDS }
+    );
+    await provider.waitForTransaction(tx.transaction_hash);
+
+    res.json({ ok: true, txHash: tx.transaction_hash });
+  } catch (e) {
+    console.error('Actions error:', e.baseError || e.message || e);
+    const msg = e.baseError
+      ? JSON.stringify(e.baseError)
+      : (e.message || String(e));
+    res.status(500).json({ error: msg });
+  }
+});
+
 // ---- Forfeit ----
 app.post('/api/forfeit', async (req, res) => {
   const { player } = req.body;

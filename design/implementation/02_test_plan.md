@@ -350,7 +350,7 @@ Deploy the contract and test via external function calls. These test the contrac
 | I26 | `test_action_set_production_locked` | Setting production to locked building reverts |
 | I27 | `test_action_set_research` | SetResearch updates player_current_tech |
 | I28 | `test_action_set_research_no_prereq` | Setting research without prereqs reverts |
-| I29 | `test_action_set_research_already_done` | Researching completed tech reverts |
+| ~~I29~~ | ~~`test_action_set_research_already_done`~~ | *Removed — requires multi-turn; covered by system test S21* |
 | I30 | `test_action_build_improvement` | BuildImprovement(builder_id, q, r, improvement_type) stores improvement, deducts 1 charge, consumes all movement |
 | I30b | `test_action_build_on_existing_reverts` | BuildImprovement on tile with existing improvement reverts |
 | I30c | `test_action_remove_improvement` | RemoveImprovement clears tile improvement, costs 0 charges, consumes all movement |
@@ -368,8 +368,8 @@ Deploy the contract and test via external function calls. These test the contrac
 | I37d | `test_action_attack_with_civilian_reverts` | Settler/Builder attacking reverts (combat_strength=0) |
 | I37e | `test_action_ranged_with_melee_reverts` | Warrior using RangedAttack action reverts (ranged_strength=0) |
 | I37f | `test_action_ranged_no_los_reverts` | Ranged attack with mountain blocking LOS reverts |
-| I37g | `test_action_found_city_on_water_reverts` | FoundCity on ocean tile reverts |
-| I37h | `test_action_found_city_too_close_reverts` | FoundCity within 3 hexes of existing city reverts |
+| ~~I37g~~ | ~~`test_action_found_city_on_water_reverts`~~ | *Removed — settler always starts on land; covered by system test S25* |
+| ~~I37h~~ | ~~`test_action_found_city_too_close_reverts`~~ | *Removed — requires 2 settlers; covered by system test S26* |
 | I37i | `test_action_set_production_enemy_city_reverts` | Setting production on opponent's city reverts |
 | I37j | `test_action_set_production_invalid_id_reverts` | Production ID 255 (nonexistent) reverts |
 | I37k | `test_action_set_research_invalid_tech_reverts` | Tech ID > 18 reverts |
@@ -461,6 +461,48 @@ Full game scenarios that play through multiple turns to test feature interaction
 | S18 | `test_war_declaration_required` | Attack enemy without declaring war first → reverts. Declare war, then attack → succeeds. |
 | S19 | `test_all_units_lost_still_plays` | Player loses all military units but has cities. Can still submit turns (produce, research). |
 | S20 | `test_invalid_action_mid_sequence_reverts_all` | Turn with [valid_move, invalid_move, valid_found]. Entire transaction reverts — no partial application. |
+
+### 3.2 Advanced Scenario Tests
+
+| # | Test | Description |
+|---|---|---|
+| S21 | `test_re_research_completed_tech_reverts` | Research Mining to completion over many turns. Then attempt SetResearch(1) again — must revert with 'Already researched'. |
+| S22 | `test_tech_prerequisite_chain_enforced` | Attempt to research Archery(4) before Animal Husbandry(3) — must revert. Research AH, then Archery succeeds. |
+| S23 | `test_production_requires_tech` | Attempt to set production to Archer (PROD_ARCHER=6) without Archery tech — must revert with 'Tech not researched'. |
+| S24 | `test_building_requires_tech` | Attempt to build Granary (PROD_GRANARY=65) without Pottery — must revert with 'Cannot build this'. Research Pottery, then build succeeds. |
+| S25 | `test_settler_starts_on_land` | After game setup, verify both players' settler units are on land tiles (not ocean/coast/mountain). |
+| S26 | `test_found_second_city_produces_settler` | Found first city, produce a second settler, found second city. Verify both cities exist and have distinct territories. |
+| S27 | `test_gold_accumulates_over_turns` | Found city, skip 10 turns. Verify treasury increased (capital palace gives +5 gold/turn). |
+| S28 | `test_science_accumulates_completes_tech` | Found city, research Mining (cost 25). Skip turns until completed. Verify Mining bit is set in completed_techs bitmask. |
+| S29 | `test_population_growth_increases_territory` | Found city. Skip turns until population reaches 3. Verify territory radius expanded (radius 2 = 19 tiles). |
+| S30 | `test_warrior_movement_and_position` | Move warrior to an adjacent passable tile. Verify position updated and movement deducted. |
+| S31 | `test_multi_action_turn` | In one turn: found city, set production, set research, move warrior. All succeed. Verify game state after. |
+| S32 | `test_production_completes_unit_spawns` | Found city, set production to Warrior(40 cost). Skip turns until produced. Verify unit_count increased and new unit is on city tile. |
+| S33 | `test_building_production_adds_building` | Found city, build Monument (no tech). Skip turns until complete. Verify city.buildings has Monument bit set. |
+| S34 | `test_declare_war_and_attack` | Both players found cities. Player A declares war, moves warrior adjacent to Player B's warrior, attacks. Verify damage dealt to both. |
+| S35 | `test_unit_healing_over_turns` | Damage a warrior via combat. Skip turns. Verify HP increases each turn (heal in friendly/neutral territory). |
+| S36 | `test_fortify_defense_bonus` | Fortify a warrior for 2 turns. Verify fortify_turns increments each turn. |
+| S37 | `test_upgrade_slinger_to_archer` | Produce slinger, research AH→Archery, accumulate gold, upgrade slinger to archer. Verify unit_type changed and gold deducted. |
+| S38 | `test_purchase_unit_with_gold` | Accumulate gold over turns, purchase a warrior with gold. Verify unit appears immediately and gold deducted. |
+| S39 | `test_two_players_alternate_turns` | Verify that after each submit_turn, the current_player flips. Play 6 turns and verify turn counter is at 6. |
+| S40 | `test_game_still_active_after_many_turns` | Play 50 turns (skip). Verify game status is still ACTIVE and turn counter is 50. |
+
+### 3.3 Fuzzer / Invariant Tests
+
+Property-based tests that run the same scenario with many different seeds to verify invariants always hold.
+
+| # | Test | Invariant Verified |
+|---|---|---|
+| F1 | `test_fuzz_settler_always_on_land` | For 10 different game seeds, verify both settlers start on land terrain (not ocean, coast, or mountain). |
+| F2 | `test_fuzz_starting_positions_apart` | For 10 seeds, verify the two settlers start at least 8 hexes apart. |
+| F3 | `test_fuzz_map_no_orphan_ocean` | For 5 seeds, verify no ocean tile is fully surrounded by land (coastline fix works). |
+| F4 | `test_fuzz_all_tiles_valid_terrain` | For 10 seeds, verify every tile has a valid terrain type (1-7, not 0 or >7). |
+| F5 | `test_fuzz_warrior_starts_near_settler` | For 10 seeds, verify each player's warrior starts within 2 hexes of their settler. |
+| F6 | `test_fuzz_initial_state_consistent` | For 5 seeds: both players have exactly 2 units (settler+warrior), 0 cities, 0 treasury, 0 techs. Game is ACTIVE, turn is 0, player 0 goes first. |
+| F7 | `test_fuzz_found_city_always_works_turn1` | For 10 seeds, player A founds a city on turn 1. Must always succeed (settler is on valid land). |
+| F8 | `test_fuzz_tech_bitmask_only_grows` | For 3 seeds, play 30 turns researching. Verify completed_techs bitmask never decreases (bits only get added). |
+| F9 | `test_fuzz_treasury_never_negative` | For 3 seeds, play 40 turns building units. Verify treasury is always >= 0 (units get disbanded before going negative). |
+| F10 | `test_fuzz_map_has_land_and_water` | For 10 seeds, verify the generated map has at least 10% land tiles and at least 10% water tiles. |
 
 ---
 
@@ -600,8 +642,11 @@ Phase 2: Integration tests (deploy contract, slower)
 Phase 3: System tests (multi-turn scenarios, slowest)
     scarb test --filter test_system
 
-Phase 4: Manual testing
+Phase 4: Fuzzer / invariant tests
+    scarb test --filter test_fuzz
+
+Phase 5: Manual testing
     Deploy to devnet → open UI → run MT1-MT15
 ```
 
-Total: **355 automated tests** across 3 layers (3 packing + 239 unit + 92 integration + 21 system) + **15 manual test scenarios**.
+Total: **429 automated tests** across 4 layers (3 packing + 239 unit + 89 integration + 41 system + 10 fuzzer + 47 scenario) + **15 manual test scenarios**.

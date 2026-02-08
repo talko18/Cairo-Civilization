@@ -99,18 +99,40 @@ button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);t
 .ab.cancel:hover{background:rgba(231,76,60,.25)}
 
 /* ── Right panel (tech / production) ── */
-#rpanel{width:300px;background:var(--bg2);border-left:1px solid var(--border);display:none;flex-direction:column;flex-shrink:0;overflow:hidden}
+#rpanel{width:300px;background:var(--bg2);border-left:1px solid var(--border);display:none;flex-direction:column;flex-shrink:0;overflow:hidden;transition:width .2s}
 #rpanel.open{display:flex}
+#rpanel.wide{width:640px}
 #rp-head{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border)}
 #rp-head h2{font-size:.9rem;font-weight:700;text-transform:uppercase;color:var(--gold)}
 #rp-close{width:28px;height:28px;display:flex;align-items:center;justify-content:center;
   background:rgba(255,255,255,.08);color:var(--text);font-size:1rem;border-radius:var(--rad)}
-#rp-body{flex:1;overflow-y:auto;padding:10px}
+#rp-body{flex:1;overflow:auto;padding:10px}
 .rp-item{padding:8px 10px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.06);
   border-radius:var(--rad);font-size:.8rem;cursor:pointer;margin-bottom:4px;
   display:flex;justify-content:space-between;align-items:center}
 .rp-item:hover{background:var(--panel);border-color:var(--accent)}
 .rp-item .meta{font-size:.7rem;color:var(--dim)}
+
+/* ── Tech tree (horizontal left-to-right) ── */
+.tech-tree{position:relative;min-width:604px;min-height:420px}
+.tech-node{position:absolute;width:94px;height:40px;border-radius:6px;text-align:center;font-size:.7rem;
+  border:2px solid rgba(255,255,255,.12);background:rgba(255,255,255,.03);color:var(--dim);cursor:default;
+  transition:all .15s;display:flex;flex-direction:column;justify-content:center;z-index:1;box-sizing:border-box}
+.tech-node .tn-name{display:block;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:0 3px}
+.tech-node .tn-cost{display:block;font-size:.58rem;opacity:.6;margin-top:1px}
+/* Era column labels */
+.tech-era-label{position:absolute;font-size:.55rem;text-transform:uppercase;letter-spacing:.1em;color:var(--dim);
+  writing-mode:vertical-rl;text-orientation:mixed;transform:rotate(180deg);z-index:2;opacity:.5}
+/* States */
+.tech-node.done{background:rgba(76,175,80,.12);border-color:rgba(76,175,80,.5);color:var(--text)}
+.tech-node.done .tn-name{text-decoration:line-through;opacity:.7}
+.tech-node.available{background:rgba(255,215,0,.1);border-color:var(--gold);color:#fff;font-weight:700;cursor:pointer}
+.tech-node.available:hover{background:rgba(255,215,0,.22);border-color:#ffe066;box-shadow:0 0 8px rgba(255,215,0,.25)}
+.tech-node.locked{opacity:.4}
+/* SVG connectors */
+.tech-tree svg.tree-lines{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0}
+.tree-line{stroke:rgba(255,255,255,.18);stroke-width:1.5;fill:none}
+.tree-line.done{stroke:rgba(76,175,80,.55);stroke-width:2}
 
 ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
 </style>
@@ -134,6 +156,7 @@ button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);t
   <div class="badge"><span class="dot" style="background:var(--gold)"></span><span id="gold-lbl">0</span></div>
   <div class="badge"><span class="dot" style="background:var(--sci)"></span><span id="tech-lbl">--</span></div>
   <div class="badge"><span class="dot" style="background:var(--p1)"></span><span id="diplo-lbl">Peace</span></div>
+  <div class="badge" id="queue-badge" style="display:none;background:#554;border:1px solid #aa8"><span id="queue-lbl">0 queued</span></div>
   <div id="spacer"></div>
   <button class="ab" onclick="openPanel('tech')">Research</button>
   <button class="ab" onclick="openPanel('prod')">Production</button>
@@ -180,7 +203,7 @@ let loading = false;
 let sidebarTab = 'mine';
 
 // Map rendering
-const COLS=32, ROWS=20, HW=52, HH=46;
+const COLS=32, ROWS=20, S=26, HW=2*S, HH=Math.sqrt(3)*S;
 let camX=0, camY=0;
 let hoveredHex = null;
 
@@ -464,13 +487,13 @@ function updateActionBar() {
 // HEX GEOMETRY
 // ═══════════════════════════════════════════════════════════════
 function hexCenter(q, r) {
-  const x = q * HW * 0.75 + HW / 2;
+  const x = q * 1.5 * S + S;
   const y = r * HH + HH / 2 + (q % 2 === 1 ? HH / 2 : 0);
   return [x, y];
 }
 function hexPts(cx, cy, s) {
   const p = [];
-  for (let i = 0; i < 6; i++) { const a = Math.PI/6 + i*Math.PI/3; p.push([cx+s*Math.cos(a), cy+s*Math.sin(a)]); }
+  for (let i = 0; i < 6; i++) { const a = i * Math.PI / 3; p.push([cx + s * Math.cos(a), cy + s * Math.sin(a)]); }
   return p;
 }
 function pixelToHex(px, py) {
@@ -521,7 +544,7 @@ function drawMap() {
   ctx2d.clearRect(0,0,canvas.width,canvas.height);
   ctx2d.save();
   ctx2d.translate(camX, camY);
-  const sz = HH * 0.52;
+  const sz = S;
 
   // Terrain
   for (const t of G.tiles) {
@@ -532,9 +555,22 @@ function drawMap() {
     ctx2d.closePath();
     ctx2d.fillStyle = TERRAIN_COLORS[t.terrain] || '#333';
     ctx2d.fill();
-    if (t.riverEdges) { ctx2d.strokeStyle='#3a9fd8'; ctx2d.lineWidth=2.5; }
-    else { ctx2d.strokeStyle='rgba(0,0,0,.25)'; ctx2d.lineWidth=1; }
+    ctx2d.strokeStyle='rgba(0,0,0,.25)'; ctx2d.lineWidth=1;
     ctx2d.stroke();
+
+    // Draw river edges as thick blue lines on specific hex edges
+    if (t.riverEdges) {
+      ctx2d.strokeStyle='#3a9fd8'; ctx2d.lineWidth=3; ctx2d.lineCap='round';
+      for (let edge=0; edge<6; edge++) {
+        if (t.riverEdges & (1 << edge)) {
+          ctx2d.beginPath();
+          ctx2d.moveTo(pts[edge][0], pts[edge][1]);
+          ctx2d.lineTo(pts[(edge+1)%6][0], pts[(edge+1)%6][1]);
+          ctx2d.stroke();
+        }
+      }
+      ctx2d.lineCap='butt';
+    }
 
     if (t.feature===1) { ctx2d.font='12px sans-serif'; ctx2d.textAlign='center'; ctx2d.fillText('\u{1F332}',cx-6,cy-4); }
     if (t.feature===2) { ctx2d.font='12px sans-serif'; ctx2d.textAlign='center'; ctx2d.fillText('\u{1F33F}',cx-6,cy-4); }
@@ -764,45 +800,49 @@ function startMove()  { actionMode='move';   setModeBanner('Click destination he
 function startAttack(){ actionMode='attack'; setModeBanner('Click enemy unit to attack (melee)'); updateActionBar(); drawMap(); }
 function startRanged(){ actionMode='ranged'; setModeBanner('Click enemy unit for ranged attack'); updateActionBar(); drawMap(); }
 
-// Single action — does NOT auto-end the turn
-async function doAction(action) {
-  actionMode=null; setModeBanner(null);
-  await submitActions([action]);
+// ═══════════════════════════════════════════════════════════════
+// ACTION QUEUE — predicted actions are batched with next unpredicted
+// ═══════════════════════════════════════════════════════════════
+const PREDICTED_ACTIONS = new Set([
+  'SetResearch', 'SetProduction', 'FortifyUnit', 'SkipUnit',
+  'DeclareWar', 'BuildImprovement', 'RemoveImprovement',
+  'PurchaseWithGold', 'UpgradeUnit'
+]);
+let pendingActions = [];
+
+function updateQueueBadge() {
+  const badge = document.getElementById('queue-badge');
+  const lbl = document.getElementById('queue-lbl');
+  if (pendingActions.length === 0) { badge.style.display='none'; return; }
+  badge.style.display='';
+  lbl.textContent = pendingActions.length + ' queued';
 }
 
-async function foundCity() {
-  if(!selected||selected.unitType!==0) return;
-  const name = prompt('City name:', 'City');
-  if(!name) return;
-  await submitActions([{type:'FoundCity', settlerId:selected.id, name}]);
+// Queue a predicted action — no transaction sent yet
+function queuePredicted(action) {
+  pendingActions.push(action);
+  updateQueueBadge();
 }
 
-async function fortifyUnit() {
-  if(!selected) return;
-  await submitActions([{type:'FortifyUnit', unitId:selected.id}]);
+// Flush queued predicted actions + the triggering unpredicted action
+async function flushWithAction(unpredictedAction) {
+  const batch = [...pendingActions, unpredictedAction];
+  pendingActions = [];
+  updateQueueBadge();
+  const hasEndTurn = batch.some(a => a.type === 'EndTurn');
+  await submitBatch(batch, hasEndTurn);
 }
 
-async function skipUnit() {
-  if(!selected) return;
-  await submitActions([{type:'SkipUnit', unitId:selected.id}]);
-}
-
-async function declareWar() {
-  if (!confirm('Declare war on the other player?')) return;
-  const target = G.currentPlayer === 0 ? 1 : 0;
-  await submitActions([{type:'DeclareWar', target}]);
-}
-
-async function endTurn() {
-  await submitActions([{type:'EndTurn'}]);
-}
-
-async function submitActions(actions) {
+// Send a batch to the server
+async function submitBatch(actions, isEndTurn) {
   if(loading) return;
   loading=true;
   document.getElementById('end-btn').disabled=true;
   try {
-    const res = await fetch('/api/turn', {
+    // Use /api/turn for EndTurn (triggers end-of-turn processing),
+    // /api/actions for mid-turn batches
+    const endpoint = isEndTurn ? '/api/turn' : '/api/actions';
+    const res = await fetch(endpoint, {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({player: G.currentPlayer, actions})
@@ -811,11 +851,51 @@ async function submitActions(actions) {
     if(!res.ok) { alert('Error: ' + data.error); loading=false; document.getElementById('end-btn').disabled=false; return; }
     selected=null; actionMode=null; setModeBanner(null);
     await refreshState();
-    // Only re-center on End Turn
-    if (actions.some(a => a.type === 'EndTurn')) centerCamera();
+    if (isEndTurn) centerCamera();
   } catch(e) { alert('Error: '+e.message); }
   loading=false;
   document.getElementById('end-btn').disabled=false;
+}
+
+// --- Predicted actions (queued locally, no transaction) ---
+
+function fortifyUnit() {
+  if(!selected) return;
+  queuePredicted({type:'FortifyUnit', unitId:selected.id});
+}
+
+function skipUnit() {
+  if(!selected) return;
+  queuePredicted({type:'SkipUnit', unitId:selected.id});
+}
+
+function declareWar() {
+  if (!confirm('Declare war on the other player?')) return;
+  const target = G.currentPlayer === 0 ? 1 : 0;
+  queuePredicted({type:'DeclareWar', target});
+}
+
+// --- Unpredicted actions (flush queue + send transaction) ---
+
+async function doAction(action) {
+  actionMode=null; setModeBanner(null);
+  await flushWithAction(action);
+}
+
+async function foundCity() {
+  if(!selected||selected.unitType!==0) return;
+  const name = prompt('City name:', 'City');
+  if(!name) return;
+  await flushWithAction({type:'FoundCity', settlerId:selected.id, name});
+}
+
+async function endTurn() {
+  await flushWithAction({type:'EndTurn'});
+}
+
+// Legacy alias — kept for backward compatibility
+async function submitActions(actions) {
+  await submitBatch(actions, actions.some(a => a.type === 'EndTurn'));
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -827,14 +907,126 @@ function openPanel(type) {
   const body  = document.getElementById('rp-body');
   panel.classList.add('open');
 
+  // Helper: check if a tech is researched from completedTechs bitmask
+  const cp = G.players[G.currentPlayer];
+  const techBits = BigInt(cp.completedTechs || '0');
+  function hasTech(techId) {
+    if (!techId || techId === 0) return true;
+    return (techBits & (1n << BigInt(techId - 1))) !== 0n;
+  }
+
+  // Tech requirements per unit (prod item ID -> tech ID, 0 = none)
+  const UNIT_REQ_TECH = {1:0,2:0,3:0,4:0,5:0,6:4}; // Archer needs Archery(4)
+  // Tech requirements per building (building bit -> tech ID, 0 = none)
+  const BLDG_REQ_TECH = {0:0,1:2,2:8,3:7,4:11,5:9,6:10};
+
   if(type==='tech') {
-    title.textContent='Set Research';
-    let html='';
-    for(let id=1;id<=18;id++){
-      html+=`<div class="rp-item" onclick="setResearch(${id})"><span>\u{1F52C} ${TECH_NAMES[id]}</span><span class="meta">ID ${id}</span></div>`;
+    panel.classList.add('wide');
+    title.textContent='Research Tree';
+
+    // Tech tree data: prereqs mirror Cairo tech.cairo
+    const PREREQS = {1:[],2:[],3:[],4:[3],5:[],6:[2],7:[2],8:[1],9:[1],10:[1],
+      11:[7],12:[8,10],13:[3],14:[9],15:[5],16:[11,12],17:[12],18:[4,17]};
+    const COST = {1:25,2:25,3:25,4:35,5:40,6:40,7:45,8:50,9:50,10:50,
+      11:60,12:80,13:80,14:80,15:80,16:100,17:100,18:100};
+
+    // ── Horizontal layout: each tech has [column, y-pixel] ──
+    // Columns flow left→right. Vertical positions are hand-tuned so
+    // connector lines never cross each other.
+    const NW = 94, NH = 40, COL_GAP = 124;
+    const POS = {
+      // Col 0 — Ancient (no prereqs)
+      5:  [0,   0],   // Sailing
+      2:  [0, 100],   // Pottery
+      3:  [0, 210],   // Animal Husbandry
+      1:  [0, 320],   // Mining
+      // Col 1
+      15: [1,   0],   // Celestial Nav ← Sailing
+      6:  [1,  65],   // Irrigation ← Pottery
+      7:  [1, 115],   // Writing ← Pottery
+      4:  [1, 200],   // Archery ← AH
+      13: [1, 250],   // Horseback ← AH
+      8:  [1, 290],   // Masonry ← Mining
+      10: [1, 335],   // The Wheel ← Mining
+      9:  [1, 380],   // Bronze Working ← Mining
+      // Col 2 — Classical
+      11: [2, 115],   // Currency ← Writing
+      12: [2, 312],   // Construction ← Masonry + Wheel
+      14: [2, 380],   // Iron Working ← Bronze
+      // Col 3
+      16: [3, 210],   // Mathematics ← Currency + Construction
+      17: [3, 312],   // Engineering ← Construction
+      // Col 4 — Medieval
+      18: [4, 255],   // Machinery ← Archery + Engineering
+    };
+
+    function canResearch(id) {
+      if (hasTech(id)) return false;
+      for (const p of PREREQS[id]) { if (!hasTech(p)) return false; }
+      return true;
     }
-    body.innerHTML=html;
+
+    const PAD = 10;
+    const totalW = PAD + 5 * COL_GAP - (COL_GAP - NW) + PAD;
+    const totalH = PAD + 380 + NH + PAD;
+
+    let html = `<div class="tech-tree" id="tech-tree-container" style="width:${totalW}px;height:${totalH}px">`;
+
+    // Era labels (vertical text beside each era's first column)
+    const eras = [{col:0,label:'Ancient'},{col:2,label:'Classical'},{col:4,label:'Medieval'}];
+    for (const e of eras) {
+      const ex = PAD + e.col * COL_GAP - 9;
+      html += `<div class="tech-era-label" style="left:${ex}px;top:${PAD}px">${e.label}</div>`;
+    }
+
+    // Render nodes
+    for (let id = 1; id <= 18; id++) {
+      const [col, py] = POS[id];
+      const x = PAD + col * COL_GAP;
+      const y = PAD + py;
+      const done = hasTech(id);
+      const avail = canResearch(id);
+      const cls = done ? 'done' : avail ? 'available' : 'locked';
+      const onclick = avail ? `onclick="setResearch(${id})"` : '';
+      html += `<div class="tech-node ${cls}" data-tech-id="${id}" ${onclick} style="left:${x}px;top:${y}px;width:${NW}px;height:${NH}px">`;
+      html += `<span class="tn-name">${TECH_NAMES[id]}</span>`;
+      html += `<span class="tn-cost">\u{1F52C} ${COST[id]}</span>`;
+      html += '</div>';
+    }
+    html += '</div>';
+    body.innerHTML = html;
+
+    // Draw SVG connector lines (right-edge → left-edge, horizontal beziers)
+    requestAnimationFrame(() => {
+      const container = document.getElementById('tech-tree-container');
+      if (!container) return;
+      const svg = document.createElementNS('http://www.w3.org/2000/svg','svg');
+      svg.classList.add('tree-lines');
+      svg.setAttribute('width', totalW);
+      svg.setAttribute('height', totalH);
+
+      for (let id = 1; id <= 18; id++) {
+        const [tc, ty] = POS[id];
+        for (const pid of PREREQS[id]) {
+          const [fc, fy] = POS[pid];
+          // From right-center of parent to left-center of child
+          const x1 = PAD + fc * COL_GAP + NW;
+          const y1 = PAD + fy + NH / 2;
+          const x2 = PAD + tc * COL_GAP;
+          const y2 = PAD + ty + NH / 2;
+          const mx = (x1 + x2) / 2;
+          const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+          path.setAttribute('d', `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`);
+          path.classList.add('tree-line');
+          if (hasTech(pid) && hasTech(id)) path.classList.add('done');
+          svg.appendChild(path);
+        }
+      }
+      container.insertBefore(svg, container.firstChild);
+    });
+
   } else if(type==='prod') {
+    panel.classList.remove('wide');
     title.textContent='Set Production';
     // IDs match contract: PROD_SETTLER=1, PROD_BUILDER=2, PROD_SCOUT=3,
     // PROD_WARRIOR=4, PROD_SLINGER=5, PROD_ARCHER=6, buildings at 64+
@@ -845,36 +1037,72 @@ function openPanel(type) {
       {id:66,name:'Walls',cost:80},{id:67,name:'Library',cost:90},{id:68,name:'Market',cost:100},
       {id:69,name:'Barracks',cost:90},{id:70,name:'Water Mill',cost:80},
     ];
+    // Get selected city's buildings to grey out already-built buildings
+    let cityBuildings = 0;
+    if (selected && selected.type === 'city' && selected.player === G.currentPlayer) {
+      cityBuildings = selected.buildings || 0;
+    } else if (cp.cities.length > 0) {
+      cityBuildings = cp.cities[0].buildings || 0;
+    }
     let html='';
     for(const it of items){
       const cat = it.id >= 64 ? 'Building' : 'Unit';
-      html+=`<div class="rp-item" onclick="setProduction(${it.id})"><span>\u{1F3D7} ${it.name}</span><span class="meta">${cat} \u2022 \u2692${it.cost}</span></div>`;
+      let locked = false;
+      let lockReason = '';
+      if (it.id >= 1 && it.id <= 63) {
+        // Unit: check required tech
+        const reqTech = UNIT_REQ_TECH[it.id] || 0;
+        if (reqTech && !hasTech(reqTech)) {
+          locked = true;
+          lockReason = `Requires ${TECH_NAMES[reqTech]}`;
+        }
+      } else if (it.id >= 64) {
+        // Building: check required tech + already built
+        const bbit = it.id - 64;
+        const reqTech = BLDG_REQ_TECH[bbit] || 0;
+        if (reqTech && !hasTech(reqTech)) {
+          locked = true;
+          lockReason = `Requires ${TECH_NAMES[reqTech]}`;
+        } else if (cityBuildings & (1 << bbit)) {
+          locked = true;
+          lockReason = 'Already built';
+        }
+      }
+      if (locked) {
+        html+=`<div class="rp-item" style="opacity:.4;cursor:default"><span>\u{1F512} ${it.name}</span><span class="meta" style="color:#f66">${lockReason}</span></div>`;
+      } else {
+        html+=`<div class="rp-item" onclick="setProduction(${it.id})"><span>\u{1F3D7} ${it.name}</span><span class="meta">${cat} \u2022 \u2692${it.cost}</span></div>`;
+      }
     }
     body.innerHTML=html;
   }
   setTimeout(resizeCanvas, 50);
 }
 function closePanel() {
-  document.getElementById('rpanel').classList.remove('open');
+  const p = document.getElementById('rpanel');
+  p.classList.remove('open');
+  p.classList.remove('wide');
   setTimeout(resizeCanvas, 50);
 }
 
-async function setResearch(techId) {
+// setResearch / setProduction are now predicted (queued)
+function setResearch(techId) {
   closePanel();
-  await submitActions([{type:'SetResearch', techId}]);
+  queuePredicted({type:'SetResearch', techId});
 }
 
-async function setProduction(itemId) {
+function setProduction(itemId) {
+  let cityId;
   if(!selected || selected.type!=='city') {
     const cp = G.currentPlayer;
     const city = G.players[cp].cities[0];
     if(!city){ alert('No city to set production'); closePanel(); return; }
-    closePanel();
-    await submitActions([{type:'SetProduction', cityId:city.id, itemId}]);
+    cityId = city.id;
   } else {
-    closePanel();
-    await submitActions([{type:'SetProduction', cityId:selected.id, itemId}]);
+    cityId = selected.id;
   }
+  closePanel();
+  queuePredicted({type:'SetProduction', cityId, itemId});
 }
 
 // ═══════════════════════════════════════════════════════════════

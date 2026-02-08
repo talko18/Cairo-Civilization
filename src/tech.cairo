@@ -73,7 +73,7 @@ pub fn tech_prerequisites(tech_id: u8) -> Array<u8> {
         1 => array![],          // Mining: none
         2 => array![],          // Pottery: none
         3 => array![],          // Animal Husbandry: none
-        4 => array![],          // Archery: none
+        4 => array![3],         // Archery: Animal Husbandry
         5 => array![],          // Sailing: none
         6 => array![2],         // Irrigation: Pottery
         7 => array![2],         // Writing: Pottery
