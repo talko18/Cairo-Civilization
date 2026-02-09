@@ -51,10 +51,7 @@ pub fn determine_winner(scores: Span<u32>, city_counts: Span<u32>) -> u8 {
     let mut best_cities: u32 = *city_counts.at(0);
 
     let mut i: u32 = 1;
-    loop {
-        if i >= len {
-            break;
-        }
+    while i < len {
         let s = *scores.at(i);
         let c = *city_counts.at(i);
         if s > best_score {
@@ -75,10 +72,7 @@ pub fn determine_winner(scores: Span<u32>, city_counts: Span<u32>) -> u8 {
 pub fn count_bits(mask: u64) -> u32 {
     let mut count: u32 = 0;
     let mut m = mask;
-    loop {
-        if m == 0 {
-            break;
-        }
+    while m != 0 {
         if m & 1 != 0 {
             count += 1;
         }
@@ -91,10 +85,7 @@ pub fn count_bits(mask: u64) -> u32 {
 pub fn count_bits_u32(mask: u32) -> u32 {
     let mut count: u32 = 0;
     let mut m = mask;
-    loop {
-        if m == 0 {
-            break;
-        }
+    while m != 0 {
         if m & 1 != 0 {
             count += 1;
         }

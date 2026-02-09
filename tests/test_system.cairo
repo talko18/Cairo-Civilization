@@ -66,19 +66,18 @@ fn skip_turn(d: ICairoCivDispatcher, addr: ContractAddress, player: ContractAddr
         if cur_research == 0 {
             let techs = d.get_completed_techs(game_id, pidx);
             let mut tid: u8 = 1;
-            loop {
-                if tid > 18 { break; }
+            let mut set_research = false;
+            while tid <= 18 && !set_research {
                 if !tech::is_researched(tid, techs) && tech::can_research(tid, techs) {
                     actions.append(Action::SetResearch(tid));
-                    break;
+                    set_research = true;
                 }
                 tid += 1;
             };
         }
         // Set production for any city without one
         let mut ci: u32 = 0;
-        loop {
-            if ci >= cc { break; }
+        while ci < cc {
             let c = d.get_city(game_id, pidx, ci);
             if c.current_production == 0 {
                 actions.append(Action::SetProduction((ci, PROD_WARRIOR)));
@@ -93,8 +92,7 @@ fn skip_turn(d: ICairoCivDispatcher, addr: ContractAddress, player: ContractAddr
 /// Alternate turns for N full rounds (A + B each).
 fn skip_rounds(d: ICairoCivDispatcher, addr: ContractAddress, game_id: u64, rounds: u32) {
     let mut i: u32 = 0;
-    loop {
-        if i >= rounds { break; }
+    while i < rounds {
         skip_turn(d, addr, player_a(), game_id);
         skip_turn(d, addr, player_b(), game_id);
         i += 1;
@@ -973,8 +971,7 @@ fn test_warrior_movement_and_position() {
     let mut dest_q: u8 = 0;
     let mut dest_r: u8 = 0;
     let mut i: u32 = 0;
-    loop {
-        if i >= nspan.len() { break; }
+    while i < nspan.len() && !found {
         let (nq, nr) = *nspan.at(i);
         if nq < MAP_WIDTH && nr < MAP_HEIGHT {
             let tile = d.get_tile(game_id, nq, nr);
@@ -983,7 +980,6 @@ fn test_warrior_movement_and_position() {
                 dest_q = nq;
                 dest_r = nr;
                 found = true;
-                break;
             }
         }
         i += 1;
@@ -1217,8 +1213,7 @@ fn test_upgrade_slinger_to_archer() {
     let uc = d.get_unit_count(game_id, 0);
     let mut slinger_id: u32 = 999;
     let mut si: u32 = 0;
-    loop {
-        if si >= uc { break; }
+    while si < uc {
         let u = d.get_unit(game_id, 0, si);
         if u.unit_type == UNIT_SLINGER && u.hp > 0 {
             slinger_id = si;
@@ -1398,25 +1393,21 @@ fn test_fuzz_map_no_orphan_ocean() {
     let (d, addr) = deploy();
     let gid = setup_active_game(d, addr);
     let mut q: u8 = 1;
-    loop {
-        if q >= MAP_WIDTH - 1 { break; }
+    while q < MAP_WIDTH - 1 {
         let mut r: u8 = 1;
-        loop {
-            if r >= MAP_HEIGHT - 1 { break; }
+        while r < MAP_HEIGHT - 1 {
             let tile = d.get_tile(gid, q, r);
             if tile.terrain == TERRAIN_OCEAN {
                 let neighbors = hex::hex_neighbors(q, r);
                 let nspan = neighbors.span();
                 let mut has_water_neighbor = false;
                 let mut ni: u32 = 0;
-                loop {
-                    if ni >= nspan.len() { break; }
+                while ni < nspan.len() && !has_water_neighbor {
                     let (nq, nr) = *nspan.at(ni);
                     if nq < MAP_WIDTH && nr < MAP_HEIGHT {
                         let nt = d.get_tile(gid, nq, nr);
                         if nt.terrain == TERRAIN_OCEAN || nt.terrain == TERRAIN_COAST {
                             has_water_neighbor = true;
-                            break;
                         }
                     }
                     ni += 1;
@@ -1438,11 +1429,9 @@ fn test_fuzz_all_tiles_valid_terrain() {
     let (d, addr) = deploy();
     let gid = setup_active_game(d, addr);
     let mut q: u8 = 0;
-    loop {
-        if q >= MAP_WIDTH { break; }
+    while q < MAP_WIDTH {
         let mut r: u8 = 0;
-        loop {
-            if r >= MAP_HEIGHT { break; }
+        while r < MAP_HEIGHT {
             let tile = d.get_tile(gid, q, r);
             assert!(tile.terrain <= TERRAIN_MOUNTAIN);
             r += 1;
@@ -1572,8 +1561,7 @@ fn test_fuzz_tech_bitmask_only_grows() {
 
     let mut prev_techs = d.get_completed_techs(gid, 0);
     let mut round: u32 = 0;
-    loop {
-        if round >= 20 { break; }
+    while round < 20 {
         skip_turn(d, addr, player_a(), gid);
         skip_turn(d, addr, player_b(), gid);
         let cur_techs = d.get_completed_techs(gid, 0);
@@ -1606,8 +1594,7 @@ fn test_fuzz_treasury_never_negative() {
     ]);
 
     let mut round: u32 = 0;
-    loop {
-        if round >= 30 { break; }
+    while round < 30 {
         skip_turn(d, addr, player_a(), gid);
         skip_turn(d, addr, player_b(), gid);
         let gold = d.get_treasury(gid, 0);
@@ -1627,11 +1614,9 @@ fn test_fuzz_map_has_land_and_water() {
     let mut land_count: u32 = 0;
     let mut water_count: u32 = 0;
     let mut q: u8 = 0;
-    loop {
-        if q >= MAP_WIDTH { break; }
+    while q < MAP_WIDTH {
         let mut r: u8 = 0;
-        loop {
-            if r >= MAP_HEIGHT { break; }
+        while r < MAP_HEIGHT {
             let tile = d.get_tile(gid, q, r);
             if tile.terrain == TERRAIN_OCEAN || tile.terrain == TERRAIN_COAST {
                 water_count += 1;

@@ -208,11 +208,9 @@ fn test_validate_map_good() {
 fn test_validate_map_bad_all_ocean() {
     let mut tiles: Array<(u8, u8, TileData)> = array![];
     let mut q: u8 = 0;
-    loop {
-        if q >= 32 { break; }
+    while q < 32 {
         let mut r: u8 = 0;
-        loop {
-            if r >= 20 { break; }
+        while r < 20 {
             tiles.append((q, r, TileData {
                 terrain: TERRAIN_OCEAN,
                 feature: FEATURE_NONE,

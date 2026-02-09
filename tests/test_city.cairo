@@ -48,8 +48,7 @@ fn pow2_u32(n: u32) -> u32 {
     if n == 0 { return 1; }
     let mut r: u32 = 1;
     let mut i: u32 = 0;
-    loop {
-        if i >= n { break; }
+    while i < n {
         r *= 2;
         i += 1;
     };

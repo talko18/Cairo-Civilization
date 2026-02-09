@@ -192,8 +192,8 @@ mod CairoCiv {
             let span = actions.span();
             let mut i: u32 = 0;
             let len = span.len();
-            loop {
-                if i >= len { break; }
+            let mut turn_ended = false;
+            while i < len && !turn_ended {
                 let action = *span.at(i);
                 match action {
                     Action::EndTurn => {
@@ -206,7 +206,7 @@ mod CairoCiv {
                         self.game_last_action_ts.write(game_id, ts);
                         InternalImpl::reset_movement_for(ref self, game_id, next_p);
                         self.emit(TurnSubmitted { game_id, player_idx: cur_p, turn_number: new_t });
-                        break;
+                        turn_ended = true;
                     },
                     _ => InternalImpl::handle_action(ref self, game_id, cur_p, action),
                 }
@@ -234,8 +234,8 @@ mod CairoCiv {
             let span = actions.span();
             let mut i: u32 = 0;
             let len = span.len();
-            loop {
-                if i >= len { break; }
+            let mut turn_ended = false;
+            while i < len && !turn_ended {
                 let action = *span.at(i);
                 match action {
                     Action::EndTurn => {
@@ -250,7 +250,7 @@ mod CairoCiv {
                         InternalImpl::reset_movement_for(ref self, game_id, next_p);
                         self.game_consecutive_timeouts.write(game_id, 0);
                         self.emit(TurnSubmitted { game_id, player_idx: cur_p, turn_number: new_t });
-                        break;
+                        turn_ended = true;
                     },
                     _ => InternalImpl::handle_action(ref self, game_id, cur_p, action),
                 }
@@ -335,8 +335,7 @@ mod CairoCiv {
             let tile_span = map_tiles.span();
             let mut ti: u32 = 0;
             let tlen = tile_span.len();
-            loop {
-                if ti >= tlen { break; }
+            while ti < tlen {
                 let (q, r, td) = *tile_span.at(ti);
                 self.tiles.write((game_id, q, r), td);
                 ti += 1;
@@ -347,8 +346,7 @@ mod CairoCiv {
             let rspan = rivers.span();
             let mut ri: u32 = 0;
             let rlen = rspan.len();
-            loop {
-                if ri >= rlen { break; }
+            while ri < rlen {
                 let (rq, rr, edges) = *rspan.at(ri);
                 let mut t = self.tiles.read((game_id, rq, rr));
                 t.river_edges = t.river_edges | edges;
@@ -450,23 +448,19 @@ mod CairoCiv {
             let mut enemy_uid: u32 = 0;
             let mut found = false;
             let mut ep: u8 = 0;
-            loop {
-                if ep >= np { break; }
+            while ep < np && !found {
                 if ep != player {
                     let euc = self.player_unit_count.read((game_id, ep));
                     let mut eu: u32 = 0;
-                    loop {
-                        if eu >= euc { break; }
+                    while eu < euc && !found {
                         let eunit = self.units.read((game_id, ep, eu));
                         if eunit.hp > 0 && eunit.q == tq && eunit.r == tr {
                             enemy_player = ep;
                             enemy_uid = eu;
                             found = true;
-                            break;
                         }
                         eu += 1;
                     };
-                    if found { break; }
                 }
                 ep += 1;
             };
@@ -516,23 +510,19 @@ mod CairoCiv {
             let mut ep: u8 = 0;
             let mut euid: u32 = 0;
             let mut eplayer: u8 = 0;
-            loop {
-                if ep >= np { break; }
+            while ep < np && !found {
                 if ep != player {
                     let euc = self.player_unit_count.read((game_id, ep));
                     let mut eu: u32 = 0;
-                    loop {
-                        if eu >= euc { break; }
+                    while eu < euc && !found {
                         let eunit = self.units.read((game_id, ep, eu));
                         if eunit.hp > 0 && eunit.q == tq && eunit.r == tr {
                             eplayer = ep;
                             euid = eu;
                             found = true;
-                            break;
                         }
                         eu += 1;
                     };
-                    if found { break; }
                 }
                 ep += 1;
             };
@@ -562,12 +552,10 @@ mod CairoCiv {
             let mut existing: Array<(u8, u8)> = array![];
             let np = self.game_num_players.read(game_id);
             let mut pi: u8 = 0;
-            loop {
-                if pi >= np { break; }
+            while pi < np {
                 let cc = self.player_city_count.read((game_id, pi));
                 let mut ci: u32 = 0;
-                loop {
-                    if ci >= cc { break; }
+                while ci < cc {
                     let c = self.cities.read((game_id, pi, ci));
                     existing.append((c.q, c.r));
                     ci += 1;
@@ -595,8 +583,7 @@ mod CairoCiv {
             let tspan = territory.span();
             let mut ti: u32 = 0;
             let tlen = tspan.len();
-            loop {
-                if ti >= tlen { break; }
+            while ti < tlen {
                 let (tq, tr) = *tspan.at(ti);
                 // Only claim unowned tiles
                 if self.tile_owner.read((game_id, tq, tr)) == 0 {
@@ -776,11 +763,9 @@ mod CairoCiv {
                     // Check if there's any tech left to research (IDs 1..18)
                     let mut has_available: bool = false;
                     let mut tid: u8 = 1;
-                    loop {
-                        if tid > 18 { break; }
+                    while tid <= 18 && !has_available {
                         if !tech::is_researched(tid, techs) && tech::can_research(tid, techs) {
                             has_available = true;
-                            break;
                         }
                         tid += 1;
                     };
@@ -790,8 +775,7 @@ mod CairoCiv {
 
             // Every city must have a production target
             let mut pi: u32 = 0;
-            loop {
-                if pi >= cc { break; }
+            while pi < cc {
                 let c = self.cities.read((game_id, player, pi));
                 assert(c.current_production != 0, 'City has no production');
                 pi += 1;
@@ -803,8 +787,7 @@ mod CairoCiv {
 
             // Process each city
             let mut ci: u32 = 0;
-            loop {
-                if ci >= cc { break; }
+            while ci < cc {
                 let mut c = self.cities.read((game_id, player, ci));
 
                 // Compute basic yields from territory tiles
@@ -819,8 +802,7 @@ mod CairoCiv {
                 // Only work population number of tiles
                 let max_tiles: u32 = c.population.into();
                 let work_count = if tlen < max_tiles { tlen } else { max_tiles };
-                loop {
-                    if ti >= work_count { break; }
+                while ti < work_count {
                     let (tq, tr) = *tspan.at(ti);
                     let td = self.tiles.read((game_id, tq, tr));
                     let imp = self.tile_improvement.read((game_id, tq, tr));
@@ -866,8 +848,7 @@ mod CairoCiv {
                         let nts = new_tiles.span();
                         let mut ni: u32 = 0;
                         let nlen = nts.len();
-                        loop {
-                            if ni >= nlen { break; }
+                        while ni < nlen {
                             let (nq, nr) = *nts.at(ni);
                             if self.tile_owner.read((game_id, nq, nr)) == 0 {
                                 self.tile_owner.write((game_id, nq, nr), ci + 1);
@@ -899,8 +880,7 @@ mod CairoCiv {
             // Count military units for maintenance
             let uc = self.player_unit_count.read((game_id, player));
             let mut ui: u32 = 0;
-            loop {
-                if ui >= uc { break; }
+            while ui < uc {
                 let u = self.units.read((game_id, player, ui));
                 if u.hp > 0 && !constants::is_civilian(u.unit_type) {
                     military_count += 1;
@@ -959,11 +939,9 @@ mod CairoCiv {
         fn heal_units(ref self: ContractState, game_id: u64, player: u8) {
             let uc = self.player_unit_count.read((game_id, player));
             let mut ui: u32 = 0;
-            loop {
-                if ui >= uc { break; }
+            while ui < uc {
                 let mut u = self.units.read((game_id, player, ui));
                 if u.hp > 0 && u.hp < 100 {
-                    // Simplified: always heal as if in friendly territory
                     let new_hp = turn::heal_unit(@u, true, false, u.fortify_turns > 0);
                     u.hp = new_hp;
                     self.units.write((game_id, player, ui), u);
@@ -975,12 +953,10 @@ mod CairoCiv {
         fn reset_movement_for(ref self: ContractState, game_id: u64, player: u8) {
             let uc = self.player_unit_count.read((game_id, player));
             let mut ui: u32 = 0;
-            loop {
-                if ui >= uc { break; }
+            while ui < uc {
                 let mut u = self.units.read((game_id, player, ui));
                 if u.hp > 0 {
                     u.movement_remaining = turn::reset_movement(@u);
-                    // Increment fortify turns for fortified units
                     if u.fortify_turns > 0 && u.fortify_turns < 2 {
                         u.fortify_turns = u.fortify_turns + 1;
                     }
@@ -1000,20 +976,23 @@ mod CairoCiv {
         fn find_player(self: @ContractState, game_id: u64, addr: ContractAddress) -> u8 {
             let np = self.game_num_players.read(game_id);
             let mut i: u8 = 0;
-            loop {
-                if i >= np { panic!("Not a player"); break 0; }
+            let mut found_idx: u8 = 255;
+            while i < np {
                 if self.player_address.read((game_id, i)) == addr {
-                    break i;
+                    found_idx = i;
+                    break;
                 }
                 i += 1;
-            }
+            };
+            assert(found_idx != 255, 'Not a player');
+            found_idx
         }
 
         fn pow2_u32(n: u32) -> u32 {
             if n == 0 { return 1; }
             let mut r: u32 = 1;
             let mut i: u32 = 0;
-            loop { if i >= n { break; } r *= 2; i += 1; };
+            while i < n { r *= 2; i += 1; };
             r
         }
 
@@ -1029,8 +1008,7 @@ mod CairoCiv {
                 (1, 0), (1, -1), (0, -1), (-1, 0), (-1, 1), (0, 1),
             ];
             let mut d: u32 = 0;
-            loop {
-                if d >= 6 { break; }
+            while d < 6 {
                 let (dq, dr) = *dirs.span().at(d);
                 let nq: i16 = q.into() + dq;
                 let nr: i16 = r.into() + dr;

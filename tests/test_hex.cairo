@@ -321,14 +321,14 @@ fn test_direction_between_non_adjacent() {
 fn contains(arr: @Array<(u8, u8)>, q: u8, r: u8) -> bool {
     let mut i: u32 = 0;
     let len = arr.len();
-    loop {
-        if i >= len {
-            break false;
-        }
+    let mut found = false;
+    while i < len {
         let (tq, tr) = *arr.at(i);
         if tq == q && tr == r {
-            break true;
+            found = true;
+            break;
         }
         i += 1;
-    }
+    };
+    found
 }

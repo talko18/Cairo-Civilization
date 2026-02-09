@@ -16,16 +16,16 @@ pub fn can_research(tech_id: u8, completed_techs: u64) -> bool {
         return true;
     }
     let mut i: u32 = 0;
-    loop {
-        if i >= len {
-            break true;
-        }
+    let mut all_met = true;
+    while i < len {
         let prereq = *prereqs.at(i);
         if !is_researched(prereq, completed_techs) {
-            break false;
+            all_met = false;
+            break;
         }
         i += 1;
-    }
+    };
+    all_met
 }
 
 /// Process science per turn: accumulate half-science toward current research.
@@ -99,10 +99,7 @@ fn pow2(n: u32) -> u64 {
     }
     let mut result: u64 = 1;
     let mut i: u32 = 0;
-    loop {
-        if i >= n {
-            break;
-        }
+    while i < n {
         result *= 2;
         i += 1;
     };

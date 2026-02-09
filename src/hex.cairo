@@ -113,11 +113,8 @@ pub fn has_line_of_sight(
 
     // Walk intermediate tiles on the hex line (skip endpoints i=0 and i=n)
     let mut i: i16 = 1;
-    loop {
-        if i >= n {
-            break true;
-        }
-
+    let mut los_clear = true;
+    while i < n && los_clear {
         // Linearly interpolate cube coords, scaled by n
         let xn = x1 * (n - i) + x2 * i;
         let yn = y1 * (n - i) + y2 * i;
@@ -129,7 +126,6 @@ pub fn has_line_of_sight(
         let mut rz = round_div_i16(zn, n);
 
         // Fix cube constraint: x + y + z must equal 0
-        // Adjust the component with the largest rounding error
         let xd = abs_i16(rx * n - xn);
         let yd = abs_i16(ry * n - yn);
         let zd = abs_i16(rz * n - zn);
@@ -153,26 +149,19 @@ pub fn has_line_of_sight(
             // Check if this intermediate tile blocks LOS
             let mut j: u32 = 0;
             let blen = blocking_tiles.len();
-            let mut blocked = false;
-            loop {
-                if j >= blen {
-                    break;
-                }
+            while j < blen {
                 let (bq, br) = *blocking_tiles.at(j);
                 if bq == tq_u8 && br == tr_u8 {
-                    blocked = true;
+                    los_clear = false;
                     break;
                 }
                 j += 1;
             };
-
-            if blocked {
-                break false;
-            }
         }
 
         i += 1;
-    }
+    };
+    los_clear
 }
 
 // ---------------------------------------------------------------------------
@@ -191,11 +180,7 @@ pub fn hexes_in_range(q: u8, r: u8, radius: u8) -> Array<(u8, u8)> {
     let h: i16 = MAP_HEIGHT.into();
 
     let mut dx: i16 = -rad;
-    loop {
-        if dx > rad {
-            break;
-        }
-
+    while dx <= rad {
         // dr range: max(-rad, -rad - dx) .. min(rad, rad - dx)
         let lo_a: i16 = -rad;
         let lo_b: i16 = -rad - dx;
@@ -206,11 +191,7 @@ pub fn hexes_in_range(q: u8, r: u8, radius: u8) -> Array<(u8, u8)> {
         let hi = if hi_a < hi_b { hi_a } else { hi_b };
 
         let mut dr: i16 = lo;
-        loop {
-            if dr > hi {
-                break;
-            }
-
+        while dr <= hi {
             let sq: i16 = cq + dx;
             let sr: i16 = cr + dr;
 

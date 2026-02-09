@@ -45,8 +45,7 @@ pub fn generate_map(seed: felt252, width: u8, height: u8) -> Array<(u8, u8, Tile
     let total: u32 = w.into() * h.into();
 
     let mut idx: u32 = 0;
-    loop {
-        if idx >= total { break; }
+    while idx < total {
         let q: u8 = (idx % w.into()).try_into().unwrap();
         let r: u8 = (idx / w.into()).try_into().unwrap();
 
@@ -74,8 +73,7 @@ pub fn generate_map(seed: felt252, width: u8, height: u8) -> Array<(u8, u8, Tile
     let mut mtn_bonus: Array<u16> = array![];
     // Initialize to zero
     let mut mi: u32 = 0;
-    loop {
-        if mi >= total { break; }
+    while mi < total {
         mtn_bonus.append(0);
         mi += 1;
     };
@@ -90,8 +88,7 @@ pub fn generate_map(seed: felt252, width: u8, height: u8) -> Array<(u8, u8, Tile
     let mtn_span = mtn_bonus.span();
 
     let mut idx2: u32 = 0;
-    loop {
-        if idx2 >= total { break; }
+    while idx2 < total {
         let q: u8 = (idx2 % w.into()).try_into().unwrap();
         let r: u8 = (idx2 / w.into()).try_into().unwrap();
 
@@ -207,9 +204,7 @@ fn generate_ridgelines(
     let num_ridges: u32 = (hash_noise(seed, 0, 0, 50) % 3).into() + 2;
 
     let mut ridge_i: u32 = 0;
-    loop {
-        if ridge_i >= num_ridges { break; }
-
+    while ridge_i < num_ridges {
         // Starting position for this ridge
         let start_q_noise = hash_noise(seed, ridge_i.try_into().unwrap(), 0, 51);
         let start_r_noise = hash_noise(seed, ridge_i.try_into().unwrap(), 0, 52);
@@ -220,10 +215,7 @@ fn generate_ridgelines(
         let ridge_len: u32 = (hash_noise(seed, ridge_i.try_into().unwrap(), 0, 53) % 9).into() + 8;
 
         let mut step: u32 = 0;
-        loop {
-            if step >= ridge_len { break; }
-            if cur_q >= w || cur_r >= h { break; }
-
+        while step < ridge_len && cur_q < w && cur_r < h {
             // Set height bonus on the ridge tile (index = q * height + r)
             let center_idx = cur_q * h + cur_r;
             if center_idx < total {
@@ -235,13 +227,11 @@ fn generate_ridgelines(
             let shoulder_offsets: Array<(i32, i32)> = array![(1, 0), (-1, 0), (0, 1), (0, -1)];
             let s_span = shoulder_offsets.span();
             let mut si: u32 = 0;
-            loop {
-                if si >= 4 { break; }
+            while si < 4 {
                 let (dq, dr) = *s_span.at(si);
                 let sq: i32 = cur_q.try_into().unwrap() + dq;
                 let sr: i32 = cur_r.try_into().unwrap() + dr;
                 if sq >= 0 && sq < w.try_into().unwrap() && sr >= 0 && sr < h.try_into().unwrap() {
-                    // Index: q * height + r
                     let s_idx: u32 = sq.try_into().unwrap() * h + sr.try_into().unwrap();
                     if s_idx < total {
                         let old_s = *bonus.at(s_idx);
@@ -257,21 +247,16 @@ fn generate_ridgelines(
             let dir_noise = hash_noise(seed, cur_q.try_into().unwrap(), cur_r.try_into().unwrap(), 54 + ridge_i.try_into().unwrap());
             let dir = dir_noise % 6;
             if dir < 2 {
-                // East-ish
                 cur_q += 1;
             } else if dir < 3 {
-                // NE
                 if cur_r > 0 { cur_r -= 1; }
                 cur_q += 1;
             } else if dir < 4 {
-                // SE
                 cur_r += 1;
                 cur_q += 1;
             } else if dir < 5 {
-                // South
                 cur_r += 1;
             } else {
-                // North
                 if cur_r > 0 { cur_r -= 1; }
             }
 
@@ -291,8 +276,7 @@ fn array_set(arr: Array<u16>, idx: u32, val: u16) -> Array<u16> {
     let len = span.len();
     let mut result: Array<u16> = array![];
     let mut i: u32 = 0;
-    loop {
-        if i >= len { break; }
+    while i < len {
         if i == idx {
             result.append(val);
         } else {
@@ -319,8 +303,7 @@ fn fix_coastlines(
     // Build a flat terrain array for neighbor lookups
     let mut terrains: Array<u8> = array![];
     let mut i: u32 = 0;
-    loop {
-        if i >= total { break; }
+    while i < total {
         let (_, _, td) = *span.at(i);
         terrains.append(td.terrain);
         i += 1;
@@ -330,12 +313,10 @@ fn fix_coastlines(
     // Fix: ocean adjacent to land → coast
     let mut result: Array<(u8, u8, TileData)> = array![];
     let mut j: u32 = 0;
-    loop {
-        if j >= total { break; }
+    while j < total {
         let (q, r, mut td) = *span.at(j);
 
         if td.terrain == TERRAIN_OCEAN {
-            // Check if any neighbor is non-water, non-mountain land
             let has_land_neighbor = check_land_neighbor(
                 q, r, width, height, t_span, w
             );
@@ -366,18 +347,20 @@ fn check_land_neighbor(
     let nspan = neighbors.span();
     let nlen = nspan.len();
     let mut ni: u32 = 0;
-    loop {
-        if ni >= nlen { break false; }
+    let mut found_land = false;
+    while ni < nlen {
         let (nq, nr) = *nspan.at(ni);
         if nq < width && nr < height {
             let n_idx: u32 = nq.into() * h + nr.into();
             let n_terrain = *terrains.at(n_idx);
             if is_land_terrain(n_terrain) {
-                break true;
+                found_land = true;
+                break;
             }
         }
         ni += 1;
-    }
+    };
+    found_land
 }
 
 // ---------------------------------------------------------------------------
@@ -531,8 +514,7 @@ pub fn generate_rivers(
     // Collect mountain positions as river sources
     let mut sources: Array<(u8, u8)> = array![];
     let mut i: u32 = 0;
-    loop {
-        if i >= len { break; }
+    while i < len {
         let (q, r, td) = *tiles.at(i);
         if td.terrain == TERRAIN_MOUNTAIN {
             let noise = hash_noise(seed, q, r, 6);
@@ -547,8 +529,7 @@ pub fn generate_rivers(
     let src_span = sources.span();
     let src_len = src_span.len();
     let mut si: u32 = 0;
-    loop {
-        if si >= src_len { break; }
+    while si < src_len {
         let (sq, sr) = *src_span.at(si);
 
         // Walk up to 12 tiles from the source
@@ -556,10 +537,9 @@ pub fn generate_rivers(
         let mut cur_r: u8 = sr;
         let mut step: u32 = 0;
         let max_steps: u32 = 12;
+        let mut river_done = false;
 
-        loop {
-            if step >= max_steps { break; }
-
+        while step < max_steps && !river_done {
             // Pick flow direction based on position + step
             let dir_noise = hash_noise(seed, cur_q, cur_r, 60 + step.try_into().unwrap());
             let dir: u8 = (dir_noise % 6).try_into().unwrap();
@@ -568,11 +548,9 @@ pub fn generate_rivers(
             let next_opt = neighbor_in_dir(cur_q, cur_r, dir);
             match next_opt {
                 Option::Some((nq, nr)) => {
-                    // Record river edge on current tile
                     let edge_mask = bit_mask(dir);
                     rivers.append((cur_q, cur_r, edge_mask));
 
-                    // Record reciprocal edge on neighbor
                     let opp_dir = (dir + 3) % 6;
                     let opp_mask = bit_mask(opp_dir);
                     rivers.append((nq, nr, opp_mask));
@@ -580,13 +558,13 @@ pub fn generate_rivers(
                     // Check if we reached water — stop the river
                     let next_terrain = find_terrain(tiles, nq, nr);
                     if next_terrain == TERRAIN_OCEAN || next_terrain == TERRAIN_COAST {
-                        break;
+                        river_done = true;
+                    } else {
+                        cur_q = nq;
+                        cur_r = nr;
                     }
-
-                    cur_q = nq;
-                    cur_r = nr;
                 },
-                Option::None => { break; },
+                Option::None => { river_done = true; },
             }
 
             step += 1;
@@ -598,12 +576,12 @@ pub fn generate_rivers(
     // Ensure at least 1 river exists
     if rivers.len() == 0 && len > 0 {
         let mut j: u32 = 0;
-        loop {
-            if j >= len { break; }
+        let mut placed = false;
+        while j < len && !placed {
             let (q, r, td) = *tiles.at(j);
             if td.terrain == TERRAIN_MOUNTAIN || is_land_terrain(td.terrain) {
                 rivers.append((q, r, 0b000001));
-                break;
+                placed = true;
             }
             j += 1;
         };
@@ -663,40 +641,27 @@ pub fn find_starting_positions(
 ) -> Option<((u8, u8), (u8, u8))> {
     let len = tiles.len();
     let mut i: u32 = 0;
-    loop {
-        if i >= len {
-            break Option::None;
-        }
+    let mut result: Option<((u8, u8), (u8, u8))> = Option::None;
+    while i < len && result.is_none() {
         let (q1, r1, td1) = *tiles.at(i);
         if is_land_terrain(td1.terrain) {
             // Search for a suitable second position
-            let mut found_j: Option<u32> = Option::None;
             let mut j: u32 = i + 1;
-            loop {
-                if j >= len {
-                    break;
-                }
+            while j < len {
                 let (q2, r2, td2) = *tiles.at(j);
                 if is_land_terrain(td2.terrain) {
                     let dist = hex::hex_distance(q1, r1, q2, r2);
                     if dist >= 10 {
-                        found_j = Option::Some(j);
+                        result = Option::Some(((q1, r1), (q2, r2)));
                         break;
                     }
                 }
                 j += 1;
             };
-
-            match found_j {
-                Option::Some(jj) => {
-                    let (q2, r2, _) = *tiles.at(jj);
-                    break Option::Some(((q1, r1), (q2, r2)));
-                },
-                Option::None => {},
-            }
         }
         i += 1;
-    }
+    };
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -713,10 +678,7 @@ pub fn validate_map(tiles: Span<(u8, u8, TileData)>, seed: felt252) -> bool {
     // Count land tiles
     let mut land_count: u32 = 0;
     let mut i: u32 = 0;
-    loop {
-        if i >= len {
-            break;
-        }
+    while i < len {
         let (_, _, td) = *tiles.at(i);
         if is_land_terrain(td.terrain) {
             land_count += 1;

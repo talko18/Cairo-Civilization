@@ -49,15 +49,19 @@ pub fn validate_city_founding(
     // Check distance from existing cities
     let mut i: u32 = 0;
     let len = existing_city_positions.len();
-    loop {
-        if i >= len {
-            break Result::Ok(());
-        }
+    let mut too_close = false;
+    while i < len {
         let (eq, er) = *existing_city_positions.at(i);
         if hex::hex_distance(q, r, eq, er) < constants::MIN_CITY_DISTANCE {
-            break Result::Err(CityFoundError::TooCloseToCity);
+            too_close = true;
+            break;
         }
         i += 1;
+    };
+    if too_close {
+        Result::Err(CityFoundError::TooCloseToCity)
+    } else {
+        Result::Ok(())
     }
 }
 
@@ -142,10 +146,7 @@ pub fn compute_city_yields(
     // Sum worked tile yields
     let mut i: u32 = 0;
     let len = worked_tiles.len();
-    loop {
-        if i >= len {
-            break;
-        }
+    while i < len {
         let (tile, imp) = *worked_tiles.at(i);
         let y = compute_tile_yield(@tile, imp);
         total_food += y.food.into();
@@ -379,10 +380,7 @@ fn pow2_u32(n: u32) -> u32 {
     }
     let mut r: u32 = 1;
     let mut i: u32 = 0;
-    loop {
-        if i >= n {
-            break;
-        }
+    while i < n {
         r *= 2;
         i += 1;
     };
