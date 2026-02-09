@@ -15,7 +15,6 @@ pub trait ICairoCiv<TContractState> {
     fn submit_turn(ref self: TContractState, game_id: u64, actions: Array<Action>);
     fn submit_actions(ref self: TContractState, game_id: u64, actions: Array<Action>);
     fn forfeit(ref self: TContractState, game_id: u64);
-    fn claim_timeout_victory(ref self: TContractState, game_id: u64);
     fn get_game_status(self: @TContractState, game_id: u64) -> u8;
     fn get_current_turn(self: @TContractState, game_id: u64) -> u32;
     fn get_current_player(self: @TContractState, game_id: u64) -> u8;
@@ -30,10 +29,12 @@ pub trait ICairoCiv<TContractState> {
     fn get_treasury(self: @TContractState, game_id: u64, player_idx: u8) -> u32;
     fn get_completed_techs(self: @TContractState, game_id: u64, player_idx: u8) -> u64;
     fn get_current_research(self: @TContractState, game_id: u64, player_idx: u8) -> u8;
-    fn get_accumulated_science(self: @TContractState, game_id: u64, player_idx: u8) -> u32;
+    fn get_accumulated_science(self: @TContractState, game_id: u64, player_idx: u8, tech_id: u8) -> u32;
     fn get_winner(self: @TContractState, game_id: u64) -> u8;
     fn get_score(self: @TContractState, game_id: u64, player_idx: u8) -> u32;
     fn get_diplomacy_status(self: @TContractState, game_id: u64, p1: u8, p2: u8) -> u8;
+    fn get_city_locked_count(self: @TContractState, game_id: u64, player_idx: u8, city_id: u32) -> u8;
+    fn get_city_locked_tile(self: @TContractState, game_id: u64, player_idx: u8, city_id: u32, slot: u8) -> (u8, u8);
 }
 
 // Events
@@ -94,26 +95,29 @@ mod CairoCiv {
         game_current_player: Map<u64, u8>,
         game_winner: Map<u64, u8>,
         game_victory_type: Map<u64, u8>,
-        game_last_action_ts: Map<u64, u64>,
         game_seed: Map<u64, felt252>,
         player_address: Map<(u64, u8), ContractAddress>,
         player_treasury: Map<(u64, u8), u32>,
         player_completed_techs: Map<(u64, u8), u64>,
         player_current_research: Map<(u64, u8), u8>,
-        player_accumulated_half_science: Map<(u64, u8), u32>,
+        // Per-tech accumulated half-science: (game_id, player, tech_id) → accumulated
+        tech_accumulated_half_science: Map<(u64, u8, u8), u32>,
         player_unit_count: Map<(u64, u8), u32>,
         player_city_count: Map<(u64, u8), u32>,
         player_kills: Map<(u64, u8), u32>,
         player_captured_cities: Map<(u64, u8), u32>,
-        player_timeout_count: Map<(u64, u8), u8>,
-        game_consecutive_timeouts: Map<u64, u8>,
         diplomacy: Map<(u64, u8, u8), u8>,
         units: Map<(u64, u8, u32), Unit>,
         cities: Map<(u64, u8, u32), City>,
         tiles: Map<(u64, u8, u8), TileData>,
-        tile_owner: Map<(u64, u8, u8), u32>,
-        tile_owner_player: Map<(u64, u8, u8), u8>,
+        // Packed tile ownership: upper 8 bits = player, lower 32 bits = city_id+1 (0=unowned)
+        tile_ownership: Map<(u64, u8, u8), u64>,
         tile_improvement: Map<(u64, u8, u8), u8>,
+        // Citizen tile assignments: locked tiles per city
+        // slot index → (q, r); count tracks how many are locked
+        city_locked_count: Map<(u64, u8, u32), u8>,
+        // Packed (q, r) per locked slot: low 8 bits = q, high 8 bits = r
+        city_locked_tile: Map<(u64, u8, u32, u8), u16>,
     }
 
     // ----- Events ----------------------------------------------------------
@@ -179,15 +183,6 @@ mod CairoCiv {
             let cur_p = self.game_current_player.read(game_id);
             let p_addr = self.player_address.read((game_id, cur_p));
             assert(caller == p_addr, 'Not your turn');
-            // Timer check
-            let ts = get_block_timestamp();
-            let last_ts = self.game_last_action_ts.read(game_id);
-            assert(
-                !turn::check_timeout(last_ts, ts, constants::TURN_TIMEOUT_SECONDS),
-                'Turn timed out',
-            );
-            // Reset timeout counter (player submitted in time)
-            self.game_consecutive_timeouts.write(game_id, 0);
             // Process actions
             let span = actions.span();
             let mut i: u32 = 0;
@@ -203,7 +198,6 @@ mod CairoCiv {
                         self.game_current_player.write(game_id, next_p);
                         let new_t = self.game_current_turn.read(game_id) + 1;
                         self.game_current_turn.write(game_id, new_t);
-                        self.game_last_action_ts.write(game_id, ts);
                         InternalImpl::reset_movement_for(ref self, game_id, next_p);
                         self.emit(TurnSubmitted { game_id, player_idx: cur_p, turn_number: new_t });
                         turn_ended = true;
@@ -223,13 +217,6 @@ mod CairoCiv {
             let cur_p = self.game_current_player.read(game_id);
             let p_addr = self.player_address.read((game_id, cur_p));
             assert(caller == p_addr, 'Not your turn');
-            // Timer check
-            let ts = get_block_timestamp();
-            let last_ts = self.game_last_action_ts.read(game_id);
-            assert(
-                !turn::check_timeout(last_ts, ts, constants::TURN_TIMEOUT_SECONDS),
-                'Turn timed out',
-            );
             // Process actions (no end-of-turn, no player switch)
             let span = actions.span();
             let mut i: u32 = 0;
@@ -246,9 +233,7 @@ mod CairoCiv {
                         self.game_current_player.write(game_id, next_p);
                         let new_t = self.game_current_turn.read(game_id) + 1;
                         self.game_current_turn.write(game_id, new_t);
-                        self.game_last_action_ts.write(game_id, ts);
                         InternalImpl::reset_movement_for(ref self, game_id, next_p);
-                        self.game_consecutive_timeouts.write(game_id, 0);
                         self.emit(TurnSubmitted { game_id, player_idx: cur_p, turn_number: new_t });
                         turn_ended = true;
                     },
@@ -266,33 +251,6 @@ mod CairoCiv {
             InternalImpl::end_game(ref self, game_id, winner, VICTORY_FORFEIT);
         }
 
-        fn claim_timeout_victory(ref self: ContractState, game_id: u64) {
-            assert(self.game_status.read(game_id) == STATUS_ACTIVE, 'Game not active');
-            let caller = get_caller_address();
-            let claimer = InternalImpl::find_player(@self, game_id, caller);
-            let cur_p = self.game_current_player.read(game_id);
-            assert(claimer != cur_p, 'Cannot timeout yourself');
-            let ts = get_block_timestamp();
-            let last_ts = self.game_last_action_ts.read(game_id);
-            assert(
-                turn::check_timeout(last_ts, ts, constants::TURN_TIMEOUT_SECONDS),
-                'Timer not expired',
-            );
-            let tc = self.game_consecutive_timeouts.read(game_id) + 1;
-            self.game_consecutive_timeouts.write(game_id, tc);
-            if tc >= constants::MAX_CONSECUTIVE_TIMEOUTS {
-                InternalImpl::end_game(ref self, game_id, claimer, VICTORY_FORFEIT);
-            } else {
-                let np = self.game_num_players.read(game_id);
-                let next_p = turn::next_player(cur_p, np);
-                self.game_current_player.write(game_id, next_p);
-                let new_t = self.game_current_turn.read(game_id) + 1;
-                self.game_current_turn.write(game_id, new_t);
-                // Don't update last_action_ts — timer keeps counting from last real action
-                InternalImpl::reset_movement_for(ref self, game_id, next_p);
-            }
-        }
-
         // ---- View functions ----
         fn get_game_status(self: @ContractState, game_id: u64) -> u8 { self.game_status.read(game_id) }
         fn get_current_turn(self: @ContractState, game_id: u64) -> u32 { self.game_current_turn.read(game_id) }
@@ -304,16 +262,26 @@ mod CairoCiv {
         fn get_city_count(self: @ContractState, game_id: u64, player_idx: u8) -> u32 { self.player_city_count.read((game_id, player_idx)) }
         fn get_tile(self: @ContractState, game_id: u64, q: u8, r: u8) -> TileData { self.tiles.read((game_id, q, r)) }
         fn get_tile_owner(self: @ContractState, game_id: u64, q: u8, r: u8) -> (u8, u32) {
-            (self.tile_owner_player.read((game_id, q, r)), self.tile_owner.read((game_id, q, r)))
+            let packed = self.tile_ownership.read((game_id, q, r));
+            let city_id = (packed & 0xFFFFFFFF).try_into().unwrap();
+            let player_idx: u8 = ((packed / 0x100000000) & 0xFF).try_into().unwrap();
+            (player_idx, city_id)
         }
         fn get_tile_improvement(self: @ContractState, game_id: u64, q: u8, r: u8) -> u8 { self.tile_improvement.read((game_id, q, r)) }
         fn get_treasury(self: @ContractState, game_id: u64, player_idx: u8) -> u32 { self.player_treasury.read((game_id, player_idx)) }
         fn get_completed_techs(self: @ContractState, game_id: u64, player_idx: u8) -> u64 { self.player_completed_techs.read((game_id, player_idx)) }
         fn get_current_research(self: @ContractState, game_id: u64, player_idx: u8) -> u8 { self.player_current_research.read((game_id, player_idx)) }
-        fn get_accumulated_science(self: @ContractState, game_id: u64, player_idx: u8) -> u32 { self.player_accumulated_half_science.read((game_id, player_idx)) }
+        fn get_accumulated_science(self: @ContractState, game_id: u64, player_idx: u8, tech_id: u8) -> u32 { self.tech_accumulated_half_science.read((game_id, player_idx, tech_id)) }
         fn get_winner(self: @ContractState, game_id: u64) -> u8 { self.game_winner.read(game_id) }
         fn get_score(self: @ContractState, game_id: u64, player_idx: u8) -> u32 { 0 }
         fn get_diplomacy_status(self: @ContractState, game_id: u64, p1: u8, p2: u8) -> u8 { self.diplomacy.read((game_id, p1, p2)) }
+        fn get_city_locked_count(self: @ContractState, game_id: u64, player_idx: u8, city_id: u32) -> u8 {
+            self.city_locked_count.read((game_id, player_idx, city_id))
+        }
+        fn get_city_locked_tile(self: @ContractState, game_id: u64, player_idx: u8, city_id: u32, slot: u8) -> (u8, u8) {
+            let packed = self.city_locked_tile.read((game_id, player_idx, city_id, slot));
+            ((packed & 0xFF).try_into().unwrap(), ((packed / 0x100) & 0xFF).try_into().unwrap())
+        }
     }
 
     // ----- Internal --------------------------------------------------------
@@ -324,10 +292,13 @@ mod CairoCiv {
             self.game_status.write(game_id, STATUS_ACTIVE);
             self.game_current_turn.write(game_id, 0);
             self.game_current_player.write(game_id, 0);
-            self.game_last_action_ts.write(game_id, get_block_timestamp());
 
-            // Seed from game_id
-            let seed = PoseidonTrait::new().update(game_id.into()).finalize();
+            // Seed from game_id + block timestamp + caller for randomness
+            let seed = PoseidonTrait::new()
+                .update(game_id.into())
+                .update(get_block_timestamp().into())
+                .update(get_caller_address().into())
+                .finalize();
             self.game_seed.write(game_id, seed);
 
             // Generate and store map
@@ -406,6 +377,8 @@ mod CairoCiv {
                 Action::PurchaseWithGold((cid, item)) => Self::act_purchase(ref self, game_id, player, cid, item),
                 Action::UpgradeUnit(uid) => Self::act_upgrade(ref self, game_id, player, uid),
                 Action::DeclareWar(target) => Self::act_declare_war(ref self, game_id, player, target),
+                Action::AssignCitizen((cid, tq, tr)) => Self::act_assign_citizen(ref self, game_id, player, cid, tq, tr),
+                Action::UnassignCitizen((cid, tq, tr)) => Self::act_unassign_citizen(ref self, game_id, player, cid, tq, tr),
                 Action::EndTurn => { }, // handled in submit_turn
             }
         }
@@ -416,19 +389,157 @@ mod CairoCiv {
             assert(uid < uc, 'Invalid unit id');
             let mut unit = self.units.read((game_id, player, uid));
             assert(unit.hp > 0, 'Unit is dead');
-            let dest_tile = self.tiles.read((game_id, dq, dr));
-            let result = movement::validate_move(
-                @unit, dq, dr, @dest_tile, Option::None, 0, player,
-            );
-            match result {
-                Result::Ok(remaining) => {
-                    unit.q = dq;
-                    unit.r = dr;
-                    unit.movement_remaining = remaining;
-                    unit.fortify_turns = 0; // moving breaks fortify
-                    self.units.write((game_id, player, uid), unit);
-                },
-                Result::Err(_) => { panic!("Move validation failed"); },
+            assert(unit.movement_remaining > 0, 'No movement');
+            assert(hex::in_bounds(dq, dr), 'Out of bounds');
+
+            let dist = hex::hex_distance(unit.q, unit.r, dq, dr);
+            assert(dist > 0, 'Already there');
+
+            if dist == 1 {
+                // Adjacent: simple single-step move
+                let dest_tile = self.tiles.read((game_id, dq, dr));
+                let cost = movement::tile_movement_cost(@dest_tile);
+                assert(cost > 0, 'Impassable');
+                assert(unit.movement_remaining >= cost, 'Insufficient MP');
+                // Step through this tile (hook point for ZOC / fog of war)
+                unit.q = dq;
+                unit.r = dr;
+                unit.movement_remaining -= cost;
+                unit.fortify_turns = 0;
+                self.units.write((game_id, player, uid), unit);
+            } else {
+                // Multi-tile: Dijkstra pathfinding with parent tracking.
+                // Finds shortest path, then walks it tile-by-tile so future
+                // features (zone of control, fog of war discovery) work.
+                //
+                // Visited entries: (q, r, best_mp_remaining, parent_q, parent_r)
+                // Max reachable tiles with MP<=3 is ~37, so linear scans are fine.
+                let start_q = unit.q;
+                let start_r = unit.r;
+                let mp = unit.movement_remaining;
+
+                // visited[0] = start node (parent points to itself)
+                let mut visited: Array<(u8, u8, u8, u8, u8)> = array![
+                    (start_q, start_r, mp, start_q, start_r)
+                ];
+                let mut open: Array<(u8, u8, u8)> = array![(start_q, start_r, mp)];
+                let mut found = false;
+
+                while !found {
+                    // Pick the open entry with highest remaining MP (Dijkstra)
+                    let ospan = open.span();
+                    let olen = ospan.len();
+                    if olen == 0 { break; }
+                    let mut best_idx: u32 = 0;
+                    let mut best_mp: u8 = 0;
+                    let mut bi: u32 = 0;
+                    while bi < olen {
+                        let (_, _, omp) = *ospan.at(bi);
+                        if omp > best_mp {
+                            best_mp = omp;
+                            best_idx = bi;
+                        }
+                        bi += 1;
+                    };
+                    if best_mp == 0 { break; }
+                    let (cq, cr, cmp) = *ospan.at(best_idx);
+
+                    // Remove from open by zeroing MP
+                    let mut new_open: Array<(u8, u8, u8)> = array![];
+                    let mut ri: u32 = 0;
+                    while ri < olen {
+                        if ri == best_idx {
+                            new_open.append((cq, cr, 0));
+                        } else {
+                            new_open.append(*ospan.at(ri));
+                        }
+                        ri += 1;
+                    };
+
+                    // Expand neighbors
+                    let neighbors = hex::hex_neighbors(cq, cr);
+                    let nspan = neighbors.span();
+                    let mut ni: u32 = 0;
+                    let nlen = nspan.len();
+                    while ni < nlen {
+                        let (nq, nr) = *nspan.at(ni);
+                        let td = self.tiles.read((game_id, nq, nr));
+                        let cost = movement::tile_movement_cost(@td);
+                        if cost > 0 && cmp >= cost {
+                            let new_mp = cmp - cost;
+                            // Check if already visited with equal or better MP
+                            let mut already_better = false;
+                            let vspan = visited.span();
+                            let mut vi: u32 = 0;
+                            while vi < vspan.len() {
+                                let (vq, vr, vmp, _, _) = *vspan.at(vi);
+                                if vq == nq && vr == nr && vmp >= new_mp {
+                                    already_better = true;
+                                    break;
+                                }
+                                vi += 1;
+                            };
+                            if !already_better {
+                                // Record with parent = (cq, cr)
+                                visited.append((nq, nr, new_mp, cq, cr));
+                                if nq == dq && nr == dr {
+                                    found = true;
+                                } else {
+                                    new_open.append((nq, nr, new_mp));
+                                }
+                            }
+                        }
+                        ni += 1;
+                    };
+                    open = new_open;
+                };
+
+                assert(found, 'Cannot reach destination');
+
+                // Reconstruct path from destination back to start using parents
+                let vspan = visited.span();
+                let vlen = vspan.len();
+                let mut path: Array<(u8, u8)> = array![(dq, dr)];
+                let mut cur_q = dq;
+                let mut cur_r = dr;
+                let mut safety: u32 = 0;
+                while (cur_q != start_q || cur_r != start_r) && safety < 10 {
+                    // Find this tile's parent in visited (scan from end for latest/best entry)
+                    let mut pi: u32 = vlen;
+                    while pi > 0 {
+                        pi -= 1;
+                        let (vq, vr, _, pq, pr) = *vspan.at(pi);
+                        if vq == cur_q && vr == cur_r {
+                            cur_q = pq;
+                            cur_r = pr;
+                            break;
+                        }
+                    };
+                    if cur_q != start_q || cur_r != start_r {
+                        path.append((cur_q, cur_r));
+                    }
+                    safety += 1;
+                };
+
+                // Path is in reverse order (dest first). Walk it backwards.
+                let pspan = path.span();
+                let plen = pspan.len();
+                let mut step: u32 = plen;
+                while step > 0 {
+                    step -= 1;
+                    let (sq, sr) = *pspan.at(step);
+                    let td = self.tiles.read((game_id, sq, sr));
+                    let cost = movement::tile_movement_cost(@td);
+
+                    // Step through this tile — unit physically enters it.
+                    // Future hook: check ZOC, discover fog-of-war tiles in LOS, etc.
+                    unit.q = sq;
+                    unit.r = sr;
+                    unit.movement_remaining -= cost;
+                };
+
+                unit.fortify_turns = 0;
+                self.units.write((game_id, player, uid), unit);
             }
         }
 
@@ -586,9 +697,9 @@ mod CairoCiv {
             while ti < tlen {
                 let (tq, tr) = *tspan.at(ti);
                 // Only claim unowned tiles
-                if self.tile_owner.read((game_id, tq, tr)) == 0 {
-                    self.tile_owner.write((game_id, tq, tr), cid + 1); // 1-based
-                    self.tile_owner_player.write((game_id, tq, tr), player);
+                if self.tile_ownership.read((game_id, tq, tr)) == 0 {
+                    let packed: u64 = (cid + 1).into() | (Into::<u8, u64>::into(player) * 0x100000000);
+                    self.tile_ownership.write((game_id, tq, tr), packed);
                 }
                 ti += 1;
             };
@@ -619,6 +730,10 @@ mod CairoCiv {
             if item >= 64 && item <= 127 {
                 let bbit = item - 64;
                 assert(city::can_build(@c, bbit, techs), 'Cannot build this');
+            }
+            // Reset stockpile when switching production target
+            if c.current_production != item {
+                c.production_stockpile = 0;
             }
             c.current_production = item;
             self.cities.write((game_id, player, cid), c);
@@ -750,6 +865,203 @@ mod CairoCiv {
             self.units.write((game_id, player, uid), unit);
         }
 
+        // ---- AssignCitizen: lock a citizen to work a specific tile ----
+        fn act_assign_citizen(ref self: ContractState, game_id: u64, player: u8, cid: u32, tq: u8, tr: u8) {
+            let cc = self.player_city_count.read((game_id, player));
+            assert(cid < cc, 'Invalid city id');
+            let c = self.cities.read((game_id, player, cid));
+            // Tile must be in city territory
+            let packed_own = self.tile_ownership.read((game_id, tq, tr));
+            let owner_city: u32 = (packed_own & 0xFFFFFFFF).try_into().unwrap();
+            let owner_player: u8 = ((packed_own / 0x100000000) & 0xFF).try_into().unwrap();
+            assert(owner_city == cid + 1 && owner_player == player, 'Tile not in city territory');
+            // Can't lock city center (it's always worked for free)
+            assert(tq != c.q || tr != c.r, 'Cannot lock city center');
+            // Tile must be workable (not mountain/ocean)
+            let td = self.tiles.read((game_id, tq, tr));
+            assert(td.terrain != 0 && td.terrain != 12, 'Tile not workable');
+            // Can't exceed population count (center doesn't use a slot)
+            let mut count = self.city_locked_count.read((game_id, player, cid));
+            assert(count < c.population, 'All citizens assigned');
+            // Check not already locked
+            let packed_new: u16 = tq.into() | (Into::<u8, u16>::into(tr) * 0x100);
+            let mut si: u8 = 0;
+            while si < count {
+                let locked = self.city_locked_tile.read((game_id, player, cid, si));
+                assert(locked != packed_new, 'Tile already assigned');
+                si += 1;
+            };
+            // Add to locked list
+            self.city_locked_tile.write((game_id, player, cid, count), packed_new);
+            self.city_locked_count.write((game_id, player, cid), count + 1);
+        }
+
+        // ---- UnassignCitizen: remove lock from a tile ----
+        fn act_unassign_citizen(ref self: ContractState, game_id: u64, player: u8, cid: u32, tq: u8, tr: u8) {
+            let cc = self.player_city_count.read((game_id, player));
+            assert(cid < cc, 'Invalid city id');
+            let count = self.city_locked_count.read((game_id, player, cid));
+            let target: u16 = tq.into() | (Into::<u8, u16>::into(tr) * 0x100);
+            // Find the tile in the locked list
+            let mut found_slot: u8 = 255;
+            let mut si: u8 = 0;
+            while si < count {
+                let locked = self.city_locked_tile.read((game_id, player, cid, si));
+                if locked == target {
+                    found_slot = si;
+                    break;
+                }
+                si += 1;
+            };
+            assert(found_slot != 255, 'Tile not assigned');
+            // Swap with last and decrement count
+            let last = count - 1;
+            if found_slot != last {
+                let last_tile = self.city_locked_tile.read((game_id, player, cid, last));
+                self.city_locked_tile.write((game_id, player, cid, found_slot), last_tile);
+            }
+            // Clear last slot and update count
+            self.city_locked_tile.write((game_id, player, cid, last), 0);
+            self.city_locked_count.write((game_id, player, cid), last);
+        }
+
+        // ---- Compute worked tiles for a city ----
+        // The city center is ALWAYS worked (free, doesn't use a population slot).
+        // Each citizen (population) works one additional tile: locked first, then auto best-yield.
+        fn compute_worked_tiles(
+            self: @ContractState, game_id: u64, player: u8, cid: u32,
+            city_q: u8, city_r: u8, population: u8, radius: u8,
+        ) -> Array<(u8, u8)> {
+            let mut result: Array<(u8, u8)> = array![];
+
+            // 0. City center is always worked (free)
+            result.append((city_q, city_r));
+
+            // Additional tiles = population count
+            let max_additional: u32 = population.into();
+            let mut additional: u32 = 0;
+
+            // 1. Collect locked tiles (filter out any no longer in territory)
+            let locked_count = self.city_locked_count.read((game_id, player, cid));
+            let mut li: u8 = 0;
+            while li < locked_count && additional < max_additional {
+                let packed_lock = self.city_locked_tile.read((game_id, player, cid, li));
+                let lq: u8 = (packed_lock & 0xFF).try_into().unwrap();
+                let lr: u8 = ((packed_lock / 0x100) & 0xFF).try_into().unwrap();
+                // Skip city center (already in result)
+                if lq != city_q || lr != city_r {
+                    // Verify still in territory
+                    let po = self.tile_ownership.read((game_id, lq, lr));
+                    let ow: u32 = (po & 0xFFFFFFFF).try_into().unwrap();
+                    let op: u8 = ((po / 0x100000000) & 0xFF).try_into().unwrap();
+                    if ow == cid + 1 && op == player {
+                        result.append((lq, lr));
+                        additional += 1;
+                    }
+                }
+                li += 1;
+            };
+
+            if additional >= max_additional {
+                return result;
+            }
+
+            // 2. Gather all territory tiles with yields, excluding center and locked
+            let all_tiles = hex::hexes_in_range(city_q, city_r, radius);
+            let at_span = all_tiles.span();
+            let at_len = at_span.len();
+
+            // Build scored list: (score, q, r) for auto-assignment
+            // Score = food*3 + production*2 + gold*1 (prioritize food, then prod)
+            let mut scored: Array<(u16, u8, u8)> = array![];
+            let mut ai: u32 = 0;
+            while ai < at_len {
+                let (aq, ar) = *at_span.at(ai);
+                // Skip city center (already worked for free)
+                if aq == city_q && ar == city_r {
+                    ai += 1;
+                    continue;
+                }
+                // Skip if already in locked set
+                let mut is_locked = false;
+                let rspan = result.span();
+                let mut ri: u32 = 0;
+                while ri < rspan.len() {
+                    let (rq, rr) = *rspan.at(ri);
+                    if rq == aq && rr == ar {
+                        is_locked = true;
+                        break;
+                    }
+                    ri += 1;
+                };
+                if !is_locked {
+                    let td = self.tiles.read((game_id, aq, ar));
+                    // Skip unworkable tiles
+                    if td.terrain != 0 && td.terrain != 12 {
+                        let imp = self.tile_improvement.read((game_id, aq, ar));
+                        let y = city::compute_tile_yield(@td, imp);
+                        let score: u16 = y.food.into() * 3 + y.production.into() * 2 + y.gold.into();
+                        scored.append((score, aq, ar));
+                    }
+                }
+                ai += 1;
+            };
+
+            // 3. Sort by score descending (simple selection sort — small arrays)
+            let scored_span = scored.span();
+            let slen = scored_span.len();
+            let mut sorted_indices: Array<u32> = array![];
+            let mut used: Array<bool> = array![];
+            let mut ui: u32 = 0;
+            while ui < slen {
+                sorted_indices.append(ui);
+                used.append(false);
+                ui += 1;
+            };
+
+            let remaining = max_additional - additional;
+            let mut picked: u32 = 0;
+            while picked < remaining && picked < slen {
+                // Find best unused
+                let mut best_idx: u32 = 0;
+                let mut best_score: u16 = 0;
+                let mut found_any = false;
+                let mut si2: u32 = 0;
+                while si2 < slen {
+                    if !*used.at(si2) {
+                        let (sc, _, _) = *scored_span.at(si2);
+                        if !found_any || sc > best_score {
+                            best_score = sc;
+                            best_idx = si2;
+                            found_any = true;
+                        }
+                    }
+                    si2 += 1;
+                };
+                if !found_any { break; }
+                // Mark used
+                used = Self::array_set_bool(used, best_idx, true);
+                let (_, bq, br) = *scored_span.at(best_idx);
+                result.append((bq, br));
+                picked += 1;
+            };
+
+            result
+        }
+
+        /// Helper: set a bool in an array at index (rebuild)
+        fn array_set_bool(arr: Array<bool>, idx: u32, val: bool) -> Array<bool> {
+            let span = arr.span();
+            let len = span.len();
+            let mut r: Array<bool> = array![];
+            let mut i: u32 = 0;
+            while i < len {
+                if i == idx { r.append(val); } else { r.append(*span.at(i)); }
+                i += 1;
+            };
+            r
+        }
+
         // ---- End of turn processing ----
         fn process_end_of_turn(ref self: ContractState, game_id: u64, player: u8) {
             let cc = self.player_city_count.read((game_id, player));
@@ -790,23 +1102,19 @@ mod CairoCiv {
             while ci < cc {
                 let mut c = self.cities.read((game_id, player, ci));
 
-                // Compute basic yields from territory tiles
+                // Compute worked tiles using smart assignment (locked + auto best-yield)
                 let radius = constants::territory_radius(c.population);
-                let tiles_in_range = hex::hexes_in_range(c.q, c.r, radius);
-                let tspan = tiles_in_range.span();
+                let worked = Self::compute_worked_tiles(@self, game_id, player, ci, c.q, c.r, c.population, radius);
+                let wspan = worked.span();
+                let wlen = wspan.len();
                 let mut food: u16 = 0;
                 let mut prod: u16 = 0;
                 let mut gold: u16 = 0;
                 let mut ti: u32 = 0;
-                let tlen = tspan.len();
-                // Only work population number of tiles
-                let max_tiles: u32 = c.population.into();
-                let work_count = if tlen < max_tiles { tlen } else { max_tiles };
-                while ti < work_count {
-                    let (tq, tr) = *tspan.at(ti);
+                while ti < wlen {
+                    let (tq, tr) = *wspan.at(ti);
                     let td = self.tiles.read((game_id, tq, tr));
                     let imp = self.tile_improvement.read((game_id, tq, tr));
-                    // City center tile gets guaranteed minimum 2 food / 1 production
                     let y = if tq == c.q && tr == c.r {
                         city::compute_city_center_yield(@td, imp)
                     } else {
@@ -850,9 +1158,9 @@ mod CairoCiv {
                         let nlen = nts.len();
                         while ni < nlen {
                             let (nq, nr) = *nts.at(ni);
-                            if self.tile_owner.read((game_id, nq, nr)) == 0 {
-                                self.tile_owner.write((game_id, nq, nr), ci + 1);
-                                self.tile_owner_player.write((game_id, nq, nr), player);
+                            if self.tile_ownership.read((game_id, nq, nr)) == 0 {
+                                let packed: u64 = (ci + 1).into() | (Into::<u8, u64>::into(player) * 0x100000000);
+                                self.tile_ownership.write((game_id, nq, nr), packed);
                             }
                             ni += 1;
                         };
@@ -877,13 +1185,22 @@ mod CairoCiv {
                 ci += 1;
             };
 
-            // Count military units for maintenance
+            // Single pass over units: count advanced military for maintenance + heal
             let uc = self.player_unit_count.read((game_id, player));
             let mut ui: u32 = 0;
             while ui < uc {
-                let u = self.units.read((game_id, player, ui));
-                if u.hp > 0 && !constants::is_civilian(u.unit_type) {
-                    military_count += 1;
+                let mut u = self.units.read((game_id, player, ui));
+                if u.hp > 0 {
+                    // Maintenance: only advanced units cost gold
+                    if constants::costs_maintenance(u.unit_type) {
+                        military_count += 1;
+                    }
+                    // Healing
+                    if u.hp < 100 {
+                        let new_hp = turn::heal_unit(@u, true, false, u.fortify_turns > 0);
+                        u.hp = new_hp;
+                        self.units.write((game_id, player, ui), u);
+                    }
                 }
                 ui += 1;
             };
@@ -894,24 +1211,23 @@ mod CairoCiv {
             let (new_treasury, _disband) = economy::update_treasury(treasury, net_gold);
             self.player_treasury.write((game_id, player), new_treasury);
 
-            // Tech research
+            // Tech research — per-tech accumulated science
             let cur_tech = self.player_current_research.read((game_id, player));
             if cur_tech > 0 {
-                let acc = self.player_accumulated_half_science.read((game_id, player));
+                let acc = self.tech_accumulated_half_science.read((game_id, player, cur_tech));
                 let half_sci: u16 = total_half_science.try_into().unwrap();
                 let (new_acc, completed_tech) = tech::process_research(cur_tech, acc, half_sci);
-                self.player_accumulated_half_science.write((game_id, player), new_acc);
+                self.tech_accumulated_half_science.write((game_id, player, cur_tech), new_acc);
                 if completed_tech > 0 {
                     let techs = self.player_completed_techs.read((game_id, player));
                     let new_techs = tech::mark_researched(completed_tech, techs);
                     self.player_completed_techs.write((game_id, player), new_techs);
                     self.player_current_research.write((game_id, player), 0);
+                    // Clear accumulated science for completed tech
+                    self.tech_accumulated_half_science.write((game_id, player, completed_tech), 0);
                     self.emit(TechCompleted { game_id, player_idx: player, tech_id: completed_tech });
                 }
             }
-
-            // Heal units
-            Self::heal_units(ref self, game_id, player);
         }
 
         fn handle_production_complete(ref self: ContractState, game_id: u64, player: u8, cid: u32, item: u8, city_q: u8, city_r: u8) {
@@ -934,20 +1250,6 @@ mod CairoCiv {
                 self.cities.write((game_id, player, cid), c);
                 self.emit(BuildingCompleted { game_id, player_idx: player, city_id: cid, building_bit: bbit });
             }
-        }
-
-        fn heal_units(ref self: ContractState, game_id: u64, player: u8) {
-            let uc = self.player_unit_count.read((game_id, player));
-            let mut ui: u32 = 0;
-            while ui < uc {
-                let mut u = self.units.read((game_id, player, ui));
-                if u.hp > 0 && u.hp < 100 {
-                    let new_hp = turn::heal_unit(@u, true, false, u.fortify_turns > 0);
-                    u.hp = new_hp;
-                    self.units.write((game_id, player, ui), u);
-                }
-                ui += 1;
-            };
         }
 
         fn reset_movement_for(ref self: ContractState, game_id: u64, player: u8) {
@@ -1001,20 +1303,14 @@ mod CairoCiv {
         fn ensure_passable_neighbors(ref self: ContractState, game_id: u64, q: u8, r: u8) {
             use cairo_civ::types::{
                 TERRAIN_OCEAN, TERRAIN_COAST, TERRAIN_MOUNTAIN, TERRAIN_GRASSLAND,
-                FEATURE_NONE, RESOURCE_NONE, MAP_WIDTH, MAP_HEIGHT,
+                FEATURE_NONE, RESOURCE_NONE,
             };
-            // 6 hex directions: E(+1,0), NE(+1,-1), NW(0,-1), W(-1,0), SW(-1,+1), SE(0,+1)
-            let dirs: [(i16, i16); 6] = [
-                (1, 0), (1, -1), (0, -1), (-1, 0), (-1, 1), (0, 1),
-            ];
+            let neighbors = hex::hex_neighbors(q, r);
+            let nspan = neighbors.span();
             let mut d: u32 = 0;
-            while d < 6 {
-                let (dq, dr) = *dirs.span().at(d);
-                let nq: i16 = q.into() + dq;
-                let nr: i16 = r.into() + dr;
-                if nq >= 0 && nq < MAP_WIDTH.into() && nr >= 0 && nr < MAP_HEIGHT.into() {
-                    let nq_u8: u8 = nq.try_into().unwrap();
-                    let nr_u8: u8 = nr.try_into().unwrap();
+            while d < nspan.len() {
+                let (nq_u8, nr_u8) = *nspan.at(d);
+                {
                     let t = self.tiles.read((game_id, nq_u8, nr_u8));
                     if t.terrain == TERRAIN_OCEAN
                         || t.terrain == TERRAIN_COAST

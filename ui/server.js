@@ -77,7 +77,9 @@ const ACTION = {
   PurchaseWithGold: 10,
   UpgradeUnit:      11,
   DeclareWar:       12,
-  EndTurn:          13,
+  AssignCitizen:    13,
+  UnassignCitizen:  14,
+  EndTurn:          15,
 };
 
 /** Encode a single UI action object into raw calldata felts. */
@@ -95,6 +97,8 @@ function encodeAction(a) {
     case 'SkipUnit':          return [ACTION.SkipUnit, a.unitId];
     case 'DeclareWar':        return [ACTION.DeclareWar, a.target];
     case 'UpgradeUnit':       return [ACTION.UpgradeUnit, a.unitId];
+    case 'AssignCitizen':     return [ACTION.AssignCitizen, a.cityId, a.q, a.r];
+    case 'UnassignCitizen':   return [ACTION.UnassignCitizen, a.cityId, a.q, a.r];
     case 'EndTurn':           return [ACTION.EndTurn];
     default: throw new Error('Unknown action type: ' + a.type);
   }
@@ -359,10 +363,11 @@ app.get('/api/state', async (_req, res) => {
           Promise.all([
             readContract.call('get_tile', [gid, q, r]),
             readContract.call('get_tile_owner', [gid, q, r]),
-          ]).then(([t, owner]) => ({
+            readContract.call('get_tile_improvement', [gid, q, r]),
+          ]).then(([t, owner, imp]) => ({
             q, r, terrain: n(t.terrain), feature: n(t.feature), resource: n(t.resource), riverEdges: n(t.river_edges),
-            ownerPlayer: n(owner[0]), ownerCity: n(owner[1]),
-          })).catch(() => ({ q, r, terrain: 0, feature: 0, resource: 0, riverEdges: 0, ownerPlayer: 0, ownerCity: 0 }))
+            ownerPlayer: n(owner[0]), ownerCity: n(owner[1]), improvement: n(imp),
+          })).catch(() => ({ q, r, terrain: 0, feature: 0, resource: 0, riverEdges: 0, ownerPlayer: 0, ownerCity: 0, improvement: 0 }))
         );
       }
       tiles.push(...(await Promise.all(promises)));
@@ -371,15 +376,19 @@ app.get('/api/state', async (_req, res) => {
     // Fetch player data
     const players = [];
     for (let p = 0; p < 2; p++) {
-      const [unitCount, cityCount, treasury, techs, research, accSci, diplo] = await Promise.all([
+      const [unitCount, cityCount, treasury, techs, research, diplo] = await Promise.all([
         readContract.call('get_unit_count',     [gid, p]),
         readContract.call('get_city_count',     [gid, p]),
         readContract.call('get_treasury',       [gid, p]),
         readContract.call('get_completed_techs',[gid, p]),
         readContract.call('get_current_research',[gid, p]),
-        readContract.call('get_accumulated_science',[gid, p]),
         readContract.call('get_diplomacy_status',[gid, 0, 1]),
       ]);
+      // Fetch per-tech accumulated science for the current research target
+      const curResearch = n(research);
+      const accSci = curResearch > 0
+        ? await readContract.call('get_accumulated_science', [gid, p, curResearch])
+        : 0;
 
       // Fetch units
       const uc = n(unitCount);
@@ -393,11 +402,20 @@ app.get('/api/state', async (_req, res) => {
         });
       }
 
-      // Fetch cities
+      // Fetch cities + locked tile assignments
       const cc = n(cityCount);
       const cities = [];
       for (let c = 0; c < cc; c++) {
-        const city = await readContract.call('get_city', [gid, p, c]);
+        const [city, lockedCount] = await Promise.all([
+          readContract.call('get_city', [gid, p, c]),
+          readContract.call('get_city_locked_count', [gid, p, c]),
+        ]);
+        const lc = n(lockedCount);
+        const lockedTiles = [];
+        for (let s = 0; s < lc; s++) {
+          const lt = await readContract.call('get_city_locked_tile', [gid, p, c, s]);
+          lockedTiles.push({ q: n(lt[0]), r: n(lt[1]) });
+        }
         cities.push({
           id: c, name: shortString.decodeShortString(city.name?.toString() || '0'),
           q: n(city.q), r: n(city.r), population: n(city.population), hp: n(city.hp),
@@ -406,6 +424,7 @@ app.get('/api/state', async (_req, res) => {
           foodStockpile: n(city.food_stockpile),
           prodStockpile: n(city.production_stockpile),
           foundedTurn: n(city.founded_turn),
+          lockedTiles,
         });
       }
 
@@ -420,7 +439,7 @@ app.get('/api/state', async (_req, res) => {
       players.push({
         units, cities, treasury: n(treasury),
         completedTechs: techs?.toString() || '0',
-        currentResearch: n(research),
+        currentResearch: curResearch,
         accumulatedHalfScience: n(accSci),
         halfSciencePerTurn: halfSciPerTurn,
         diplomacy: n(diplo),

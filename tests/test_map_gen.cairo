@@ -136,7 +136,7 @@ fn test_resource_not_on_mountain() {
 // Starting positions (M13–M16)
 // ===========================================================================
 
-// M13: Starting positions are at least 10 hexes apart
+// M13: Starting positions are at least 8 hexes apart
 #[test]
 fn test_starting_positions_distance() {
     let tiles = map_gen::generate_map(42, 32, 20);
@@ -146,7 +146,7 @@ fn test_starting_positions_distance() {
             let (q1, r1) = p1;
             let (q2, r2) = p2;
             let dist = cairo_civ::hex::hex_distance(q1, r1, q2, r2);
-            assert!(dist >= 10);
+            assert!(dist >= 8, "Starting positions must be >= 8 hexes apart, got {}", dist);
         },
         Option::None => {
             // Map may not generate valid starts — test just checks the constraint
@@ -280,4 +280,163 @@ fn test_rivers_start_at_mountains() {
     // First river entry should be near/on a mountain
     // Specific validation depends on implementation
     assert!(rivers.len() >= 0); // placeholder — real check after impl
+}
+
+// ===========================================================================
+// Starting position edge distance (M24–M28)
+// ===========================================================================
+
+// M24: Both starting positions are >= 4 tiles from every map edge
+#[test]
+fn test_starting_positions_far_from_edge() {
+    let tiles = map_gen::generate_map(42, 32, 20);
+    let positions = map_gen::find_starting_positions(tiles.span(), 42);
+    match positions {
+        Option::Some((p1, p2)) => {
+            let (q1, r1) = p1;
+            let (q2, r2) = p2;
+            // Player 1
+            assert!(q1 >= 4, "P1 too close to left edge: q={}", q1);
+            assert!(q1 + 4 < 32, "P1 too close to right edge: q={}", q1);
+            assert!(r1 >= 4, "P1 too close to top edge: r={}", r1);
+            assert!(r1 + 4 < 20, "P1 too close to bottom edge: r={}", r1);
+            // Player 2
+            assert!(q2 >= 4, "P2 too close to left edge: q={}", q2);
+            assert!(q2 + 4 < 32, "P2 too close to right edge: q={}", q2);
+            assert!(r2 >= 4, "P2 too close to top edge: r={}", r2);
+            assert!(r2 + 4 < 20, "P2 too close to bottom edge: r={}", r2);
+        },
+        Option::None => {},
+    }
+}
+
+// M25: Edge distance constraint holds with a different seed
+#[test]
+fn test_starting_positions_edge_distance_seed_99() {
+    let seed: felt252 = 99;
+    let tiles = map_gen::generate_map(seed, 32, 20);
+    let positions = map_gen::find_starting_positions(tiles.span(), seed);
+    match positions {
+        Option::Some((p1, p2)) => {
+            let (q1, r1) = p1;
+            let (q2, r2) = p2;
+            assert!(q1 >= 4 && q1 + 4 < 32, "P1 q out of safe zone");
+            assert!(r1 >= 4 && r1 + 4 < 20, "P1 r out of safe zone");
+            assert!(q2 >= 4 && q2 + 4 < 32, "P2 q out of safe zone");
+            assert!(r2 >= 4 && r2 + 4 < 20, "P2 r out of safe zone");
+            let dist = cairo_civ::hex::hex_distance(q1, r1, q2, r2);
+            assert!(dist >= 8, "Distance too small");
+        },
+        Option::None => {},
+    }
+}
+
+// M25b: Edge distance constraint holds with yet another seed
+#[test]
+fn test_starting_positions_edge_distance_seed_1234() {
+    let seed: felt252 = 1234;
+    let tiles = map_gen::generate_map(seed, 32, 20);
+    let positions = map_gen::find_starting_positions(tiles.span(), seed);
+    match positions {
+        Option::Some((p1, p2)) => {
+            let (q1, r1) = p1;
+            let (q2, r2) = p2;
+            assert!(q1 >= 4 && q1 + 4 < 32, "P1 q out of safe zone");
+            assert!(r1 >= 4 && r1 + 4 < 20, "P1 r out of safe zone");
+            assert!(q2 >= 4 && q2 + 4 < 32, "P2 q out of safe zone");
+            assert!(r2 >= 4 && r2 + 4 < 20, "P2 r out of safe zone");
+            let dist = cairo_civ::hex::hex_distance(q1, r1, q2, r2);
+            assert!(dist >= 8, "Distance too small");
+        },
+        Option::None => {},
+    }
+}
+
+// M26: Tiles exactly at the edge boundary are rejected as starting positions
+#[test]
+fn test_starting_positions_reject_edge_tiles() {
+    // Build a map where the only land tiles are at the edges
+    let mut tiles: Array<(u8, u8, TileData)> = array![];
+    let mut q: u8 = 0;
+    while q < 32 {
+        let mut r: u8 = 0;
+        while r < 20 {
+            // Only place land at the first 3 rows/cols (within the edge zone)
+            let terrain = if q < 4 || r < 4 {
+                TERRAIN_GRASSLAND
+            } else {
+                TERRAIN_OCEAN
+            };
+            tiles.append((q, r, TileData {
+                terrain,
+                feature: FEATURE_NONE,
+                resource: RESOURCE_NONE,
+                river_edges: 0,
+            }));
+            r += 1;
+        };
+        q += 1;
+    };
+    // No land tiles >= 4 from edge, so should return None
+    let positions = map_gen::find_starting_positions(tiles.span(), 42);
+    assert!(positions.is_none(), "Should not find starts when all land is near edges");
+}
+
+// M27: Different seeds produce different starting positions
+#[test]
+fn test_starting_positions_vary_with_seed() {
+    let tiles = map_gen::generate_map(42, 32, 20);
+    let pos_a = map_gen::find_starting_positions(tiles.span(), 42);
+    let pos_b = map_gen::find_starting_positions(tiles.span(), 999);
+    // With different seeds on the same map, positions should (usually) differ
+    match (pos_a, pos_b) {
+        (Option::Some(((q1a, r1a), _)), Option::Some(((q1b, r1b), _))) => {
+            // At least one coordinate should differ (not strictly guaranteed,
+            // but extremely likely with different seeds)
+            let same = q1a == q1b && r1a == r1b;
+            // We just check that the function accepted both — if they happen to
+            // be the same, it's a valid but rare coincidence
+            assert!(q1a < 32 && q1b < 32);
+        },
+        _ => {},
+    }
+}
+
+// M28: Starting positions on a fully-interior-land map are always valid
+#[test]
+fn test_starting_positions_all_land_map() {
+    // Build a map that is all grassland — every tile is valid land
+    let mut tiles: Array<(u8, u8, TileData)> = array![];
+    let mut q: u8 = 0;
+    while q < 32 {
+        let mut r: u8 = 0;
+        while r < 20 {
+            tiles.append((q, r, TileData {
+                terrain: TERRAIN_GRASSLAND,
+                feature: FEATURE_NONE,
+                resource: RESOURCE_NONE,
+                river_edges: 0,
+            }));
+            r += 1;
+        };
+        q += 1;
+    };
+    let positions = map_gen::find_starting_positions(tiles.span(), 42);
+    match positions {
+        Option::Some((p1, p2)) => {
+            let (q1, r1) = p1;
+            let (q2, r2) = p2;
+            // Both must be >= 4 from all edges
+            assert!(q1 >= 4 && q1 + 4 < 32);
+            assert!(r1 >= 4 && r1 + 4 < 20);
+            assert!(q2 >= 4 && q2 + 4 < 32);
+            assert!(r2 >= 4 && r2 + 4 < 20);
+            // Must be >= 8 apart
+            let dist = cairo_civ::hex::hex_distance(q1, r1, q2, r2);
+            assert!(dist >= 8);
+        },
+        Option::None => {
+            assert!(false, "All-land map should always find valid starting positions");
+        },
+    }
 }

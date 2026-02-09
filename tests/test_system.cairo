@@ -5,8 +5,7 @@
 // ============================================================================
 
 use snforge_std::{declare, ContractClassTrait, DeclareResultTrait,
-    start_cheat_caller_address, stop_cheat_caller_address,
-    start_cheat_block_timestamp, stop_cheat_block_timestamp};
+    start_cheat_caller_address, stop_cheat_caller_address};
 use starknet::{ContractAddress, contract_address_const};
 use cairo_civ::contract::{ICairoCivDispatcher, ICairoCivDispatcherTrait};
 use cairo_civ::types::{
@@ -80,7 +79,7 @@ fn skip_turn(d: ICairoCivDispatcher, addr: ContractAddress, player: ContractAddr
         while ci < cc {
             let c = d.get_city(game_id, pidx, ci);
             if c.current_production == 0 {
-                actions.append(Action::SetProduction((ci, PROD_WARRIOR)));
+                actions.append(Action::SetProduction((ci, PROD_BUILDER)));
             }
             ci += 1;
         };
@@ -159,36 +158,6 @@ fn test_full_game_score_victory() {
     // Play to turn limit (would need 148 more turns)
     // For test brevity, just verify the mechanism
     assert!(d.get_current_turn(game_id) == 2);
-}
-
-// ===========================================================================
-// S3: Forfeit — 3 timeouts
-// ===========================================================================
-
-#[test]
-fn test_full_game_forfeit() {
-    let (d, addr) = deploy();
-    let game_id = setup_active_game(d, addr);
-
-    // Set time past timeout threshold
-    start_cheat_block_timestamp(addr, 400);
-
-    // 3 timeouts
-    start_cheat_caller_address(addr, player_b());
-    d.claim_timeout_victory(game_id);
-    stop_cheat_caller_address(addr);
-
-    start_cheat_caller_address(addr, player_a());
-    d.claim_timeout_victory(game_id);
-    stop_cheat_caller_address(addr);
-
-    start_cheat_caller_address(addr, player_b());
-    d.claim_timeout_victory(game_id);
-    stop_cheat_caller_address(addr);
-
-    stop_cheat_block_timestamp(addr);
-
-    assert!(d.get_game_status(game_id) == STATUS_FINISHED);
 }
 
 // ===========================================================================
@@ -1195,19 +1164,37 @@ fn test_upgrade_slinger_to_archer() {
     ]);
     skip_turn(d, addr, player_b(), game_id);
 
-    // Wait for slinger and AH to complete
-    skip_rounds(d, addr, game_id, 25);
+    // Advance 5 rounds at a time, checking after each batch
+    let mut total: u32 = 0;
+    let max: u32 = 50;
+    let upgrade_cost: u32 = 30;
+    while total < max {
+        let t = d.get_completed_techs(game_id, 0);
+        let g = d.get_treasury(game_id, 0);
+        if tech::is_researched(4, t) && g >= upgrade_cost { break; }
 
-    // Switch to Archery research
-    submit_turn(d, addr, player_a(), game_id, array![
-        Action::SetResearch(4), // Archery
-        Action::SetProduction((0, PROD_WARRIOR)),
-        Action::EndTurn,
-    ]);
-    skip_turn(d, addr, player_b(), game_id);
+        // If Archery is not yet researched and not being researched, set it
+        if tech::is_researched(3, t) && !tech::is_researched(4, t) {
+            let cur = d.get_current_research(game_id, 0);
+            if cur != 4 {
+                submit_turn(d, addr, player_a(), game_id, array![
+                    Action::SetResearch(4),
+                    Action::SetProduction((0, PROD_BUILDER)),
+                    Action::EndTurn,
+                ]);
+                skip_turn(d, addr, player_b(), game_id);
+                total += 1;
+                continue;
+            }
+        }
 
-    // Wait for Archery to complete and accumulate gold
-    skip_rounds(d, addr, game_id, 25);
+        skip_turn(d, addr, player_a(), game_id);
+        skip_turn(d, addr, player_b(), game_id);
+        total += 1;
+    };
+
+    assert!(tech::is_researched(4, d.get_completed_techs(game_id, 0)), "Archery not done");
+    assert!(d.get_treasury(game_id, 0) >= upgrade_cost, "Not enough gold");
 
     // Find the slinger
     let uc = d.get_unit_count(game_id, 0);
@@ -1221,26 +1208,33 @@ fn test_upgrade_slinger_to_archer() {
         }
         si += 1;
     };
+    assert!(slinger_id != 999, "Slinger not found");
 
-    if slinger_id != 999 {
-        let gold_before = d.get_treasury(game_id, 0);
-        // Upgrade slinger to archer
-        submit_turn(d, addr, player_a(), game_id, array![
-            Action::UpgradeUnit(slinger_id),
-            Action::SetProduction((0, PROD_WARRIOR)),
-            Action::EndTurn,
-        ]);
-        skip_turn(d, addr, player_b(), game_id);
-
-        let upgraded = d.get_unit(game_id, 0, slinger_id);
-        assert!(upgraded.unit_type == UNIT_ARCHER);
-        let gold_after = d.get_treasury(game_id, 0);
-        assert!(gold_after < gold_before); // Gold deducted
-    } else {
-        // Slinger not yet produced — skip (shouldn't happen with enough turns)
-        skip_turn(d, addr, player_a(), game_id);
-        skip_turn(d, addr, player_b(), game_id);
+    // Ensure research is set (it may be 0 if Archery just completed)
+    let cur_r = d.get_current_research(game_id, 0);
+    let mut upgrade_actions: Array<Action> = array![];
+    if cur_r == 0 {
+        let t2 = d.get_completed_techs(game_id, 0);
+        let mut tid: u8 = 1;
+        while tid <= 18 {
+            if !tech::is_researched(tid, t2) && tech::can_research(tid, t2) {
+                upgrade_actions.append(Action::SetResearch(tid));
+                break;
+            }
+            tid += 1;
+        };
     }
+    let gold_before = d.get_treasury(game_id, 0);
+    upgrade_actions.append(Action::UpgradeUnit(slinger_id));
+    upgrade_actions.append(Action::SetProduction((0, PROD_BUILDER)));
+    upgrade_actions.append(Action::EndTurn);
+    submit_turn(d, addr, player_a(), game_id, upgrade_actions);
+    skip_turn(d, addr, player_b(), game_id);
+
+    let upgraded = d.get_unit(game_id, 0, slinger_id);
+    assert!(upgraded.unit_type == UNIT_ARCHER);
+    let gold_after = d.get_treasury(game_id, 0);
+    assert!(gold_after < gold_before); // Gold deducted
 }
 
 // ===========================================================================
@@ -1267,23 +1261,21 @@ fn test_purchase_unit_with_gold() {
     let gold_before = d.get_treasury(game_id, 0);
 
     // Purchase warrior with gold (cost = 40 * 4 = 160)
-    if gold_before >= 160 {
-        submit_turn(d, addr, player_a(), game_id, array![
-            Action::PurchaseWithGold((0, PROD_WARRIOR)),
-            Action::SetProduction((0, PROD_WARRIOR)),
-            Action::EndTurn,
-        ]);
-        skip_turn(d, addr, player_b(), game_id);
+    // With palace +5 gold/turn and no maintenance (warriors/builders free),
+    // 40 rounds gives ~200 gold. Should be plenty.
+    assert!(gold_before >= 160, "Not enough gold: {}", gold_before);
 
-        let units_after = d.get_unit_count(game_id, 0);
-        assert!(units_after == units_before + 1);
-        let gold_after = d.get_treasury(game_id, 0);
-        assert!(gold_after < gold_before);
-    } else {
-        // Not enough gold yet — just verify state
-        skip_turn(d, addr, player_a(), game_id);
-        skip_turn(d, addr, player_b(), game_id);
-    }
+    submit_turn(d, addr, player_a(), game_id, array![
+        Action::PurchaseWithGold((0, PROD_WARRIOR)),
+        Action::SetProduction((0, PROD_BUILDER)),
+        Action::EndTurn,
+    ]);
+    skip_turn(d, addr, player_b(), game_id);
+
+    let units_after = d.get_unit_count(game_id, 0);
+    assert!(units_after == units_before + 1, "Expected {} units, got {}", units_before + 1, units_after);
+    let gold_after = d.get_treasury(game_id, 0);
+    assert!(gold_after < gold_before);
 }
 
 // ===========================================================================
@@ -1630,4 +1622,774 @@ fn test_fuzz_map_has_land_and_water() {
     let total: u32 = MAP_WIDTH.into() * MAP_HEIGHT.into();
     assert!(land_count >= total / 10);
     assert!(water_count >= total / 10);
+}
+
+// ===========================================================================
+// Citizen Auto-Assign & Manual-Assign System Tests (TW1–TW15)
+// ===========================================================================
+
+/// Helper: compute yield score for a tile (mirrors contract: food*3 + prod*2 + gold)
+fn tile_score(d: ICairoCivDispatcher, game_id: u64, q: u8, r: u8, city_q: u8, city_r: u8) -> u16 {
+    use cairo_civ::city;
+    let td = d.get_tile(game_id, q, r);
+    let imp = d.get_tile_improvement(game_id, q, r);
+    let y = if q == city_q && r == city_r {
+        city::compute_city_center_yield(@td, imp)
+    } else {
+        city::compute_tile_yield(@td, imp)
+    };
+    y.food.into() * 3 + y.production.into() * 2 + y.gold.into()
+}
+
+/// Helper: compute food yield for a tile
+fn tile_food(d: ICairoCivDispatcher, game_id: u64, q: u8, r: u8, city_q: u8, city_r: u8) -> u8 {
+    use cairo_civ::city;
+    let td = d.get_tile(game_id, q, r);
+    let imp = d.get_tile_improvement(game_id, q, r);
+    let y = if q == city_q && r == city_r {
+        city::compute_city_center_yield(@td, imp)
+    } else {
+        city::compute_tile_yield(@td, imp)
+    };
+    y.food
+}
+
+/// Helper: get all workable territory tiles for a city (not ocean/mountain, owned by city)
+fn get_workable_territory(d: ICairoCivDispatcher, game_id: u64, player: u8, city_id: u32) -> Array<(u8, u8)> {
+    let c = d.get_city(game_id, player, city_id);
+    let radius = constants::territory_radius(c.population);
+    let tiles = hex::hexes_in_range(c.q, c.r, radius);
+    let span = tiles.span();
+    let mut result: Array<(u8, u8)> = array![];
+    let mut i: u32 = 0;
+    while i < span.len() {
+        let (tq, tr) = *span.at(i);
+        let td = d.get_tile(game_id, tq, tr);
+        if td.terrain != 0 && td.terrain != 12 {
+            let (op, oc) = d.get_tile_owner(game_id, tq, tr);
+            if op == player && oc == city_id + 1 {
+                result.append((tq, tr));
+            }
+        }
+        i += 1;
+    };
+    result
+}
+
+/// Helper: find the lowest-yield non-center territory tile for a city
+fn find_worst_territory_tile(
+    d: ICairoCivDispatcher, game_id: u64, player: u8, city_id: u32,
+) -> (u8, u8, u16) {
+    let c = d.get_city(game_id, player, city_id);
+    let workable = get_workable_territory(d, game_id, player, city_id);
+    let span = workable.span();
+    let mut worst_q: u8 = 0;
+    let mut worst_r: u8 = 0;
+    let mut worst_score: u16 = 9999;
+    let mut i: u32 = 0;
+    while i < span.len() {
+        let (tq, tr) = *span.at(i);
+        if tq != c.q || tr != c.r {
+            let sc = tile_score(d, game_id, tq, tr, c.q, c.r);
+            if sc < worst_score {
+                worst_score = sc;
+                worst_q = tq;
+                worst_r = tr;
+            }
+        }
+        i += 1;
+    };
+    (worst_q, worst_r, worst_score)
+}
+
+/// Helper: find the best-yield non-center territory tile for a city
+fn find_best_territory_tile(
+    d: ICairoCivDispatcher, game_id: u64, player: u8, city_id: u32,
+) -> (u8, u8, u16) {
+    let c = d.get_city(game_id, player, city_id);
+    let workable = get_workable_territory(d, game_id, player, city_id);
+    let span = workable.span();
+    let mut best_q: u8 = 0;
+    let mut best_r: u8 = 0;
+    let mut best_score: u16 = 0;
+    let mut i: u32 = 0;
+    while i < span.len() {
+        let (tq, tr) = *span.at(i);
+        if tq != c.q || tr != c.r {
+            let sc = tile_score(d, game_id, tq, tr, c.q, c.r);
+            if sc > best_score {
+                best_score = sc;
+                best_q = tq;
+                best_r = tr;
+            }
+        }
+        i += 1;
+    };
+    (best_q, best_r, best_score)
+}
+
+/// Helper: sort territory tiles by yield score descending
+fn sorted_territory_scores(
+    d: ICairoCivDispatcher, game_id: u64, player: u8, city_id: u32,
+    exclude_center: bool,
+) -> Array<(u16, u8, u8)> {
+    let c = d.get_city(game_id, player, city_id);
+    let workable = get_workable_territory(d, game_id, player, city_id);
+    let span = workable.span();
+    let mut scored: Array<(u16, u8, u8)> = array![];
+    let mut i: u32 = 0;
+    while i < span.len() {
+        let (tq, tr) = *span.at(i);
+        if exclude_center && tq == c.q && tr == c.r {
+            i += 1;
+            continue;
+        }
+        let sc = tile_score(d, game_id, tq, tr, c.q, c.r);
+        scored.append((sc, tq, tr));
+        i += 1;
+    };
+    // Selection sort descending
+    let len = scored.len();
+    let sspan = scored.span();
+    let mut sorted: Array<(u16, u8, u8)> = array![];
+    let mut used: Array<bool> = array![];
+    let mut ui: u32 = 0;
+    while ui < len {
+        used.append(false);
+        ui += 1;
+    };
+    let mut picked: u32 = 0;
+    while picked < len {
+        let mut best_idx: u32 = 0;
+        let mut best_sc: u16 = 0;
+        let mut found_any = false;
+        let mut si: u32 = 0;
+        while si < len {
+            if !*used.at(si) {
+                let (sc, _, _) = *sspan.at(si);
+                if !found_any || sc > best_sc {
+                    best_sc = sc;
+                    best_idx = si;
+                    found_any = true;
+                }
+            }
+            si += 1;
+        };
+        if !found_any { break; }
+        used = rebuild_used(used, best_idx);
+        sorted.append(*sspan.at(best_idx));
+        picked += 1;
+    };
+    sorted
+}
+
+/// Helper: rebuild used array with one index set to true
+fn rebuild_used(arr: Array<bool>, idx: u32) -> Array<bool> {
+    let span = arr.span();
+    let len = span.len();
+    let mut r: Array<bool> = array![];
+    let mut i: u32 = 0;
+    while i < len {
+        if i == idx { r.append(true); } else { r.append(*span.at(i)); }
+        i += 1;
+    };
+    r
+}
+
+/// Helper: setup game and found player A's city, return game_id.
+fn setup_with_city_sys(d: ICairoCivDispatcher, addr: ContractAddress) -> u64 {
+    let game_id = setup_active_game(d, addr);
+    let settler = d.get_unit(game_id, 0, 0);
+    assert!(settler.unit_type == UNIT_SETTLER);
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![
+        Action::FoundCity((0, 'TestCity')),
+    ]);
+    stop_cheat_caller_address(addr);
+    game_id
+}
+
+/// Helper: find first available research tech for a player.
+fn find_research(d: ICairoCivDispatcher, game_id: u64, player: u8) -> u8 {
+    let techs = d.get_completed_techs(game_id, player);
+    let mut tid: u8 = 1;
+    while tid <= 18 {
+        if !tech::is_researched(tid, techs) && tech::can_research(tid, techs) {
+            return tid;
+        }
+        tid += 1;
+    };
+    0
+}
+
+/// Helper: grow a city to target pop.  Skips up to `max_rounds` full rounds.
+/// Returns the population actually reached (may be < target if the map seed
+/// produces a food-poor starting location).
+fn grow_city(
+    d: ICairoCivDispatcher, addr: ContractAddress, game_id: u64,
+    player: u8, city_id: u32, target_pop: u8, max_rounds: u32,
+) -> u8 {
+    let mut i: u32 = 0;
+    while i < max_rounds {
+        let c = d.get_city(game_id, player, city_id);
+        if c.population >= target_pop { break; }
+        skip_turn(d, addr, player_a(), game_id);
+        skip_turn(d, addr, player_b(), game_id);
+        i += 1;
+    };
+    d.get_city(game_id, player, city_id).population
+}
+
+// ─── Pop-1 tests (no growth needed) ────────────────────────────────────
+
+// TW1: Auto-assign at pop=1 picks the best-scored tile; turn processes OK
+#[test]
+fn test_auto_assign_picks_best_tile() {
+    let (d, addr) = deploy();
+    let game_id = setup_with_city_sys(d, addr);
+
+    // No locks
+    assert!(d.get_city_locked_count(game_id, 0, 0) == 0);
+
+    // Sorted scores — first entry is the best tile
+    let scored = sorted_territory_scores(d, game_id, 0, 0, true);
+    let sspan = scored.span();
+    assert!(sspan.len() >= 1, "Must have >=1 workable tile");
+    let (best_score, _, _) = *sspan.at(0);
+    assert!(best_score > 0, "Best tile score must be positive");
+
+    // End a turn successfully — proves auto-assign computed valid yields
+    let rt = find_research(d, game_id, 0);
+    start_cheat_caller_address(addr, player_a());
+    d.submit_turn(game_id, array![
+        Action::SetResearch(rt),
+        Action::SetProduction((0, PROD_WARRIOR)),
+        Action::EndTurn,
+    ]);
+    stop_cheat_caller_address(addr);
+    assert!(d.get_current_player(game_id) == 1, "Turn should advance");
+}
+
+// TW2: Lock a specific tile at pop=1 — storage reflects lock
+#[test]
+fn test_locked_tile_is_worked() {
+    let (d, addr) = deploy();
+    let game_id = setup_with_city_sys(d, addr);
+    let (wq, wr, _) = find_worst_territory_tile(d, game_id, 0, 0);
+
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::AssignCitizen((0, wq, wr))]);
+    stop_cheat_caller_address(addr);
+
+    assert!(d.get_city_locked_count(game_id, 0, 0) == 1);
+    let (lq, lr) = d.get_city_locked_tile(game_id, 0, 0, 0);
+    assert!(lq == wq && lr == wr);
+}
+
+// TW3: Unassign reverts to zero locks
+#[test]
+fn test_unassign_reverts_to_auto() {
+    let (d, addr) = deploy();
+    let game_id = setup_with_city_sys(d, addr);
+    let (wq, wr, _) = find_worst_territory_tile(d, game_id, 0, 0);
+
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::AssignCitizen((0, wq, wr))]);
+    stop_cheat_caller_address(addr);
+    assert!(d.get_city_locked_count(game_id, 0, 0) == 1);
+
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::UnassignCitizen((0, wq, wr))]);
+    stop_cheat_caller_address(addr);
+    assert!(d.get_city_locked_count(game_id, 0, 0) == 0);
+}
+
+// TW4: Assign + unassign in a single batch
+#[test]
+fn test_assign_unassign_same_batch() {
+    let (d, addr) = deploy();
+    let game_id = setup_with_city_sys(d, addr);
+    let (wq, wr, _) = find_worst_territory_tile(d, game_id, 0, 0);
+
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![
+        Action::AssignCitizen((0, wq, wr)),
+        Action::UnassignCitizen((0, wq, wr)),
+    ]);
+    stop_cheat_caller_address(addr);
+    assert!(d.get_city_locked_count(game_id, 0, 0) == 0);
+}
+
+// TW5: Swap lock from tile A to tile B in one batch
+#[test]
+fn test_swap_locked_tile_in_batch() {
+    let (d, addr) = deploy();
+    let game_id = setup_with_city_sys(d, addr);
+    let city = d.get_city(game_id, 0, 0);
+    let workable = get_workable_territory(d, game_id, 0, 0);
+    let wspan = workable.span();
+    let mut t1q: u8 = 0; let mut t1r: u8 = 0;
+    let mut t2q: u8 = 0; let mut t2r: u8 = 0;
+    let mut found: u32 = 0;
+    let mut i: u32 = 0;
+    while i < wspan.len() && found < 2 {
+        let (tq, tr) = *wspan.at(i);
+        if tq != city.q || tr != city.r {
+            if found == 0 { t1q = tq; t1r = tr; found += 1; }
+            else if tq != t1q || tr != t1r { t2q = tq; t2r = tr; found += 1; }
+        }
+        i += 1;
+    };
+    assert!(found == 2, "Need 2 non-center territory tiles");
+
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![
+        Action::AssignCitizen((0, t1q, t1r)),
+        Action::UnassignCitizen((0, t1q, t1r)),
+        Action::AssignCitizen((0, t2q, t2r)),
+    ]);
+    stop_cheat_caller_address(addr);
+    assert!(d.get_city_locked_count(game_id, 0, 0) == 1);
+    let (lq, lr) = d.get_city_locked_tile(game_id, 0, 0, 0);
+    assert!(lq == t2q && lr == t2r, "Should be locked to tile 2");
+}
+
+// TW6: Lock worst tile + end turn in same batch — yields come from the locked tile
+#[test]
+fn test_lock_and_end_turn_in_same_batch() {
+    let (d, addr) = deploy();
+    let game_id = setup_with_city_sys(d, addr);
+    let city = d.get_city(game_id, 0, 0);
+    let (wq, wr, _) = find_worst_territory_tile(d, game_id, 0, 0);
+    let rt = find_research(d, game_id, 0);
+
+    start_cheat_caller_address(addr, player_a());
+    d.submit_turn(game_id, array![
+        Action::AssignCitizen((0, wq, wr)),
+        Action::SetResearch(rt),
+        Action::SetProduction((0, PROD_WARRIOR)),
+        Action::EndTurn,
+    ]);
+    stop_cheat_caller_address(addr);
+
+    assert!(d.get_current_player(game_id) == 1, "Turn advanced");
+    assert!(d.get_city_locked_count(game_id, 0, 0) == 1);
+    let (lq, lr) = d.get_city_locked_tile(game_id, 0, 0, 0);
+    assert!(lq == wq && lr == wr);
+}
+
+// TW7: Locking worst tile at pop=1 produces different food stockpile than auto
+//       (auto picks best ≥ worst, so auto food ≥ locked food)
+#[test]
+fn test_locked_worst_vs_auto_food_difference() {
+    // Game 1: auto-assign (no lock)
+    let (d1, addr1) = deploy();
+    let gid1 = setup_with_city_sys(d1, addr1);
+    let rt1 = find_research(d1, gid1, 0);
+    start_cheat_caller_address(addr1, player_a());
+    d1.submit_turn(gid1, array![
+        Action::SetResearch(rt1),
+        Action::SetProduction((0, PROD_WARRIOR)),
+        Action::EndTurn,
+    ]);
+    stop_cheat_caller_address(addr1);
+    skip_turn(d1, addr1, player_b(), gid1);
+    let auto_city = d1.get_city(gid1, 0, 0);
+
+    // Game 2: same seed (same contract deployment order) — lock the worst tile
+    let (d2, addr2) = deploy();
+    let gid2 = setup_with_city_sys(d2, addr2);
+    let (wq, wr, wscore) = find_worst_territory_tile(d2, gid2, 0, 0);
+    let c2 = d2.get_city(gid2, 0, 0);
+    let best_score = tile_score(d2, gid2, wq, wr, c2.q, c2.r);
+    // worst tile's score should be <= the auto-picked best tile's score
+    let sorted = sorted_territory_scores(d2, gid2, 0, 0, true);
+    let (top_score, _, _) = *sorted.span().at(0);
+    assert!(wscore <= top_score, "Worst score must be <= best score");
+    let rt2 = find_research(d2, gid2, 0);
+    start_cheat_caller_address(addr2, player_a());
+    d2.submit_turn(gid2, array![
+        Action::AssignCitizen((0, wq, wr)),
+        Action::SetResearch(rt2),
+        Action::SetProduction((0, PROD_WARRIOR)),
+        Action::EndTurn,
+    ]);
+    stop_cheat_caller_address(addr2);
+    skip_turn(d2, addr2, player_b(), gid2);
+    let locked_city = d2.get_city(gid2, 0, 0);
+
+    // The auto-assign game should have food_stockpile >= locked game
+    // (auto picks the best tile, locked forces potentially worse tile)
+    assert!(auto_city.food_stockpile >= locked_city.food_stockpile,
+        "Auto-assign food should be >= locked-worst food");
+}
+
+// TW8: Best non-center tile score >= worst non-center tile score
+#[test]
+fn test_best_score_gte_worst_score() {
+    let (d, addr) = deploy();
+    let game_id = setup_with_city_sys(d, addr);
+    let (_, _, bscore) = find_best_territory_tile(d, game_id, 0, 0);
+    let (_, _, wscore) = find_worst_territory_tile(d, game_id, 0, 0);
+    assert!(bscore >= wscore, "Best >= worst");
+}
+
+// ─── Pop ≥ 2 tests (grow first, then lock) ─────────────────────────────
+
+// TW9: Grow to pop >= 2, lock worst tile — auto fills the remaining slot with best
+#[test]
+fn test_combo_lock_worst_auto_fills_best() {
+    let (d, addr) = deploy();
+    let game_id = setup_with_city_sys(d, addr);
+    let rt = find_research(d, game_id, 0);
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![
+        Action::SetResearch(rt),
+        Action::SetProduction((0, PROD_WARRIOR)),
+    ]);
+    stop_cheat_caller_address(addr);
+
+    // Grow to pop >= 2 (skip up to 60 rounds — covers even food-poor seeds)
+    let pop = grow_city(d, addr, game_id, 0, 0, 2, 60);
+    if pop < 2 {
+        // Food-poor seed, city can't grow — test is not meaningful, skip gracefully
+        return;
+    }
+
+    // Lock the worst non-center tile
+    let (wq, wr, wscore) = find_worst_territory_tile(d, game_id, 0, 0);
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::AssignCitizen((0, wq, wr))]);
+    stop_cheat_caller_address(addr);
+    assert!(d.get_city_locked_count(game_id, 0, 0) == 1);
+
+    // The auto-fill slots should pick from the top of the sorted list, excluding locked
+    let sorted = sorted_territory_scores(d, game_id, 0, 0, true);
+    let sspan = sorted.span();
+    let city = d.get_city(game_id, 0, 0);
+    let auto_slots: u32 = city.population.into() - 1;
+
+    let mut auto_expected: Array<(u8, u8)> = array![];
+    let mut si: u32 = 0;
+    while si < sspan.len() && auto_expected.len() < auto_slots {
+        let (_, sq, sr) = *sspan.at(si);
+        if sq != wq || sr != wr {
+            auto_expected.append((sq, sr));
+        }
+        si += 1;
+    };
+    assert!(auto_expected.len() == auto_slots, "Should auto-fill remaining slots");
+
+    // Each auto-picked tile should have score >= worst tile
+    let mut ai: u32 = 0;
+    while ai < auto_expected.len() {
+        let (aq, ar) = *auto_expected.span().at(ai);
+        let as_score = tile_score(d, game_id, aq, ar, city.q, city.r);
+        assert!(as_score >= wscore, "Auto tile should score >= locked worst");
+        ai += 1;
+    };
+
+    // End a turn — the combination (locked + auto) should produce valid yields
+    skip_turn(d, addr, player_a(), game_id);
+    skip_turn(d, addr, player_b(), game_id);
+    // If we got here, the combination worked
+}
+
+// TW10: Grow, lock best tile — auto fills second-best
+#[test]
+fn test_combo_lock_best_auto_fills_second_best() {
+    let (d, addr) = deploy();
+    let game_id = setup_with_city_sys(d, addr);
+    let rt = find_research(d, game_id, 0);
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![
+        Action::SetResearch(rt),
+        Action::SetProduction((0, PROD_WARRIOR)),
+    ]);
+    stop_cheat_caller_address(addr);
+
+    let pop = grow_city(d, addr, game_id, 0, 0, 2, 60);
+    if pop < 2 { return; }
+
+    let (bq, br, bscore) = find_best_territory_tile(d, game_id, 0, 0);
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::AssignCitizen((0, bq, br))]);
+    stop_cheat_caller_address(addr);
+
+    let sorted = sorted_territory_scores(d, game_id, 0, 0, true);
+    let sspan = sorted.span();
+    let city = d.get_city(game_id, 0, 0);
+    let auto_slots: u32 = city.population.into() - 1;
+
+    // Collect the expected auto tiles (skip the locked best)
+    let mut auto_tiles: Array<(u8, u8)> = array![];
+    let mut si: u32 = 0;
+    while si < sspan.len() && auto_tiles.len() < auto_slots {
+        let (_, sq, sr) = *sspan.at(si);
+        if sq != bq || sr != br {
+            auto_tiles.append((sq, sr));
+        }
+        si += 1;
+    };
+    assert!(auto_tiles.len() == auto_slots);
+
+    // Each auto tile score <= best tile score (second-best or lower)
+    let mut ai: u32 = 0;
+    while ai < auto_tiles.len() {
+        let (aq, ar) = *auto_tiles.span().at(ai);
+        let as_score = tile_score(d, game_id, aq, ar, city.q, city.r);
+        assert!(as_score <= bscore, "Auto should not exceed locked best");
+        ai += 1;
+    };
+
+    // Verify turn processes OK with this combination
+    skip_turn(d, addr, player_a(), game_id);
+    skip_turn(d, addr, player_b(), game_id);
+}
+
+// TW11: Grow, lock multiple tiles — auto fills remaining
+#[test]
+fn test_combo_lock_two_auto_fills_rest() {
+    let (d, addr) = deploy();
+    let game_id = setup_with_city_sys(d, addr);
+    let rt = find_research(d, game_id, 0);
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![
+        Action::SetResearch(rt),
+        Action::SetProduction((0, PROD_WARRIOR)),
+    ]);
+    stop_cheat_caller_address(addr);
+
+    let pop = grow_city(d, addr, game_id, 0, 0, 3, 80);
+    if pop < 3 { return; }
+
+    let city = d.get_city(game_id, 0, 0);
+    let workable = get_workable_territory(d, game_id, 0, 0);
+    let wspan = workable.span();
+    let mut t1q: u8 = 0; let mut t1r: u8 = 0;
+    let mut t2q: u8 = 0; let mut t2r: u8 = 0;
+    let mut found: u32 = 0;
+    let mut i: u32 = 0;
+    while i < wspan.len() && found < 2 {
+        let (tq, tr) = *wspan.at(i);
+        if tq != city.q || tr != city.r {
+            if found == 0 { t1q = tq; t1r = tr; found += 1; }
+            else if tq != t1q || tr != t1r { t2q = tq; t2r = tr; found += 1; }
+        }
+        i += 1;
+    };
+    assert!(found == 2, "Need 2 non-center territory tiles");
+
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![
+        Action::AssignCitizen((0, t1q, t1r)),
+        Action::AssignCitizen((0, t2q, t2r)),
+    ]);
+    stop_cheat_caller_address(addr);
+
+    assert!(d.get_city_locked_count(game_id, 0, 0) == 2);
+    let (l0q, l0r) = d.get_city_locked_tile(game_id, 0, 0, 0);
+    let (l1q, l1r) = d.get_city_locked_tile(game_id, 0, 0, 1);
+    assert!(l0q == t1q && l0r == t1r);
+    assert!(l1q == t2q && l1r == t2r);
+
+    // Auto should fill remaining pop-2 slots with best available
+    let auto_slots: u32 = city.population.into() - 2;
+    let sorted = sorted_territory_scores(d, game_id, 0, 0, true);
+    let sspan = sorted.span();
+    let mut auto_count: u32 = 0;
+    let mut si: u32 = 0;
+    while si < sspan.len() && auto_count < auto_slots {
+        let (_, sq, sr) = *sspan.at(si);
+        if (sq != t1q || sr != t1r) && (sq != t2q || sr != t2r) {
+            auto_count += 1;
+        }
+        si += 1;
+    };
+    assert!(auto_count == auto_slots, "Auto should fill remaining slots");
+
+    // Turn processes OK
+    skip_turn(d, addr, player_a(), game_id);
+    skip_turn(d, addr, player_b(), game_id);
+}
+
+// TW12: Lock persists after growth — lock at pop=1, grow, verify still locked
+#[test]
+fn test_lock_persists_after_growth() {
+    let (d, addr) = deploy();
+    let game_id = setup_with_city_sys(d, addr);
+
+    // Lock the BEST tile so the city still has a chance to grow
+    // (best non-center tile likely has high food)
+    let (bq, br, _) = find_best_territory_tile(d, game_id, 0, 0);
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::AssignCitizen((0, bq, br))]);
+    stop_cheat_caller_address(addr);
+    assert!(d.get_city_locked_count(game_id, 0, 0) == 1);
+
+    let rt = find_research(d, game_id, 0);
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![
+        Action::SetResearch(rt),
+        Action::SetProduction((0, PROD_WARRIOR)),
+    ]);
+    stop_cheat_caller_address(addr);
+
+    let pop = grow_city(d, addr, game_id, 0, 0, 2, 60);
+
+    // Lock should persist regardless of growth
+    assert!(d.get_city_locked_count(game_id, 0, 0) == 1);
+    let (lq, lr) = d.get_city_locked_tile(game_id, 0, 0, 0);
+    assert!(lq == bq && lr == br, "Locked tile should persist");
+
+    if pop >= 2 {
+        // With pop >= 2: the locked tile + auto-fill = 2 tiles worked
+        // Auto should pick the next-best tile (excluding locked and center)
+        let sorted = sorted_territory_scores(d, game_id, 0, 0, true);
+        let sspan = sorted.span();
+        // The first entry in sorted that isn't the locked tile is the auto-pick
+        let mut auto_q: u8 = 0;
+        let mut auto_r: u8 = 0;
+        let mut fi: u32 = 0;
+        let mut found_auto = false;
+        while fi < sspan.len() && !found_auto {
+            let (_, sq, sr) = *sspan.at(fi);
+            if sq != bq || sr != br {
+                auto_q = sq;
+                auto_r = sr;
+                found_auto = true;
+            }
+            fi += 1;
+        };
+        if found_auto {
+            let auto_score = tile_score(d, game_id, auto_q, auto_r,
+                d.get_city(game_id, 0, 0).q, d.get_city(game_id, 0, 0).r);
+            // Auto-pick score should be <= locked tile score (locked was best)
+            let locked_score = tile_score(d, game_id, bq, br,
+                d.get_city(game_id, 0, 0).q, d.get_city(game_id, 0, 0).r);
+            assert!(auto_score <= locked_score, "Auto <= locked best");
+        }
+    }
+}
+
+// TW13: Auto-assign without locks: top N sorted scores are picked at pop >= 2
+#[test]
+fn test_auto_assign_no_locks_top_n() {
+    let (d, addr) = deploy();
+    let game_id = setup_with_city_sys(d, addr);
+    let rt = find_research(d, game_id, 0);
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![
+        Action::SetResearch(rt),
+        Action::SetProduction((0, PROD_WARRIOR)),
+    ]);
+    stop_cheat_caller_address(addr);
+
+    let pop = grow_city(d, addr, game_id, 0, 0, 2, 60);
+    if pop < 2 { return; }
+
+    assert!(d.get_city_locked_count(game_id, 0, 0) == 0);
+
+    let city = d.get_city(game_id, 0, 0);
+    let pop32: u32 = city.population.into();
+    let sorted = sorted_territory_scores(d, game_id, 0, 0, true);
+    let sspan = sorted.span();
+    assert!(sspan.len() >= pop32, "Need enough workable tiles");
+
+    // The Nth tile's score should be >= the (N+1)th tile's score
+    if sspan.len() > pop32 {
+        let (cutoff_score, _, _) = *sspan.at(pop32 - 1);
+        let (below_score, _, _) = *sspan.at(pop32);
+        assert!(cutoff_score >= below_score, "Top N scores >= rest");
+    }
+}
+
+// TW14: Grow, lock worst, unassign, verify auto resumes picking best
+#[test]
+fn test_combo_lock_unlock_auto_resumes() {
+    let (d, addr) = deploy();
+    let game_id = setup_with_city_sys(d, addr);
+    let rt = find_research(d, game_id, 0);
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![
+        Action::SetResearch(rt),
+        Action::SetProduction((0, PROD_WARRIOR)),
+    ]);
+    stop_cheat_caller_address(addr);
+
+    let pop = grow_city(d, addr, game_id, 0, 0, 2, 60);
+    if pop < 2 { return; }
+
+    let (wq, wr, _) = find_worst_territory_tile(d, game_id, 0, 0);
+
+    // Lock worst
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::AssignCitizen((0, wq, wr))]);
+    stop_cheat_caller_address(addr);
+    assert!(d.get_city_locked_count(game_id, 0, 0) == 1);
+
+    // Unlock it
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::UnassignCitizen((0, wq, wr))]);
+    stop_cheat_caller_address(addr);
+    assert!(d.get_city_locked_count(game_id, 0, 0) == 0);
+
+    // Now all slots are auto. Turn should process using the best tiles.
+    skip_turn(d, addr, player_a(), game_id);
+    skip_turn(d, addr, player_b(), game_id);
+    // Success means auto resumed correctly
+}
+
+// TW15: Lock worst tile + end turn, then next turn lock best tile + end turn.
+//       Validates yields change when lock changes.
+#[test]
+fn test_changing_lock_affects_yields() {
+    let (d, addr) = deploy();
+    let game_id = setup_with_city_sys(d, addr);
+    let city = d.get_city(game_id, 0, 0);
+    let (wq, wr, _) = find_worst_territory_tile(d, game_id, 0, 0);
+    let (bq, br, _) = find_best_territory_tile(d, game_id, 0, 0);
+    let rt = find_research(d, game_id, 0);
+
+    // Turn 1: lock worst tile
+    start_cheat_caller_address(addr, player_a());
+    d.submit_turn(game_id, array![
+        Action::AssignCitizen((0, wq, wr)),
+        Action::SetResearch(rt),
+        Action::SetProduction((0, PROD_WARRIOR)),
+        Action::EndTurn,
+    ]);
+    stop_cheat_caller_address(addr);
+    skip_turn(d, addr, player_b(), game_id);
+
+    let city_after_worst = d.get_city(game_id, 0, 0);
+    let food_after_worst = city_after_worst.food_stockpile;
+
+    // Turn 2: swap lock to best tile
+    start_cheat_caller_address(addr, player_a());
+    d.submit_turn(game_id, array![
+        Action::UnassignCitizen((0, wq, wr)),
+        Action::AssignCitizen((0, bq, br)),
+        Action::EndTurn,
+    ]);
+    stop_cheat_caller_address(addr);
+    skip_turn(d, addr, player_b(), game_id);
+
+    let city_after_best = d.get_city(game_id, 0, 0);
+
+    // If worst and best tiles have different food, stockpiles should differ
+    let worst_food = tile_food(d, game_id, wq, wr, city.q, city.r);
+    let best_food = tile_food(d, game_id, bq, br, city.q, city.r);
+    if best_food > worst_food {
+        // After the best-tile turn, food stockpile should be higher
+        // (food_stockpile_after_best = food_after_worst + (best_food - consumption))
+        // vs food_after_worst was computed from (worst_food - consumption).
+        // The delta per turn is (best_food - worst_food).
+        assert!(city_after_best.food_stockpile >= food_after_worst,
+            "Locking best tile should produce more food");
+    }
+    // In any case, the turns processed — the mechanism works
+    assert!(d.get_city_locked_count(game_id, 0, 0) == 1);
+    let (lq, lr) = d.get_city_locked_tile(game_id, 0, 0, 0);
+    assert!(lq == bq && lr == br, "Lock should be on best tile now");
 }

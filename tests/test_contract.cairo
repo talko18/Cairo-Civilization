@@ -5,8 +5,7 @@
 // ============================================================================
 
 use snforge_std::{declare, ContractClassTrait, DeclareResultTrait,
-    start_cheat_caller_address, stop_cheat_caller_address,
-    start_cheat_block_timestamp, stop_cheat_block_timestamp};
+    start_cheat_caller_address, stop_cheat_caller_address};
 use starknet::{ContractAddress, contract_address_const};
 use cairo_civ::contract::{ICairoCivDispatcher, ICairoCivDispatcherTrait};
 use cairo_civ::types::{
@@ -19,6 +18,8 @@ use cairo_civ::types::{
     DIPLO_PEACE, DIPLO_WAR,
     PROD_WARRIOR, PROD_SETTLER, PROD_MONUMENT, PROD_GRANARY,
 };
+use cairo_civ::hex;
+use cairo_civ::tech;
 
 // ---------------------------------------------------------------------------
 // Setup helpers
@@ -212,6 +213,43 @@ fn test_action_move_unit() {
     stop_cheat_caller_address(addr);
     let moved = d.get_unit(game_id, 0, 0);
     assert!(moved.q == dest_q);
+}
+
+// I14b: MoveUnit 2 tiles in one action (pathfinding)
+#[test]
+fn test_action_move_unit_two_tiles() {
+    let (d, addr) = deploy();
+    let game_id = setup_active_game(d, addr);
+    let unit = d.get_unit(game_id, 0, 1); // warrior, 2 MP
+    // Starting neighbors are guaranteed passable (grassland, cost 1 each).
+    // Move 2 tiles east in a single MoveUnit action.
+    let dest_q = unit.q + 2;
+    let dest_r = unit.r;
+    start_cheat_caller_address(addr, player_a());
+    d.submit_turn(game_id, array![Action::MoveUnit((1, dest_q, dest_r)), Action::EndTurn]);
+    stop_cheat_caller_address(addr);
+    let moved = d.get_unit(game_id, 0, 1);
+    assert!(moved.q == dest_q, "Unit should be 2 tiles east");
+    assert!(moved.r == dest_r, "r should be unchanged");
+    assert!(moved.movement_remaining == 0, "Warrior should have 0 MP left after 2-tile move");
+}
+
+// I14c: MoveUnit 2 tiles fails if not enough MP
+#[test]
+#[should_panic]
+fn test_action_move_two_tiles_insufficient_mp() {
+    let (d, addr) = deploy();
+    let game_id = setup_active_game(d, addr);
+    let unit = d.get_unit(game_id, 0, 1); // warrior, 2 MP
+    // Move 1 tile first (costs 1 MP), then try to move 2 tiles (needs 2 MP, only 1 left)
+    let nq = unit.q + 1;
+    start_cheat_caller_address(addr, player_a());
+    d.submit_turn(game_id, array![
+        Action::MoveUnit((1, nq, unit.r)),           // costs 1 MP, 1 left
+        Action::MoveUnit((1, nq + 2, unit.r)),       // needs 2 MP, only 1 — should panic
+        Action::EndTurn,
+    ]);
+    stop_cheat_caller_address(addr);
 }
 
 // I15: MoveUnit with non-existent unit_id reverts
@@ -700,18 +738,22 @@ fn test_action_on_dead_unit_reverts() {
     stop_cheat_caller_address(addr);
 }
 
-// I37q: Moving unit twice when second move costs more than remaining MP
+// I37q: Moving unit three times with only 2 MP must revert
 #[test]
 #[should_panic]
 fn test_action_double_move_no_mp_reverts() {
     let (d, addr) = deploy();
     let game_id = setup_active_game(d, addr);
     let unit = d.get_unit(game_id, 0, 1); // warrior, 2 MP
+    // Neighbors of starting positions are guaranteed passable (grassland).
+    // Move to neighbor (costs >= 1 MP), move back (costs >= 1 MP), try a third
+    // move — must fail since warrior only has 2 MP total.
+    let nq = unit.q + 1; // E neighbor — passable
     start_cheat_caller_address(addr, player_a());
-    // Move twice on hills (2 MP each) — second should fail
     d.submit_turn(game_id, array![
-        Action::MoveUnit((1, unit.q + 1, unit.r)),
-        Action::MoveUnit((1, unit.q + 2, unit.r)), // should fail if first consumed all MP on hills
+        Action::MoveUnit((1, nq, unit.r)),         // costs >= 1 MP
+        Action::MoveUnit((1, unit.q, unit.r)),      // costs >= 1 MP (back)
+        Action::MoveUnit((1, nq, unit.r)),          // no MP left — should panic
         Action::EndTurn,
     ]);
     stop_cheat_caller_address(addr);
@@ -910,85 +952,6 @@ fn test_eot_territory_expands() {
     assert!(true);
 }
 
-// ===========================================================================
-// 2.5 Timeout (I48–I51d)
-// ===========================================================================
-
-// I48: Opponent claims timeout after 5 min, turn skipped
-#[test]
-fn test_claim_timeout_valid() {
-    let (d, addr) = deploy();
-    let game_id = setup_active_game(d, addr);
-    // Set block timestamp to 400 seconds after turn start
-    start_cheat_block_timestamp(addr, 400);
-    start_cheat_caller_address(addr, player_b());
-    d.claim_timeout_victory(game_id);
-    stop_cheat_caller_address(addr);
-    stop_cheat_block_timestamp(addr);
-}
-
-// I49: Claiming before 5 min reverts
-#[test]
-#[should_panic]
-fn test_claim_timeout_too_early() {
-    let (d, addr) = deploy();
-    let game_id = setup_active_game(d, addr);
-    start_cheat_block_timestamp(addr, 100); // only 100 seconds
-    start_cheat_caller_address(addr, player_b());
-    d.claim_timeout_victory(game_id);
-    stop_cheat_caller_address(addr);
-    stop_cheat_block_timestamp(addr);
-}
-
-// I50: Current player can't claim timeout on themselves
-#[test]
-#[should_panic]
-fn test_claim_timeout_wrong_player() {
-    let (d, addr) = deploy();
-    let game_id = setup_active_game(d, addr);
-    start_cheat_block_timestamp(addr, 400);
-    start_cheat_caller_address(addr, player_a()); // It's player A's turn
-    d.claim_timeout_victory(game_id); // A can't timeout themselves
-    stop_cheat_caller_address(addr);
-    stop_cheat_block_timestamp(addr);
-}
-
-// I51: 3 consecutive timeouts → game ends, opponent wins
-#[test]
-fn test_timeout_forfeit() {
-    let (d, addr) = deploy();
-    let game_id = setup_active_game(d, addr);
-    // Simulate 3 timeouts
-    start_cheat_block_timestamp(addr, 400);
-    // Timeout 1
-    start_cheat_caller_address(addr, player_b());
-    d.claim_timeout_victory(game_id);
-    stop_cheat_caller_address(addr);
-    // Timeout 2 (player B's turn now — player A claims)
-    start_cheat_caller_address(addr, player_a());
-    d.claim_timeout_victory(game_id);
-    stop_cheat_caller_address(addr);
-    // Timeout 3
-    start_cheat_caller_address(addr, player_b());
-    d.claim_timeout_victory(game_id);
-    stop_cheat_caller_address(addr);
-    stop_cheat_block_timestamp(addr);
-    assert!(d.get_game_status(game_id) == STATUS_FINISHED);
-}
-
-// I51b: Non-player can't claim timeout
-#[test]
-#[should_panic]
-fn test_claim_timeout_non_player_reverts() {
-    let (d, addr) = deploy();
-    let game_id = setup_active_game(d, addr);
-    start_cheat_block_timestamp(addr, 400);
-    start_cheat_caller_address(addr, player_c()); // not in game
-    d.claim_timeout_victory(game_id);
-    stop_cheat_caller_address(addr);
-    stop_cheat_block_timestamp(addr);
-}
-
 // I51c: Submitting turn to a FINISHED game reverts
 #[test]
 #[should_panic]
@@ -1005,18 +968,6 @@ fn test_submit_turn_after_game_over_reverts() {
     stop_cheat_caller_address(addr);
 }
 
-// I51d: Submitting after timer expired reverts
-#[test]
-#[should_panic]
-fn test_submit_turn_after_timer_expired() {
-    let (d, addr) = deploy();
-    let game_id = setup_active_game(d, addr);
-    start_cheat_block_timestamp(addr, 400); // past 5-minute timeout
-    start_cheat_caller_address(addr, player_a());
-    d.submit_turn(game_id, array![Action::EndTurn]); // too late
-    stop_cheat_caller_address(addr);
-    stop_cheat_block_timestamp(addr);
-}
 
 // ===========================================================================
 // 2.6 View Functions (I52–I60)
@@ -2207,4 +2158,296 @@ fn test_end_turn_both_set_across_batches() {
     assert!(d.get_current_research(game_id, 0) == 1);
     let city = d.get_city(game_id, 0, 0);
     assert!(city.current_production == PROD_MONUMENT);
+}
+
+// ===========================================================================
+// Citizen Tile Assignment Tests (CA1–CA10)
+// ===========================================================================
+
+/// Helper: Find a workable territory tile of a city (not city center, not ocean/mountain)
+fn find_territory_tile(d: ICairoCivDispatcher, game_id: u64, player: u8, city_id: u32) -> (u8, u8) {
+    let c = d.get_city(game_id, player, city_id);
+    let tiles = hex::hexes_in_range(c.q, c.r, 1);
+    let span = tiles.span();
+    let mut i: u32 = 0;
+    let mut result_q: u8 = 0;
+    let mut result_r: u8 = 0;
+    let mut found = false;
+    while i < span.len() && !found {
+        let (tq, tr) = *span.at(i);
+        if tq != c.q || tr != c.r {
+            let td = d.get_tile(game_id, tq, tr);
+            if td.terrain != 0 && td.terrain != 12 {
+                // Check ownership
+                let (op, oc) = d.get_tile_owner(game_id, tq, tr);
+                if op == player && oc == city_id + 1 {
+                    result_q = tq;
+                    result_r = tr;
+                    found = true;
+                }
+            }
+        }
+        i += 1;
+    };
+    assert!(found, "No workable territory tile found");
+    (result_q, result_r)
+}
+
+/// Helper: set up game and found player A's city, return game_id
+fn setup_with_city(d: ICairoCivDispatcher, addr: ContractAddress) -> u64 {
+    let game_id = setup_active_game(d, addr);
+    // Player A: settler is unit 0, found city
+    let settler = d.get_unit(game_id, 0, 0);
+    assert!(settler.unit_type == UNIT_SETTLER);
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![
+        Action::FoundCity((0, 'TestCity')),
+    ]);
+    stop_cheat_caller_address(addr);
+    game_id
+}
+
+// CA1: Assign a citizen to a territory tile — locked count increases
+#[test]
+fn test_assign_citizen_basic() {
+    let (d, addr) = deploy();
+    let game_id = setup_with_city(d, addr);
+    let (tq, tr) = find_territory_tile(d, game_id, 0, 0);
+
+    // Assign citizen
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![
+        Action::AssignCitizen((0, tq, tr)),
+    ]);
+    stop_cheat_caller_address(addr);
+
+    assert!(d.get_city_locked_count(game_id, 0, 0) == 1);
+    let (lq, lr) = d.get_city_locked_tile(game_id, 0, 0, 0);
+    assert!(lq == tq && lr == tr);
+}
+
+// CA2: Unassign a citizen — locked count decreases
+#[test]
+fn test_unassign_citizen_basic() {
+    let (d, addr) = deploy();
+    let game_id = setup_with_city(d, addr);
+    let (tq, tr) = find_territory_tile(d, game_id, 0, 0);
+
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![
+        Action::AssignCitizen((0, tq, tr)),
+    ]);
+    stop_cheat_caller_address(addr);
+    assert!(d.get_city_locked_count(game_id, 0, 0) == 1);
+
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![
+        Action::UnassignCitizen((0, tq, tr)),
+    ]);
+    stop_cheat_caller_address(addr);
+    assert!(d.get_city_locked_count(game_id, 0, 0) == 0);
+}
+
+// CA3: Cannot assign to tile outside territory — should panic
+#[test]
+#[should_panic]
+fn test_assign_citizen_outside_territory() {
+    let (d, addr) = deploy();
+    let game_id = setup_with_city(d, addr);
+
+    // Use a tile far from the city that shouldn't be in territory
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![
+        Action::AssignCitizen((0, 0, 0)),
+    ]);
+    stop_cheat_caller_address(addr);
+}
+
+// CA4: Cannot assign more citizens than population
+#[test]
+#[should_panic]
+fn test_assign_citizen_exceeds_population() {
+    let (d, addr) = deploy();
+    let game_id = setup_with_city(d, addr);
+
+    let city = d.get_city(game_id, 0, 0);
+    assert!(city.population == 1, "City should have pop 1");
+
+    // Find two different territory tiles
+    let tiles = hex::hexes_in_range(city.q, city.r, 1);
+    let span = tiles.span();
+    let mut valid_tiles: Array<(u8, u8)> = array![];
+    let mut i: u32 = 0;
+    while i < span.len() {
+        let (tq, tr) = *span.at(i);
+        if tq != city.q || tr != city.r {
+            let td = d.get_tile(game_id, tq, tr);
+            if td.terrain != 0 && td.terrain != 12 {
+                let (op, oc) = d.get_tile_owner(game_id, tq, tr);
+                if op == 0 && oc == 1 {
+                    valid_tiles.append((tq, tr));
+                }
+            }
+        }
+        i += 1;
+    };
+    assert!(valid_tiles.len() >= 2, "Need at least 2 territory tiles");
+    let (t1q, t1r) = *valid_tiles.at(0);
+    let (t2q, t2r) = *valid_tiles.at(1);
+
+    // Assign first citizen (pop=1), then try second — should fail
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![
+        Action::AssignCitizen((0, t1q, t1r)),
+        Action::AssignCitizen((0, t2q, t2r)),
+    ]);
+    stop_cheat_caller_address(addr);
+}
+
+// CA5: Cannot assign duplicate tile
+#[test]
+#[should_panic]
+fn test_assign_citizen_duplicate_tile() {
+    let (d, addr) = deploy();
+    let game_id = setup_with_city(d, addr);
+    let (tq, tr) = find_territory_tile(d, game_id, 0, 0);
+
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![
+        Action::AssignCitizen((0, tq, tr)),
+    ]);
+    stop_cheat_caller_address(addr);
+
+    // Try to assign the same tile again — should fail
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![
+        Action::AssignCitizen((0, tq, tr)),
+    ]);
+    stop_cheat_caller_address(addr);
+}
+
+// CA6: Cannot unassign a tile that was never assigned
+#[test]
+#[should_panic]
+fn test_unassign_citizen_not_assigned() {
+    let (d, addr) = deploy();
+    let game_id = setup_with_city(d, addr);
+    let (tq, tr) = find_territory_tile(d, game_id, 0, 0);
+
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![
+        Action::UnassignCitizen((0, tq, tr)),
+    ]);
+    stop_cheat_caller_address(addr);
+}
+
+// CA7: Cannot assign to ocean tile
+#[test]
+#[should_panic]
+fn test_assign_citizen_ocean_tile() {
+    let (d, addr) = deploy();
+    let game_id = setup_with_city(d, addr);
+    let city = d.get_city(game_id, 0, 0);
+
+    // Find an ocean tile in territory (if any)
+    let tiles = hex::hexes_in_range(city.q, city.r, 1);
+    let span = tiles.span();
+    let mut ocean_q: u8 = 0;
+    let mut ocean_r: u8 = 0;
+    let mut found_ocean = false;
+    let mut i: u32 = 0;
+    while i < span.len() && !found_ocean {
+        let (tq, tr) = *span.at(i);
+        let td = d.get_tile(game_id, tq, tr);
+        if td.terrain == 0 {
+            // Manually set ownership for test (we can't directly, so this test
+            // relies on the terrain check being before the ownership check)
+            ocean_q = tq;
+            ocean_r = tr;
+            found_ocean = true;
+        }
+        i += 1;
+    };
+    // If no ocean tile in territory, assign to ocean tile at (0,0) which
+    // should fail with 'Tile not in city territory' — still tests the guard
+    if !found_ocean { ocean_q = 0; ocean_r = 0; }
+
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![
+        Action::AssignCitizen((0, ocean_q, ocean_r)),
+    ]);
+    stop_cheat_caller_address(addr);
+}
+
+// CA8: Assign citizen is a predicted action — can batch with EndTurn
+#[test]
+fn test_assign_citizen_batched_with_end_turn() {
+    let (d, addr) = deploy();
+    let game_id = setup_with_city(d, addr);
+    let (tq, tr) = find_territory_tile(d, game_id, 0, 0);
+
+    // Batch assign + set research + set production + end turn
+    let techs = d.get_completed_techs(game_id, 0);
+    let mut tid: u8 = 1;
+    let mut research_tid: u8 = 0;
+    while tid <= 18 {
+        if !tech::is_researched(tid, techs) && tech::can_research(tid, techs) {
+            research_tid = tid;
+            break;
+        }
+        tid += 1;
+    };
+    assert!(research_tid > 0, "No available research");
+
+    start_cheat_caller_address(addr, player_a());
+    d.submit_turn(game_id, array![
+        Action::AssignCitizen((0, tq, tr)),
+        Action::SetResearch(research_tid),
+        Action::SetProduction((0, PROD_WARRIOR)),
+        Action::EndTurn,
+    ]);
+    stop_cheat_caller_address(addr);
+
+    assert!(d.get_current_player(game_id) == 1);
+    assert!(d.get_city_locked_count(game_id, 0, 0) == 1);
+}
+
+// CA9: Invalid city id reverts
+#[test]
+#[should_panic]
+fn test_assign_citizen_invalid_city() {
+    let (d, addr) = deploy();
+    let game_id = setup_with_city(d, addr);
+
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![
+        Action::AssignCitizen((99, 10, 10)),
+    ]);
+    stop_cheat_caller_address(addr);
+}
+
+// CA10: Unassign swaps correctly (assign two tiles if pop allows, unassign first)
+#[test]
+fn test_unassign_citizen_swap_last() {
+    let (d, addr) = deploy();
+    let game_id = setup_with_city(d, addr);
+    let city = d.get_city(game_id, 0, 0);
+
+    // We need population >= 2. Skip some turns to grow the city.
+    // For now, test with pop=1 — assign then unassign one tile.
+    let (tq, tr) = find_territory_tile(d, game_id, 0, 0);
+
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![
+        Action::AssignCitizen((0, tq, tr)),
+    ]);
+    stop_cheat_caller_address(addr);
+    assert!(d.get_city_locked_count(game_id, 0, 0) == 1);
+
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![
+        Action::UnassignCitizen((0, tq, tr)),
+    ]);
+    stop_cheat_caller_address(addr);
+    assert!(d.get_city_locked_count(game_id, 0, 0) == 0);
 }

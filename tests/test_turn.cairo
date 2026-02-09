@@ -179,15 +179,6 @@ fn test_next_player_2_players() {
     assert!(turn::next_player(1, 2) == 0);
 }
 
-#[test]
-fn test_check_timeout_not_expired() {
-    assert!(!turn::check_timeout(1000, 1100, 300));
-}
-
-#[test]
-fn test_check_timeout_expired() {
-    assert!(turn::check_timeout(1000, 1400, 300));
-}
 
 // ===========================================================================
 // City healing

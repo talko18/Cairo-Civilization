@@ -232,6 +232,8 @@ pub enum Action {
     PurchaseWithGold: (u32, u8),          // city_id, item_id
     UpgradeUnit: u32,                     // unit_id
     DeclareWar: u8,                       // target player index
+    AssignCitizen: (u32, u8, u8),         // city_id, tile_q, tile_r (lock citizen to tile)
+    UnassignCitizen: (u32, u8, u8),       // city_id, tile_q, tile_r (remove lock)
     EndTurn,
 }
 

@@ -2,28 +2,56 @@
 // Hex — Pure hex math functions. No storage access.
 // See design/implementation/01_interfaces.md §Module 2.
 //
-// Coordinate system: storage coordinates (unsigned u8).
-//   storage_q = axial_q + Q_OFFSET   (Q_OFFSET = 16)
-//   storage_r = axial_r + R_OFFSET   (R_OFFSET = 0)
+// Coordinate system: offset coordinates (flat-top hexes, odd-q-down).
+//   q = column (0 .. MAP_WIDTH-1)
+//   r = row    (0 .. MAP_HEIGHT-1)
+//   Odd columns (q%2==1) are shifted down by half a hex.
+//
 // Map dimensions: 32 wide × 20 tall.
 //
-// Axial hex directions (dq, dr):
-//   0 = E  (+1,  0)    3 = W  (-1,  0)
-//   1 = NE (+1, -1)    4 = SW (-1, +1)
-//   2 = NW ( 0, -1)    5 = SE ( 0, +1)
+// Offset-coordinate neighbor directions (depend on column parity):
+// Even column (q%2==0):                Odd column (q%2==1):
+//   0 = upper-right (+1, -1)             0 = upper-right (+1,  0)
+//   1 = top         ( 0, -1)             1 = top         ( 0, -1)
+//   2 = upper-left  (-1, -1)             2 = upper-left  (-1,  0)
+//   3 = lower-left  (-1,  0)             3 = lower-left  (-1, +1)
+//   4 = bottom      ( 0, +1)             4 = bottom      ( 0, +1)
+//   5 = lower-right (+1,  0)             5 = lower-right (+1, +1)
 // ============================================================================
 
-use cairo_civ::types::{MAP_WIDTH, MAP_HEIGHT, Q_OFFSET, R_OFFSET};
+use cairo_civ::types::{MAP_WIDTH, MAP_HEIGHT};
+
+// ---------------------------------------------------------------------------
+// Offset ↔ Axial conversion (needed for distance and range calculations)
+// ---------------------------------------------------------------------------
+
+/// Convert offset (col, row) to axial (aq, ar).
+/// aq = q, ar = r - floor(q / 2).
+fn offset_to_axial(q: u8, r: u8) -> (i16, i16) {
+    let qi: i16 = q.into();
+    let ri: i16 = r.into();
+    (qi, ri - qi / 2)
+}
+
+/// Convert axial (aq, ar) to offset (col, row).
+/// q = aq, r = ar + floor(aq / 2).
+fn axial_to_offset(aq: i16, ar: i16) -> (i16, i16) {
+    // Cairo's / truncates toward zero; we need floor division for negative aq.
+    let half = if aq >= 0 { aq / 2 } else { (aq - 1) / 2 };
+    (aq, ar + half)
+}
 
 // ---------------------------------------------------------------------------
 // Distance
 // ---------------------------------------------------------------------------
 
-/// Hex distance between two positions in storage coordinates.
-/// Uses axial formula: max(|dq|, |dr|, |dq + dr|).
+/// Hex distance between two positions in offset coordinates.
+/// Converts to axial, then uses: max(|dq|, |dr|, |dq + dr|).
 pub fn hex_distance(q1: u8, r1: u8, q2: u8, r2: u8) -> u8 {
-    let dq: i16 = q2.into() - q1.into();
-    let dr: i16 = r2.into() - r1.into();
+    let (aq1, ar1) = offset_to_axial(q1, r1);
+    let (aq2, ar2) = offset_to_axial(q2, r2);
+    let dq: i16 = aq2 - aq1;
+    let dr: i16 = ar2 - ar1;
     let ds: i16 = dq + dr;
 
     let adq = abs_i16(dq);
@@ -39,37 +67,68 @@ pub fn hex_distance(q1: u8, r1: u8, q2: u8, r2: u8) -> u8 {
 // Neighbors
 // ---------------------------------------------------------------------------
 
-/// Returns neighbor positions (storage coords), filtered to in-bounds.
+/// Returns neighbor positions (offset coords), filtered to in-bounds.
+/// Uses even/odd column parity for flat-top hex grid with odd-q-down.
 pub fn hex_neighbors(q: u8, r: u8) -> Array<(u8, u8)> {
     let mut result: Array<(u8, u8)> = array![];
     let qi: i16 = q.into();
     let ri: i16 = r.into();
     let w: i16 = MAP_WIDTH.into();
     let h: i16 = MAP_HEIGHT.into();
+    let even = (qi % 2) == 0;
 
-    // E: (q+1, r)
-    if qi + 1 < w {
-        result.append(((qi + 1).try_into().unwrap(), r));
-    }
-    // NE: (q+1, r-1)
-    if qi + 1 < w && ri - 1 >= 0 {
-        result.append(((qi + 1).try_into().unwrap(), (ri - 1).try_into().unwrap()));
-    }
-    // NW: (q, r-1)
-    if ri - 1 >= 0 {
-        result.append((q, (ri - 1).try_into().unwrap()));
-    }
-    // W: (q-1, r)
-    if qi - 1 >= 0 {
-        result.append(((qi - 1).try_into().unwrap(), r));
-    }
-    // SW: (q-1, r+1)
-    if qi - 1 >= 0 && ri + 1 < h {
-        result.append(((qi - 1).try_into().unwrap(), (ri + 1).try_into().unwrap()));
-    }
-    // SE: (q, r+1)
-    if ri + 1 < h {
-        result.append((q, (ri + 1).try_into().unwrap()));
+    if even {
+        // Even column neighbors
+        // upper-right: (q+1, r-1)
+        if qi + 1 < w && ri - 1 >= 0 {
+            result.append(((qi + 1).try_into().unwrap(), (ri - 1).try_into().unwrap()));
+        }
+        // top: (q, r-1)
+        if ri - 1 >= 0 {
+            result.append((q, (ri - 1).try_into().unwrap()));
+        }
+        // upper-left: (q-1, r-1)
+        if qi - 1 >= 0 && ri - 1 >= 0 {
+            result.append(((qi - 1).try_into().unwrap(), (ri - 1).try_into().unwrap()));
+        }
+        // lower-left: (q-1, r)
+        if qi - 1 >= 0 {
+            result.append(((qi - 1).try_into().unwrap(), r));
+        }
+        // bottom: (q, r+1)
+        if ri + 1 < h {
+            result.append((q, (ri + 1).try_into().unwrap()));
+        }
+        // lower-right: (q+1, r)
+        if qi + 1 < w {
+            result.append(((qi + 1).try_into().unwrap(), r));
+        }
+    } else {
+        // Odd column neighbors
+        // upper-right: (q+1, r)
+        if qi + 1 < w {
+            result.append(((qi + 1).try_into().unwrap(), r));
+        }
+        // top: (q, r-1)
+        if ri - 1 >= 0 {
+            result.append((q, (ri - 1).try_into().unwrap()));
+        }
+        // upper-left: (q-1, r)
+        if qi - 1 >= 0 {
+            result.append(((qi - 1).try_into().unwrap(), r));
+        }
+        // lower-left: (q-1, r+1)
+        if qi - 1 >= 0 && ri + 1 < h {
+            result.append(((qi - 1).try_into().unwrap(), (ri + 1).try_into().unwrap()));
+        }
+        // bottom: (q, r+1)
+        if ri + 1 < h {
+            result.append((q, (ri + 1).try_into().unwrap()));
+        }
+        // lower-right: (q+1, r+1)
+        if qi + 1 < w && ri + 1 < h {
+            result.append(((qi + 1).try_into().unwrap(), (ri + 1).try_into().unwrap()));
+        }
     }
 
     result
@@ -79,7 +138,7 @@ pub fn hex_neighbors(q: u8, r: u8) -> Array<(u8, u8)> {
 // Bounds checking
 // ---------------------------------------------------------------------------
 
-/// Check if a storage coordinate is within map bounds.
+/// Check if an offset coordinate is within map bounds.
 pub fn in_bounds(q: u8, r: u8) -> bool {
     q < MAP_WIDTH && r < MAP_HEIGHT
 }
@@ -88,9 +147,8 @@ pub fn in_bounds(q: u8, r: u8) -> bool {
 // Line of Sight
 // ---------------------------------------------------------------------------
 
-/// Check line of sight between two hexes.
-/// `blocking_tiles` is a span of (q, r) positions that block LOS
-/// (mountains, woods, etc.). Endpoints never block.
+/// Check line of sight between two hexes (offset coords).
+/// `blocking_tiles` is a span of (q, r) positions that block LOS.
 pub fn has_line_of_sight(
     from_q: u8, from_r: u8,
     to_q: u8, to_r: u8,
@@ -98,34 +156,32 @@ pub fn has_line_of_sight(
 ) -> bool {
     let dist = hex_distance(from_q, from_r, to_q, to_r);
     if dist <= 1 {
-        return true; // adjacent or same tile — nothing in between
+        return true;
     }
 
-    // Convert to cube coordinates: x = q - offset, z = r, y = -x - z
-    let offset: i16 = Q_OFFSET.into();
-    let x1: i16 = from_q.into() - offset;
-    let z1: i16 = from_r.into();
+    // Convert offset to axial, then to cube for line drawing
+    let (aq1, ar1) = offset_to_axial(from_q, from_r);
+    let (aq2, ar2) = offset_to_axial(to_q, to_r);
+    // Cube: x = aq, z = ar, y = -x - z
+    let x1: i16 = aq1;
+    let z1: i16 = ar1;
     let y1: i16 = -x1 - z1;
-    let x2: i16 = to_q.into() - offset;
-    let z2: i16 = to_r.into();
+    let x2: i16 = aq2;
+    let z2: i16 = ar2;
     let y2: i16 = -x2 - z2;
     let n: i16 = dist.into();
 
-    // Walk intermediate tiles on the hex line (skip endpoints i=0 and i=n)
     let mut i: i16 = 1;
     let mut los_clear = true;
     while i < n && los_clear {
-        // Linearly interpolate cube coords, scaled by n
         let xn = x1 * (n - i) + x2 * i;
         let yn = y1 * (n - i) + y2 * i;
         let zn = z1 * (n - i) + z2 * i;
 
-        // Round to nearest cube hex
         let mut rx = round_div_i16(xn, n);
         let mut ry = round_div_i16(yn, n);
         let mut rz = round_div_i16(zn, n);
 
-        // Fix cube constraint: x + y + z must equal 0
         let xd = abs_i16(rx * n - xn);
         let yd = abs_i16(ry * n - yn);
         let zd = abs_i16(rz * n - zn);
@@ -138,15 +194,13 @@ pub fn has_line_of_sight(
             rz = -rx - ry;
         }
 
-        // Convert back to storage coordinates
-        let tq: i16 = rx + offset;
-        let tr: i16 = rz;
+        // Cube back to axial: aq = rx, ar = rz, then to offset
+        let (tq, tr) = axial_to_offset(rx, rz);
 
         if tq >= 0 && tq < MAP_WIDTH.into() && tr >= 0 && tr < MAP_HEIGHT.into() {
             let tq_u8: u8 = tq.try_into().unwrap();
             let tr_u8: u8 = tr.try_into().unwrap();
 
-            // Check if this intermediate tile blocks LOS
             let mut j: u32 = 0;
             let blen = blocking_tiles.len();
             while j < blen {
@@ -168,20 +222,17 @@ pub fn has_line_of_sight(
 // Hexes in range
 // ---------------------------------------------------------------------------
 
-/// Get all hexes within `radius` of (q, r), filtered to in-bounds.
-/// Uses axial coordinate offsets: for each (dx, dr) where
-/// max(|dx|, |dr|, |dx+dr|) <= radius, yield (q+dx, r+dr).
+/// Get all hexes within `radius` of (q, r) in offset coords, filtered to in-bounds.
+/// Converts center to axial, iterates axial offsets, converts back to offset.
 pub fn hexes_in_range(q: u8, r: u8, radius: u8) -> Array<(u8, u8)> {
     let mut result: Array<(u8, u8)> = array![];
     let rad: i16 = radius.into();
-    let cq: i16 = q.into();
-    let cr: i16 = r.into();
+    let (caq, car) = offset_to_axial(q, r);
     let w: i16 = MAP_WIDTH.into();
     let h: i16 = MAP_HEIGHT.into();
 
     let mut dx: i16 = -rad;
     while dx <= rad {
-        // dr range: max(-rad, -rad - dx) .. min(rad, rad - dx)
         let lo_a: i16 = -rad;
         let lo_b: i16 = -rad - dx;
         let lo = if lo_a > lo_b { lo_a } else { lo_b };
@@ -192,11 +243,12 @@ pub fn hexes_in_range(q: u8, r: u8, radius: u8) -> Array<(u8, u8)> {
 
         let mut dr: i16 = lo;
         while dr <= hi {
-            let sq: i16 = cq + dx;
-            let sr: i16 = cr + dr;
+            let aq: i16 = caq + dx;
+            let ar: i16 = car + dr;
+            let (oq, or) = axial_to_offset(aq, ar);
 
-            if sq >= 0 && sq < w && sr >= 0 && sr < h {
-                result.append((sq.try_into().unwrap(), sr.try_into().unwrap()));
+            if oq >= 0 && oq < w && or >= 0 && or < h {
+                result.append((oq.try_into().unwrap(), or.try_into().unwrap()));
             }
 
             dr += 1;
@@ -212,7 +264,7 @@ pub fn hexes_in_range(q: u8, r: u8, radius: u8) -> Array<(u8, u8)> {
 // ---------------------------------------------------------------------------
 
 /// Check if two adjacent hexes share a river edge.
-/// `river_edges_from` is a 6-bit bitmask (bit 0=E, 1=NE, 2=NW, 3=W, 4=SW, 5=SE).
+/// `river_edges_from` is a 6-bit bitmask (bit i = direction i has river).
 pub fn is_river_crossing(
     from_q: u8, from_r: u8,
     to_q: u8, to_r: u8,
@@ -228,47 +280,66 @@ pub fn is_river_crossing(
 }
 
 // ---------------------------------------------------------------------------
-// Coordinate conversion
+// Coordinate conversion (public, for external use)
 // ---------------------------------------------------------------------------
 
-/// Convert axial (signed) to storage (unsigned) coordinates.
+/// Convert axial (signed) to storage/offset (unsigned) coordinates.
 pub fn axial_to_storage(q: i16, r: i16) -> (u8, u8) {
-    let sq: u8 = (q + Q_OFFSET.into()).try_into().unwrap();
-    let sr: u8 = (r + R_OFFSET.into()).try_into().unwrap();
-    (sq, sr)
+    let (oq, or) = axial_to_offset(q, r);
+    (oq.try_into().unwrap(), or.try_into().unwrap())
 }
 
-/// Convert storage (unsigned) to axial (signed) coordinates.
+/// Convert storage/offset (unsigned) to axial (signed) coordinates.
 pub fn storage_to_axial(q: u8, r: u8) -> (i16, i16) {
-    let aq: i16 = q.into() - Q_OFFSET.into();
-    let ar: i16 = r.into() - R_OFFSET.into();
-    (aq, ar)
+    offset_to_axial(q, r)
 }
 
 // ---------------------------------------------------------------------------
 // Direction between adjacent tiles
 // ---------------------------------------------------------------------------
 
-/// Get direction index (0-5) from one hex to an adjacent hex.
-/// Returns None if not adjacent (distance != 1).
+/// Get direction index (0-5) from one hex to an adjacent hex (offset coords).
+/// Direction indices match the neighbor order defined at the top of this file.
+/// Returns None if not adjacent (hex_distance != 1).
 pub fn direction_between(from_q: u8, from_r: u8, to_q: u8, to_r: u8) -> Option<u8> {
     let dq: i16 = to_q.into() - from_q.into();
     let dr: i16 = to_r.into() - from_r.into();
+    let even: bool = (from_q % 2) == 0;
 
-    if dq == 1 && dr == 0 {
-        Option::Some(0) // E
-    } else if dq == 1 && dr == -1 {
-        Option::Some(1) // NE
-    } else if dq == 0 && dr == -1 {
-        Option::Some(2) // NW
-    } else if dq == -1 && dr == 0 {
-        Option::Some(3) // W
-    } else if dq == -1 && dr == 1 {
-        Option::Some(4) // SW
-    } else if dq == 0 && dr == 1 {
-        Option::Some(5) // SE
+    if even {
+        // Even column
+        if dq == 1 && dr == -1 {
+            Option::Some(0) // upper-right
+        } else if dq == 0 && dr == -1 {
+            Option::Some(1) // top
+        } else if dq == -1 && dr == -1 {
+            Option::Some(2) // upper-left
+        } else if dq == -1 && dr == 0 {
+            Option::Some(3) // lower-left
+        } else if dq == 0 && dr == 1 {
+            Option::Some(4) // bottom
+        } else if dq == 1 && dr == 0 {
+            Option::Some(5) // lower-right
+        } else {
+            Option::None
+        }
     } else {
-        Option::None
+        // Odd column
+        if dq == 1 && dr == 0 {
+            Option::Some(0) // upper-right
+        } else if dq == 0 && dr == -1 {
+            Option::Some(1) // top
+        } else if dq == -1 && dr == 0 {
+            Option::Some(2) // upper-left
+        } else if dq == -1 && dr == 1 {
+            Option::Some(3) // lower-left
+        } else if dq == 0 && dr == 1 {
+            Option::Some(4) // bottom
+        } else if dq == 1 && dr == 1 {
+            Option::Some(5) // lower-right
+        } else {
+            Option::None
+        }
     }
 }
 

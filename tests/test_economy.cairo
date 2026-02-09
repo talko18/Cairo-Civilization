@@ -29,11 +29,11 @@ fn test_income_palace_bonus() {
 // Expenses (E3–E4)
 // ===========================================================================
 
-// E3: 1 gold per military unit
+// E3: 1 gold per advanced military unit (warriors/scouts are free)
 #[test]
 fn test_expenses_per_unit() {
     assert!(constants::UNIT_MAINTENANCE_COST == 1);
-    let net = economy::compute_net_gold(10, 3);
+    let net = economy::compute_net_gold(10, 3); // 3 advanced units
     assert!(net == 7); // 10 - 3*1
 }
 
@@ -43,6 +43,17 @@ fn test_expenses_civilians_free() {
     assert!(constants::is_civilian(0)); // Settler
     assert!(constants::is_civilian(1)); // Builder
     assert!(!constants::is_civilian(3)); // Warrior - not civilian
+}
+
+// E4b: Warriors and scouts don't cost maintenance, advanced units do
+#[test]
+fn test_maintenance_basic_units_free() {
+    assert!(!constants::costs_maintenance(0)); // Settler: no
+    assert!(!constants::costs_maintenance(1)); // Builder: no
+    assert!(!constants::costs_maintenance(2)); // Scout: no
+    assert!(!constants::costs_maintenance(3)); // Warrior: no (basic)
+    assert!(constants::costs_maintenance(4));  // Slinger: yes (advanced)
+    assert!(constants::costs_maintenance(5));  // Archer: yes (advanced)
 }
 
 // ===========================================================================

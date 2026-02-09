@@ -83,15 +83,6 @@ pub fn reset_movement(unit: @Unit) -> u8 {
     constants::unit_movement(*unit.unit_type)
 }
 
-/// Check if a player has timed out.
-pub fn check_timeout(
-    last_action_timestamp: u64,
-    current_timestamp: u64,
-    timeout_seconds: u64,
-) -> bool {
-    current_timestamp > last_action_timestamp + timeout_seconds
-}
-
 /// Determine next player index in turn order (2 players for MVP).
 pub fn next_player(current_player: u8, player_count: u8) -> u8 {
     (current_player + 1) % player_count

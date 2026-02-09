@@ -601,26 +601,30 @@ fn find_terrain(tiles: Span<(u8, u8, TileData)>, q: u8, r: u8) -> u8 {
     }
 }
 
-/// Get the neighbor hex in a given direction (0-5).
-/// Directions: 0=E, 1=NE, 2=NW, 3=W, 4=SW, 5=SE (offset-coords, even-q).
+/// Get the neighbor hex in a given direction (0-5) using offset coordinates.
+/// Directions: 0=upper-right, 1=top, 2=upper-left, 3=lower-left, 4=bottom, 5=lower-right.
+/// Neighbor offsets depend on column parity (flat-top, odd-q-down).
 fn neighbor_in_dir(q: u8, r: u8, dir: u8) -> Option<(u8, u8)> {
     let qi: i16 = q.into();
     let ri: i16 = r.into();
     let w: i16 = MAP_WIDTH.into();
     let h: i16 = MAP_HEIGHT.into();
+    let even = (qi % 2) == 0;
 
-    let (nq, nr) = if dir == 0 {
-        (qi + 1, ri)      // E
-    } else if dir == 1 {
-        (qi + 1, ri - 1)  // NE
-    } else if dir == 2 {
-        (qi, ri - 1)      // NW (note: in offset coords this is N)
-    } else if dir == 3 {
-        (qi - 1, ri)      // W
-    } else if dir == 4 {
-        (qi - 1, ri + 1)  // SW
+    let (nq, nr) = if even {
+        if dir == 0 { (qi + 1, ri - 1) }      // upper-right
+        else if dir == 1 { (qi, ri - 1) }      // top
+        else if dir == 2 { (qi - 1, ri - 1) }  // upper-left
+        else if dir == 3 { (qi - 1, ri) }      // lower-left
+        else if dir == 4 { (qi, ri + 1) }      // bottom
+        else { (qi + 1, ri) }                   // lower-right
     } else {
-        (qi, ri + 1)      // SE (note: in offset coords this is S)
+        if dir == 0 { (qi + 1, ri) }           // upper-right
+        else if dir == 1 { (qi, ri - 1) }      // top
+        else if dir == 2 { (qi - 1, ri) }      // upper-left
+        else if dir == 3 { (qi - 1, ri + 1) }  // lower-left
+        else if dir == 4 { (qi, ri + 1) }      // bottom
+        else { (qi + 1, ri + 1) }              // lower-right
     };
 
     if nq >= 0 && nq < w && nr >= 0 && nr < h {
@@ -634,32 +638,63 @@ fn neighbor_in_dir(q: u8, r: u8, dir: u8) -> Option<(u8, u8)> {
 // Starting positions
 // ---------------------------------------------------------------------------
 
+/// Minimum distance from map edge for starting positions.
+const MIN_EDGE_DIST: u8 = 4;
+
+/// Check if a tile is far enough from the map edge (>= MIN_EDGE_DIST).
+fn is_far_from_edge(q: u8, r: u8, width: u8, height: u8) -> bool {
+    q >= MIN_EDGE_DIST && q + MIN_EDGE_DIST < width
+        && r >= MIN_EDGE_DIST && r + MIN_EDGE_DIST < height
+}
+
 /// Find valid starting positions for 2 players.
-/// Constraints: >= 10 hexes apart, both on land.
+/// Constraints: >= 8 hexes apart, both on walkable land, >= 4 tiles from edge.
+/// Uses seed-based shuffling so positions vary across games.
 pub fn find_starting_positions(
-    tiles: Span<(u8, u8, TileData)>, _seed: felt252,
+    tiles: Span<(u8, u8, TileData)>, seed: felt252,
 ) -> Option<((u8, u8), (u8, u8))> {
     let len = tiles.len();
+    let width = MAP_WIDTH;
+    let height = MAP_HEIGHT;
+
+    // 1. Collect all valid candidate tiles (land, far from edge)
+    let mut candidates: Array<(u8, u8)> = array![];
     let mut i: u32 = 0;
-    let mut result: Option<((u8, u8), (u8, u8))> = Option::None;
-    while i < len && result.is_none() {
-        let (q1, r1, td1) = *tiles.at(i);
-        if is_land_terrain(td1.terrain) {
-            // Search for a suitable second position
-            let mut j: u32 = i + 1;
-            while j < len {
-                let (q2, r2, td2) = *tiles.at(j);
-                if is_land_terrain(td2.terrain) {
-                    let dist = hex::hex_distance(q1, r1, q2, r2);
-                    if dist >= 10 {
-                        result = Option::Some(((q1, r1), (q2, r2)));
-                        break;
-                    }
-                }
-                j += 1;
-            };
+    while i < len {
+        let (q, r, td) = *tiles.at(i);
+        if is_land_terrain(td.terrain) && is_far_from_edge(q, r, width, height) {
+            candidates.append((q, r));
         }
         i += 1;
+    };
+
+    let clen = candidates.len();
+    if clen < 2 {
+        return Option::None;
+    }
+
+    // 2. Pick first player start: use seed to choose a random candidate
+    let cspan = candidates.span();
+    let hash1 = PoseidonTrait::new().update(seed).update(101).finalize();
+    let h1_u256: u256 = hash1.into();
+    let start1_idx: u32 = (h1_u256 % clen.into()).try_into().unwrap();
+    let (q1, r1) = *cspan.at(start1_idx);
+
+    // 3. Pick second player start: scan candidates starting from a seed-based offset,
+    //    looking for one >= 8 hexes from first
+    let hash2 = PoseidonTrait::new().update(seed).update(102).finalize();
+    let h2_u256: u256 = hash2.into();
+    let offset2: u32 = (h2_u256 % clen.into()).try_into().unwrap();
+    let mut k: u32 = 0;
+    let mut result: Option<((u8, u8), (u8, u8))> = Option::None;
+    while k < clen && result.is_none() {
+        let idx2 = (offset2 + k) % clen;
+        let (q2, r2) = *cspan.at(idx2);
+        let dist = hex::hex_distance(q1, r1, q2, r2);
+        if dist >= 8 {
+            result = Option::Some(((q1, r1), (q2, r2)));
+        }
+        k += 1;
     };
     result
 }

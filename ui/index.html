@@ -95,8 +95,9 @@ button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);t
 #map-area.dragging{cursor:grabbing}
 #map-canvas{position:absolute;top:0;left:0}
 #tile-tip{position:absolute;pointer-events:none;background:rgba(10,22,40,.94);border:1px solid var(--border);
-  border-radius:var(--rad);padding:8px 12px;font-size:.78rem;z-index:20;display:none;max-width:240px;backdrop-filter:blur(4px)}
+  border-radius:var(--rad);padding:8px 12px;font-size:.78rem;z-index:20;display:none;max-width:280px;backdrop-filter:blur(4px);line-height:1.5}
 #tile-tip b{color:var(--gold)}
+#tile-tip .yield-row{margin-top:3px;font-size:.82rem;letter-spacing:.5px}
 
 /* ── Action mode banner ── */
 #mode-banner{position:absolute;top:10px;left:50%;transform:translateX(-50%);background:rgba(233,69,96,.9);
@@ -235,8 +236,72 @@ const TERRAIN_NAMES = [
   'Ocean','Coast','Grassland','Grassland Hills','Plains','Plains Hills',
   'Desert','Desert Hills','Tundra','Tundra Hills','Snow','Snow Hills','Mountain'
 ];
-const FEATURE_NAMES = ['','Woods','Marsh'];
-const RESOURCE_NAMES = ['','Wheat','Cattle','Stone','Iron','Silver','Horses','Dyes'];
+// Feature IDs: 0=None, 1=Woods, 2=Rainforest, 3=Marsh, 4=Oasis
+const FEATURE_NAMES = ['','Woods','Rainforest','Marsh','Oasis'];
+// Resource IDs: 0=None, 1=Wheat, 2=Rice, 3=Cattle, 4=Stone, 5=Fish, 6=Horses, 7=Iron, 8=Silver, 9=Silk, 10=Dyes
+const RESOURCE_NAMES = ['','Wheat','Rice','Cattle','Stone','Fish','Horses','Iron','Silver','Silk','Dyes'];
+const IMPROVEMENT_NAMES = ['','Farm','Mine','Quarry','Pasture','Lumber Mill'];
+
+// ── Tile yield calculation (mirrors contract logic in city.cairo) ──
+function computeTileYield(tile) {
+  const t = tile.terrain;
+  // Base terrain yields: food
+  const FOOD  = [1,1,2,2,1,1,0,0,1,1,0,0,0]; // Ocean..Mountain
+  // Base terrain yields: production
+  const PROD  = [0,0,0,1,1,2,0,1,0,1,0,1,0];
+  // Base terrain yields: gold
+  const GOLD  = [0,1,0,0,0,0,0,0,0,0,0,0,0];
+  let food = FOOD[t]||0, prod = PROD[t]||0, gold = GOLD[t]||0;
+
+  // Feature bonus
+  if(tile.feature === 1) prod += 1; // Woods: +1 prod
+
+  // Resource bonus (matches contract: Wheat=1, Rice=2, Cattle=3 → +1 food;
+  // Fish=5 → +1 food; Stone=4, Iron=7 → +1 prod; Horses=6 → +1 prod;
+  // Silver=8 → +3 gold; Silk=9, Dyes=10 → +2 gold)
+  const res = tile.resource;
+  if(res===1||res===2||res===3||res===5) food += 1;
+  else if(res===4||res===7) prod += 1;
+  else if(res===6) prod += 1;
+  else if(res===8) gold += 3;
+  else if(res===9||res===10) gold += 2;
+
+  // Improvement bonus
+  const imp = tile.improvement || 0;
+  if(imp===1) food += 1;       // Farm
+  else if(imp===2) prod += 1;  // Mine
+  else if(imp===3) prod += 1;  // Quarry
+  else if(imp===4) prod += 1;  // Pasture
+  else if(imp===5) prod += 1;  // Lumber Mill
+
+  return {food, prod, gold};
+}
+
+// City center yield: at least 2 food, 1 production
+function computeCityCenterYield(tile) {
+  const y = computeTileYield(tile);
+  if(y.food < 2) y.food = 2;
+  if(y.prod < 1) y.prod = 1;
+  return y;
+}
+
+// Compute total per-turn yields for a city from its worked tiles + bonuses
+function computeCityYields(city) {
+  const worked = getWorkedTiles(city);
+  let food = 0, prod = 0, gold = 0;
+  for (const wt of worked) {
+    const tile = getTile(wt.q, wt.r);
+    if (!tile) continue;
+    const y = wt.isCenter ? computeCityCenterYield(tile) : computeTileYield(tile);
+    food += y.food; prod += y.prod; gold += y.gold;
+  }
+  // Palace bonus (capital)
+  if (city.isCapital) { prod += 2; gold += 5; }
+  // Building bonuses: Market (bit 4) = +3 gold
+  if (city.buildings & (1 << 4)) gold += 3;
+  return { food, prod, gold, workedCount: worked.length };
+}
+
 // Unit type indices match contract: 0=Settler, 1=Builder, 2=Scout, 3=Warrior, 4=Slinger, 5=Archer
 const UNIT_NAMES  = ['Settler','Builder','Scout','Warrior','Slinger','Archer','Spearman','Horseman','Swordsman','Crossbowman','Catapult'];
 const UNIT_ICONS  = ['\u{1F3D5}','\u{1F528}','\u{1F50D}','\u2694\uFE0F','\u{1F3AF}','\u{1F3F9}','\u{1F6E1}','\u{1F40E}','\u2694\uFE0F','\u{1F3F9}','\u{1F4A3}'];
@@ -271,6 +336,8 @@ function actionLabel(a) {
     case 'SkipUnit':         return `Skip unit #${a.unitId}`;
     case 'DeclareWar':       return `Declare war`;
     case 'UpgradeUnit':      return `Upgrade unit #${a.unitId}`;
+    case 'AssignCitizen':    return `Assign citizen in city #${a.cityId} to (${a.q},${a.r})`;
+    case 'UnassignCitizen':  return `Unassign citizen in city #${a.cityId} from (${a.q},${a.r})`;
     case 'EndTurn':          return `End turn`;
     default:                 return a.type;
   }
@@ -408,21 +475,29 @@ function renderSidebar() {
       const prodCost = PROD_ITEM_COST[c.production] || 0;
       const prodPct = prodCost > 0 ? Math.min(100, Math.round(c.prodStockpile / prodCost * 100)) : 0;
       const buildings = getBuildingList(c.buildings);
+
+      // Compute per-turn yields from worked tiles
+      const cy = computeCityYields(c);
+      const foodConsumption = c.population * 2;  // FOOD_PER_CITIZEN = 2
+      const foodSurplus = cy.food - foodConsumption;
+
       html += `<div class="s-card${isSel ? ' selected' : ''}" onclick="selectFromSidebar('city',${p},${c.id})" style="flex-direction:column;align-items:stretch;gap:4px">
         <div style="display:flex;align-items:center;gap:8px">
           <div class="s-icon p${p}">\u{1F3DB}</div>
           <div class="s-info">
             <div class="s-name">${c.name}${c.isCapital ? ' \u2605' : ''}</div>
-            <div class="s-detail">Pop ${c.population} \u2022 (${c.q},${c.r})</div>
+            <div class="s-detail">Pop ${c.population} \u2022 (${c.q},${c.r}) \u2022 Working ${cy.workedCount} tiles (center + ${cy.workedCount-1} citizens, ${(c.lockedTiles||[]).length} locked)</div>
           </div>
           <div class="s-hp">
             <div style="font-size:.7rem;text-align:right;color:var(--dim)">${c.hp}/200</div>
             <div class="s-hp-bar"><div class="s-hp-fill" style="width:${c.hp/2}%;background:${c.hp>100?'var(--food)':c.hp>50?'var(--prod)':'var(--p1)'}"></div></div>
           </div>
         </div>
-        <div style="display:flex;gap:10px;font-size:.7rem;padding:0 4px">
-          <span style="color:var(--food)">\u{1F33E} ${c.foodStockpile}</span>
-          <span style="color:var(--prod)">\u2692 ${c.prodStockpile}${prodCost>0?'/'+prodCost:''}</span>
+        <div style="display:flex;gap:8px;font-size:.72rem;padding:2px 4px;background:rgba(255,255,255,.04);border-radius:4px;margin:2px 0">
+          <span title="Food/turn (${cy.food} raw - ${foodConsumption} eaten)" style="color:var(--food)">\u{1F33E} ${foodSurplus >= 0 ? '+' : ''}${foodSurplus}</span>
+          <span title="Production/turn" style="color:#f5a623">\u2692 ${cy.prod}</span>
+          <span title="Gold/turn" style="color:var(--gold)">\u{1F4B0} ${cy.gold}</span>
+          <span style="color:var(--dim);margin-left:auto" title="Food stockpile">\u{1F4E6} ${c.foodStockpile}</span>
         </div>
         <div style="font-size:.68rem;padding:0 4px;color:var(--dim)">
           Producing: <b style="color:var(--prod)">${prodName}</b>${prodCost>0?' ('+prodPct+'%)':''}
@@ -679,10 +754,9 @@ function allNeighbors(q, r) {
   return table.map(off => [q + off[0], r + off[1]]);
 }
 
-// Compute which tiles a city is working (replicates contract's hexes_in_range order)
-function getWorkedTiles(city) {
-  const pop = city.population;
-  const rad = pop >= 6 ? 3 : pop >= 3 ? 2 : 1;
+// Get all territory tiles for a city (hexes_in_range)
+function getTerritoryTiles(city) {
+  const rad = city.population >= 6 ? 3 : city.population >= 3 ? 2 : 1;
   const tiles = [];
   for (let dx = -rad; dx <= rad; dx++) {
     const loA = -rad, loB = -rad - dx;
@@ -691,13 +765,63 @@ function getWorkedTiles(city) {
     const hi = hiA < hiB ? hiA : hiB;
     for (let dr = lo; dr <= hi; dr++) {
       const sq = city.q + dx, sr = city.r + dr;
-      if (sq >= 0 && sq < COLS && sr >= 0 && sr < ROWS) {
-        tiles.push({q: sq, r: sr});
-      }
+      if (sq >= 0 && sq < COLS && sr >= 0 && sr < ROWS) tiles.push({q: sq, r: sr});
     }
   }
-  // Only first `pop` tiles are worked
-  return tiles.slice(0, pop);
+  return tiles;
+}
+
+// Compute which tiles a city is working.
+// City center is ALWAYS worked (free). Each citizen works one additional tile.
+// Returns array of {q, r, locked: bool, isCenter: bool}
+function getWorkedTiles(city) {
+  const pop = city.population;
+  const locked = city.lockedTiles || [];
+  const result = [];
+  const usedSet = new Set();
+
+  // 0. City center is always worked (free, not using a pop slot)
+  result.push({q: city.q, r: city.r, locked: false, isCenter: true});
+  usedSet.add(city.q + ',' + city.r);
+
+  // Additional tiles = population count
+  let additional = 0;
+
+  // 1. Add locked tiles (verify still in territory, skip center)
+  for (const lt of locked) {
+    if (additional >= pop) break;
+    if (lt.q === city.q && lt.r === city.r) continue; // center already added
+    const t = getTile(lt.q, lt.r);
+    if (!t) continue;
+    if (t.ownerCity > 0 && t.ownerCity === city.id + 1 && t.terrain !== 0 && t.terrain !== 12) {
+      result.push({q: lt.q, r: lt.r, locked: true, isCenter: false});
+      usedSet.add(lt.q + ',' + lt.r);
+      additional++;
+    }
+  }
+
+  if (additional >= pop) return result;
+
+  // 2. Gather remaining territory tiles with scores (exclude center and locked)
+  const territory = getTerritoryTiles(city);
+  const scored = [];
+  for (const tt of territory) {
+    if (usedSet.has(tt.q + ',' + tt.r)) continue;
+    const tile = getTile(tt.q, tt.r);
+    if (!tile || tile.terrain === 0 || tile.terrain === 12) continue;
+    const y = computeTileYield(tile);
+    const score = y.food * 3 + y.prod * 2 + y.gold;
+    scored.push({q: tt.q, r: tt.r, score});
+  }
+
+  // 3. Sort by score descending, pick remaining slots
+  scored.sort((a, b) => b.score - a.score);
+  const remaining = pop - additional;
+  for (let i = 0; i < remaining && i < scored.length; i++) {
+    result.push({q: scored[i].q, r: scored[i].r, locked: false, isCenter: false});
+  }
+
+  return result;
 }
 
 const PLAYER_TERRITORY_COLORS = [
@@ -788,22 +912,89 @@ function drawMap() {
   }
   ctx2d.lineCap = 'butt';
 
-  // Worked tile highlights (when a city is selected)
+  // Worked tile highlights + yield labels (when a city is selected)
   if (selected && selected.type === 'city') {
     const city = G.players[selected.player].cities.find(c => c.id === selected.id);
     if (city) {
       const worked = getWorkedTiles(city);
+      const workedSet = new Set(worked.map(w => w.q+','+w.r));
+      const allTerritory = getTerritoryTiles(city);
+
+      // Draw unworked territory tiles with a dim overlay
+      for (const at of allTerritory) {
+        if (workedSet.has(at.q+','+at.r)) continue;
+        const tile = getTile(at.q, at.r);
+        if (!tile || tile.terrain === 0 || tile.terrain === 12) continue;
+        const [cx,cy] = hexCenter(at.q, at.r);
+        const pts = hexPts(cx,cy,sz-1);
+        ctx2d.beginPath(); ctx2d.moveTo(pts[0][0],pts[0][1]);
+        for(let i=1;i<6;i++) ctx2d.lineTo(pts[i][0],pts[i][1]);
+        ctx2d.closePath();
+        ctx2d.fillStyle = 'rgba(80,80,80,.25)';
+        ctx2d.fill();
+        ctx2d.strokeStyle = 'rgba(150,150,150,.3)';
+        ctx2d.lineWidth = 1;
+        ctx2d.setLineDash([3,3]);
+        ctx2d.stroke();
+        ctx2d.setLineDash([]);
+      }
+
+      // Draw worked tiles: locked = blue highlight, auto = green highlight
       for (const wt of worked) {
         const [cx,cy] = hexCenter(wt.q, wt.r);
         const pts = hexPts(cx,cy,sz-1);
         ctx2d.beginPath(); ctx2d.moveTo(pts[0][0],pts[0][1]);
         for(let i=1;i<6;i++) ctx2d.lineTo(pts[i][0],pts[i][1]);
         ctx2d.closePath();
-        ctx2d.fillStyle = 'rgba(102,187,106,.18)'; // green tint for worked
-        ctx2d.fill();
-        ctx2d.strokeStyle = 'rgba(102,187,106,.55)';
-        ctx2d.lineWidth = 1.5;
+        if (wt.locked) {
+          ctx2d.fillStyle = 'rgba(52,152,219,.25)';  // blue for locked
+          ctx2d.fill();
+          ctx2d.strokeStyle = 'rgba(52,152,219,.8)';
+          ctx2d.lineWidth = 2.5;
+        } else {
+          ctx2d.fillStyle = 'rgba(102,187,106,.25)';  // green for auto
+          ctx2d.fill();
+          ctx2d.strokeStyle = 'rgba(102,187,106,.7)';
+          ctx2d.lineWidth = 2;
+        }
         ctx2d.stroke();
+
+        // Lock icon on locked tiles
+        if (wt.locked) {
+          ctx2d.font = '10px sans-serif';
+          ctx2d.textAlign = 'center';
+          ctx2d.textBaseline = 'middle';
+          ctx2d.fillStyle = 'rgba(52,152,219,.9)';
+          ctx2d.fillText('\u{1F512}', cx + sz*0.3, cy - sz*0.3);
+        }
+
+        // Draw yield numbers on tile
+        const tile = getTile(wt.q, wt.r);
+        if (tile) {
+          const y = wt.isCenter ? computeCityCenterYield(tile) : computeTileYield(tile);
+          const yParts = [];
+          if (y.food) yParts.push({val: y.food, color: '#66bb6a', icon: 'F'});
+          if (y.prod) yParts.push({val: y.prod, color: '#f5a623', icon: 'P'});
+          if (y.gold) yParts.push({val: y.gold, color: '#ffd54f', icon: 'G'});
+          if (yParts.length > 0) {
+            const totalW = yParts.length * 20;
+            let ox = cx - totalW / 2 + 10;
+            const oy = cy + 10;
+            ctx2d.fillStyle = 'rgba(0,0,0,.65)';
+            const pillX = cx - totalW/2 - 2, pillY = oy - 9;
+            ctx2d.beginPath();
+            ctx2d.roundRect(pillX, pillY, totalW + 4, 16, 4);
+            ctx2d.fill();
+            ctx2d.font = 'bold 10px monospace';
+            ctx2d.textAlign = 'center';
+            ctx2d.textBaseline = 'middle';
+            for (const yp of yParts) {
+              ctx2d.fillStyle = yp.color;
+              ctx2d.fillText(yp.val + yp.icon, ox, oy);
+              ox += 20;
+            }
+          }
+        }
       }
     }
   }
@@ -962,14 +1153,49 @@ function showTooltip(mx,my,hex) {
   const t=getTile(hex.q,hex.r);
   if(!t){tt.style.display='none';return;}
   let html=`<b>${TERRAIN_NAMES[t.terrain]||'?'}</b> (${hex.q},${hex.r})`;
-  if(t.feature) html+=` \u2014 ${FEATURE_NAMES[t.feature]}`;
-  if(t.resource) html+=`<br>Resource: ${RESOURCE_NAMES[t.resource]}`;
+  if(t.feature) html+=` \u2014 ${FEATURE_NAMES[t.feature]||'Feature #'+t.feature}`;
+  if(t.resource) html+=`<br>Resource: ${RESOURCE_NAMES[t.resource]||'#'+t.resource}`;
+  const imp = t.improvement || 0;
+  if(imp) html+=`<br>Improvement: ${IMPROVEMENT_NAMES[imp]||'#'+imp}`;
+
+  // ── Tile yields (show for all tiles except deep ocean and mountain) ──
+  if(t.terrain !== 0 && t.terrain !== 12) { // not ocean/mountain
+    const y = computeTileYield(t);
+    const yieldParts = [];
+    if(y.food) yieldParts.push(`<span style="color:var(--food)">${y.food}\u{1F33E}</span>`);
+    if(y.prod) yieldParts.push(`<span style="color:#f5a623">${y.prod}\u2699\uFE0F</span>`);
+    if(y.gold) yieldParts.push(`<span style="color:var(--gold)">${y.gold}\u{1F4B0}</span>`);
+    if(yieldParts.length) html += `<br>Yields: ${yieldParts.join(' ')}`;
+
+    // Show city center yield if different (settling bonus)
+    const cy = computeCityCenterYield(t);
+    if(cy.food !== y.food || cy.prod !== y.prod) {
+      const cyParts = [];
+      if(cy.food) cyParts.push(`<span style="color:var(--food)">${cy.food}\u{1F33E}</span>`);
+      if(cy.prod) cyParts.push(`<span style="color:#f5a623">${cy.prod}\u2699\uFE0F</span>`);
+      if(cy.gold) cyParts.push(`<span style="color:var(--gold)">${cy.gold}\u{1F4B0}</span>`);
+      html += `<br>If settled: ${cyParts.join(' ')}`;
+    }
+  }
+
   if(t.ownerCity > 0) {
     const ownerLabel = t.ownerPlayer === 0 ? 'A' : 'B';
     const ownerCities = G.players[t.ownerPlayer].cities;
     const ownerCityObj = ownerCities.find(c => c.id === t.ownerCity - 1);
     const cityName = ownerCityObj ? ownerCityObj.name : 'City #' + t.ownerCity;
     html += `<br>Owner: <span style="color:var(--p${t.ownerPlayer})">${ownerLabel} \u2014 ${cityName}</span>`;
+    // Show lock status if this is the selected city's territory
+    if (selected && selected.type === 'city' && selected.player === t.ownerPlayer && t.ownerCity === selected.id + 1) {
+      const selCity = G.players[selected.player].cities.find(c => c.id === selected.id);
+      if (selCity) {
+        const locked = (selCity.lockedTiles || []).some(lt => lt.q === hex.q && lt.r === hex.r);
+        if (locked) {
+          html += `<br><span style="color:#3498db">\u{1F512} Citizen locked to this tile</span>`;
+        } else if (t.terrain !== 0 && t.terrain !== 12 && !(hex.q === selCity.q && hex.r === selCity.r)) {
+          html += `<br><span style="color:#999">Click to lock citizen here</span>`;
+        }
+      }
+    }
   }
   for(let p=0;p<2;p++){
     for(const u of G.players[p].units){
@@ -1001,6 +1227,39 @@ function handleClick(hex) {
   if(actionMode==='ranged' && selected && selected.type==='unit') {
     doAction({type:'RangedAttack', unitId:selected.id, targetQ:hex.q, targetR:hex.r});
     return;
+  }
+
+  // If a city is selected and we click a territory tile, toggle citizen lock
+  if (selected && selected.type === 'city' && selected.player === G.currentPlayer) {
+    const city = G.players[selected.player].cities.find(c => c.id === selected.id);
+    if (city) {
+      const tile = getTile(hex.q, hex.r);
+      // Check if this tile is in the city's territory and workable
+      if (tile && tile.ownerCity === city.id + 1 && tile.ownerPlayer === selected.player
+          && tile.terrain !== 0 && tile.terrain !== 12
+          && !(hex.q === city.q && hex.r === city.r)) { // can't toggle city center
+        const locked = city.lockedTiles || [];
+        const isLocked = locked.some(lt => lt.q === hex.q && lt.r === hex.r);
+        if (isLocked) {
+          queuePredicted({type:'UnassignCitizen', cityId: city.id, q: hex.q, r: hex.r});
+          // Update local state so UI reflects change immediately
+          city.lockedTiles = locked.filter(lt => !(lt.q === hex.q && lt.r === hex.r));
+          showToast('info', 'Citizen unassigned', `Tile (${hex.q},${hex.r}) set to auto-assign.`);
+        } else {
+          // Check if we can add more locked tiles (< population)
+          if (locked.length < city.population) {
+            queuePredicted({type:'AssignCitizen', cityId: city.id, q: hex.q, r: hex.r});
+            // Update local state
+            city.lockedTiles = [...locked, {q: hex.q, r: hex.r}];
+            showToast('info', 'Citizen assigned', `Locked citizen to tile (${hex.q},${hex.r}).`);
+          } else {
+            showToast('error', 'All citizens assigned', 'Unassign a citizen first or grow your city.');
+          }
+        }
+        renderSidebar(); drawMap();
+        return;
+      }
+    }
   }
 
   // Try to select entity at this hex (prefer current player, then enemy)

@@ -1,6 +1,10 @@
 // ============================================================================
 // Tests — Hex math functions (H1–H27)
 // Feature 2 in the feature map.
+//
+// All coordinates are offset coordinates (flat-top, odd-q-down):
+//   q = column (0..31), r = row (0..19)
+//   Odd columns are shifted down by half a hex.
 // ============================================================================
 
 use cairo_civ::hex;
@@ -16,42 +20,47 @@ fn test_distance_same_tile() {
 }
 
 // H2: distance between neighbors == 1
-// Axial neighbors from (16,10): E=(17,10), W=(15,10), SE=(16,11), NW=(16,9), NE=(17,9), SW=(15,11)
+// q=16 (even): neighbors are (17,9), (16,9), (15,9), (15,10), (16,11), (17,10)
 #[test]
 fn test_distance_adjacent() {
-    // E neighbor
-    assert!(hex::hex_distance(16, 10, 17, 10) == 1);
-    // W neighbor
-    assert!(hex::hex_distance(16, 10, 15, 10) == 1);
-    // SE neighbor
-    assert!(hex::hex_distance(16, 10, 16, 11) == 1);
-    // NW neighbor
-    assert!(hex::hex_distance(16, 10, 16, 9) == 1);
-    // NE neighbor
+    // upper-right
     assert!(hex::hex_distance(16, 10, 17, 9) == 1);
-    // SW neighbor
-    assert!(hex::hex_distance(16, 10, 15, 11) == 1);
+    // top
+    assert!(hex::hex_distance(16, 10, 16, 9) == 1);
+    // upper-left
+    assert!(hex::hex_distance(16, 10, 15, 9) == 1);
+    // lower-left
+    assert!(hex::hex_distance(16, 10, 15, 10) == 1);
+    // bottom
+    assert!(hex::hex_distance(16, 10, 16, 11) == 1);
+    // lower-right
+    assert!(hex::hex_distance(16, 10, 17, 10) == 1);
+
+    // Also test odd column: q=21, neighbors of (21,5):
+    // upper-right (22,5), top (21,4), upper-left (20,5),
+    // lower-left (20,6), bottom (21,6), lower-right (22,6)
+    assert!(hex::hex_distance(21, 5, 22, 6) == 1);
+    assert!(hex::hex_distance(21, 5, 20, 6) == 1);
 }
 
 // H3: distance across 2 hexes == 2
 #[test]
 fn test_distance_two_apart() {
-    // Two steps east: (16,10) -> (17,10) -> (18,10)
+    // Two steps: (16,10)→(17,10)→(18,10): even→odd→even lower-right path
     assert!(hex::hex_distance(16, 10, 18, 10) == 2);
-    // Two steps SE: (16,10) -> (16,11) -> (16,12)
+    // Two steps down: (16,10)→(16,11)→(16,12)
     assert!(hex::hex_distance(16, 10, 16, 12) == 2);
 }
 
 // H4: distance along diagonal direction
-// (0,0) to (1,1) in axial: dq=1, dr=1, |1|+|1|+|2| = 4/2 = 2
-// In storage: (16,0) to (17,1) → axial (0,0) to (1,1)
 #[test]
 fn test_distance_diagonal() {
-    assert!(hex::hex_distance(16, 0, 17, 1) == 2);
-    // (16,10) to (18,8): axial (0,10) to (2,8), dq=2, dr=-2, |2|+|2|+|0|=4/2=2
-    assert!(hex::hex_distance(16, 10, 18, 8) == 2);
-    // Longer diagonal: (16,10) to (19,7): dq=3, dr=-3, |3|+|3|+|0|=6/2=3
-    assert!(hex::hex_distance(16, 10, 19, 7) == 3);
+    // (16,10) → (17,11): upper-right then bottom = 2 steps
+    assert!(hex::hex_distance(16, 10, 17, 11) == 2);
+    // (10,5) → (12,4): 2 steps
+    assert!(hex::hex_distance(10, 5, 12, 4) == 2);
+    // (10,5) → (13,4): 3 steps
+    assert!(hex::hex_distance(10, 5, 13, 4) == 3);
 }
 
 // H5: distance(a,b) == distance(b,a)
@@ -71,21 +80,21 @@ fn test_distance_symmetric() {
 fn test_neighbors_center() {
     let neighbors = hex::hex_neighbors(16, 10);
     assert!(neighbors.len() == 6);
-    // Verify all 6 expected neighbors are present
-    // E=(17,10), W=(15,10), SE=(16,11), NW=(16,9), NE=(17,9), SW=(15,11)
-    assert!(contains(@neighbors, 17, 10));
+    // q=16 (even): upper-right(17,9), top(16,9), upper-left(15,9),
+    //              lower-left(15,10), bottom(16,11), lower-right(17,10)
+    assert!(contains(@neighbors, 17, 9));
+    assert!(contains(@neighbors, 16, 9));
+    assert!(contains(@neighbors, 15, 9));
     assert!(contains(@neighbors, 15, 10));
     assert!(contains(@neighbors, 16, 11));
-    assert!(contains(@neighbors, 16, 9));
-    assert!(contains(@neighbors, 17, 9));
-    assert!(contains(@neighbors, 15, 11));
+    assert!(contains(@neighbors, 17, 10));
 }
 
 // H7: fewer neighbors at map corner (out-of-bounds filtered)
 #[test]
 fn test_neighbors_corner() {
-    // (0, 0) corner: neighbors would be (1,0), (-1,0), (0,1), (0,-1), (1,-1), (-1,1)
-    // Only (1,0) and (0,1) are in bounds (q<32, r<20, unsigned so no negatives)
+    // (0, 0), even column: neighbors (1,-1), (0,-1), (-1,-1), (-1,0), (0,1), (1,0)
+    // Only (0,1) and (1,0) are in bounds
     let neighbors = hex::hex_neighbors(0, 0);
     assert!(neighbors.len() == 2);
     assert!(contains(@neighbors, 1, 0));
@@ -95,14 +104,31 @@ fn test_neighbors_corner() {
 // H8: edge tile has fewer valid neighbors
 #[test]
 fn test_neighbors_edge() {
-    // (0, 10) — left edge, middle row
-    // Neighbors: E=(1,10)✓, W=(-1,10)✗, SE=(0,11)✓, NW=(0,9)✓, NE=(1,9)✓, SW=(-1,11)✗
+    // (0, 10) — left edge, even column
+    // Neighbors: (1,9)✓, (0,9)✓, (-1,9)✗, (-1,10)✗, (0,11)✓, (1,10)✓
     let neighbors = hex::hex_neighbors(0, 10);
     assert!(neighbors.len() == 4);
-    // Top-right corner (31, 0)
-    // Neighbors: E=(32,0)✗, W=(30,0)✓, SE=(31,1)✓, NW=(31,-1)✗, NE=(32,-1)✗, SW=(30,1)✓
+
+    // (31, 0) — right edge, odd column
+    // Neighbors: (32,0)✗, (31,-1)✗, (30,0)✓, (30,1)✓, (31,1)✓, (32,1)✗
     let neighbors2 = hex::hex_neighbors(31, 0);
     assert!(neighbors2.len() == 3);
+}
+
+// Additional: test odd column neighbors
+#[test]
+fn test_neighbors_odd_column() {
+    // q=21 (odd), r=5
+    // upper-right(22,5), top(21,4), upper-left(20,5),
+    // lower-left(20,6), bottom(21,6), lower-right(22,6)
+    let neighbors = hex::hex_neighbors(21, 5);
+    assert!(neighbors.len() == 6);
+    assert!(contains(@neighbors, 22, 5));
+    assert!(contains(@neighbors, 21, 4));
+    assert!(contains(@neighbors, 20, 5));
+    assert!(contains(@neighbors, 20, 6));
+    assert!(contains(@neighbors, 21, 6));
+    assert!(contains(@neighbors, 22, 6));
 }
 
 // ===========================================================================
@@ -144,7 +170,7 @@ fn test_los_clear() {
 }
 
 // H13: LOS blocked by mountain between source and target
-// Source=(16,10), blocker=(17,10), target=(18,10) — straight line east
+// (16,10) → (17,10) → (18,10): blocker at (17,10)
 #[test]
 fn test_los_blocked_mountain() {
     let blocking: Array<(u8, u8)> = array![(17, 10)];
@@ -154,7 +180,6 @@ fn test_los_blocked_mountain() {
 // H14: LOS blocked by woods between (not at endpoints)
 #[test]
 fn test_los_blocked_woods() {
-    // Source=(10,10), target=(12,10), blocker=(11,10)
     let blocking: Array<(u8, u8)> = array![(11, 10)];
     assert!(!hex::has_line_of_sight(10, 10, 12, 10, blocking.span()));
 }
@@ -162,10 +187,8 @@ fn test_los_blocked_woods() {
 // H15: Woods at source or target do NOT block LOS
 #[test]
 fn test_los_woods_at_endpoint() {
-    // Blocking tile is at source — should NOT block
     let blocking_source: Array<(u8, u8)> = array![(16, 10)];
     assert!(hex::has_line_of_sight(16, 10, 18, 10, blocking_source.span()));
-    // Blocking tile is at target — should NOT block
     let blocking_target: Array<(u8, u8)> = array![(18, 10)];
     assert!(hex::has_line_of_sight(16, 10, 18, 10, blocking_target.span()));
 }
@@ -173,15 +196,14 @@ fn test_los_woods_at_endpoint() {
 // H16: Adjacent tiles always have LOS (nothing in between)
 #[test]
 fn test_los_adjacent() {
-    // Even with a blocking tile listed, adjacent tiles have nothing in between
-    let blocking: Array<(u8, u8)> = array![(20, 20)]; // irrelevant tile
+    let blocking: Array<(u8, u8)> = array![(20, 20)];
     assert!(hex::has_line_of_sight(16, 10, 17, 10, blocking.span()));
 }
 
 // H27: LOS from a tile to itself is always true
 #[test]
 fn test_los_to_self() {
-    let blocking: Array<(u8, u8)> = array![(16, 10)]; // even if tile itself is "blocking"
+    let blocking: Array<(u8, u8)> = array![(16, 10)];
     assert!(hex::has_line_of_sight(16, 10, 16, 10, blocking.span()));
 }
 
@@ -194,7 +216,6 @@ fn test_los_to_self() {
 fn test_hexes_in_range_radius1() {
     let tiles = hex::hexes_in_range(16, 10, 1);
     assert!(tiles.len() == 7);
-    // Must include center
     assert!(contains(@tiles, 16, 10));
 }
 
@@ -229,12 +250,12 @@ fn test_hexes_in_range_radius0() {
 // ===========================================================================
 
 // H20: Correctly detects river edge from bitmask
-// Direction indices: 0=E, 1=NE, 2=NW, 3=W, 4=SW, 5=SE
-// river_edges = 0b000001 means river on E edge
+// Direction indices: 0=upper-right, 1=top, 2=upper-left, 3=lower-left, 4=bottom, 5=lower-right
+// q=16 is even: lower-right neighbor is (17,10), which is direction 5.
 #[test]
 fn test_river_crossing() {
-    // River on E edge of (16,10), moving E to (17,10) → crossing
-    let river_edges: u8 = 0b000001; // bit 0 = E
+    // River on direction 5 (lower-right) edge of (16,10), moving to (17,10) → crossing
+    let river_edges: u8 = 0b100000; // bit 5 = lower-right
     assert!(hex::is_river_crossing(16, 10, 17, 10, river_edges));
 }
 
@@ -243,8 +264,8 @@ fn test_river_crossing() {
 fn test_no_river_crossing() {
     // No river edges at all
     assert!(!hex::is_river_crossing(16, 10, 17, 10, 0));
-    // River on SE edge, but moving E — no crossing
-    let river_edges: u8 = 0b100000; // bit 5 = SE
+    // River on top edge (dir 1), but moving lower-right — no crossing
+    let river_edges: u8 = 0b000010; // bit 1 = top
     assert!(!hex::is_river_crossing(16, 10, 17, 10, river_edges));
 }
 
@@ -252,64 +273,91 @@ fn test_no_river_crossing() {
 // Coordinate conversion (H22–H23)
 // ===========================================================================
 
-// H22: axial(-16, 0) → storage(0, 0)
+// H22: axial_to_storage converts correctly
 #[test]
 fn test_axial_to_storage() {
-    let (sq, sr) = hex::axial_to_storage(-16, 0);
+    // axial (0, 0) → offset (0, 0)
+    let (sq, sr) = hex::axial_to_storage(0, 0);
     assert!(sq == 0);
     assert!(sr == 0);
-    // Also test positive axial
-    let (sq2, sr2) = hex::axial_to_storage(0, 10);
+    // axial (16, 2) → offset (16, 2 + floor(16/2)) = (16, 10)
+    let (sq2, sr2) = hex::axial_to_storage(16, 2);
     assert!(sq2 == 16);
     assert!(sr2 == 10);
+    // axial (1, 0) → offset (1, 0 + floor(1/2)) = (1, 0)
+    let (sq3, sr3) = hex::axial_to_storage(1, 0);
+    assert!(sq3 == 1);
+    assert!(sr3 == 0);
 }
 
-// H23: storage(16, 10) → axial(0, 10)
+// H23: storage_to_axial converts correctly
 #[test]
 fn test_storage_to_axial() {
-    let (aq, ar) = hex::storage_to_axial(16, 10);
+    // offset (0, 0) → axial (0, 0 - 0) = (0, 0)
+    let (aq, ar) = hex::storage_to_axial(0, 0);
     assert!(aq == 0);
-    assert!(ar == 10);
-    // storage(0, 0) → axial(-16, 0)
-    let (aq2, ar2) = hex::storage_to_axial(0, 0);
-    assert!(aq2 == -16);
-    assert!(ar2 == 0);
+    assert!(ar == 0);
+    // offset (16, 10) → axial (16, 10 - 8) = (16, 2)
+    let (aq2, ar2) = hex::storage_to_axial(16, 10);
+    assert!(aq2 == 16);
+    assert!(ar2 == 2);
+    // offset (1, 5) → axial (1, 5 - 0) = (1, 5)
+    let (aq3, ar3) = hex::storage_to_axial(1, 5);
+    assert!(aq3 == 1);
+    assert!(ar3 == 5);
 }
 
 // ===========================================================================
 // Direction between (H24–H25)
 // ===========================================================================
 
-// H24: Returns correct direction index 0-5 for adjacent tiles
+// H24: Returns correct direction index 0-5 for adjacent tiles (even column)
 #[test]
 fn test_direction_between_adjacent() {
-    // E: (16,10) → (17,10) = direction 0
-    let d_e = hex::direction_between(16, 10, 17, 10);
-    assert!(d_e == Option::Some(0));
-    // NE: (16,10) → (17,9) = direction 1
-    let d_ne = hex::direction_between(16, 10, 17, 9);
-    assert!(d_ne == Option::Some(1));
-    // NW: (16,10) → (16,9) = direction 2
-    let d_nw = hex::direction_between(16, 10, 16, 9);
-    assert!(d_nw == Option::Some(2));
-    // W: (16,10) → (15,10) = direction 3
-    let d_w = hex::direction_between(16, 10, 15, 10);
-    assert!(d_w == Option::Some(3));
-    // SW: (16,10) → (15,11) = direction 4
-    let d_sw = hex::direction_between(16, 10, 15, 11);
-    assert!(d_sw == Option::Some(4));
-    // SE: (16,10) → (16,11) = direction 5
-    let d_se = hex::direction_between(16, 10, 16, 11);
-    assert!(d_se == Option::Some(5));
+    // q=16 (even column):
+    // upper-right: (16,10) → (17,9) = direction 0
+    let d0 = hex::direction_between(16, 10, 17, 9);
+    assert!(d0 == Option::Some(0));
+    // top: (16,10) → (16,9) = direction 1
+    let d1 = hex::direction_between(16, 10, 16, 9);
+    assert!(d1 == Option::Some(1));
+    // upper-left: (16,10) → (15,9) = direction 2
+    let d2 = hex::direction_between(16, 10, 15, 9);
+    assert!(d2 == Option::Some(2));
+    // lower-left: (16,10) → (15,10) = direction 3
+    let d3 = hex::direction_between(16, 10, 15, 10);
+    assert!(d3 == Option::Some(3));
+    // bottom: (16,10) → (16,11) = direction 4
+    let d4 = hex::direction_between(16, 10, 16, 11);
+    assert!(d4 == Option::Some(4));
+    // lower-right: (16,10) → (17,10) = direction 5
+    let d5 = hex::direction_between(16, 10, 17, 10);
+    assert!(d5 == Option::Some(5));
+}
+
+// H24b: Returns correct direction for odd column
+#[test]
+fn test_direction_between_odd_column() {
+    // q=21 (odd column):
+    // upper-right: (21,5) → (22,5) = direction 0
+    assert!(hex::direction_between(21, 5, 22, 5) == Option::Some(0));
+    // top: (21,5) → (21,4) = direction 1
+    assert!(hex::direction_between(21, 5, 21, 4) == Option::Some(1));
+    // upper-left: (21,5) → (20,5) = direction 2
+    assert!(hex::direction_between(21, 5, 20, 5) == Option::Some(2));
+    // lower-left: (21,5) → (20,6) = direction 3
+    assert!(hex::direction_between(21, 5, 20, 6) == Option::Some(3));
+    // bottom: (21,5) → (21,6) = direction 4
+    assert!(hex::direction_between(21, 5, 21, 6) == Option::Some(4));
+    // lower-right: (21,5) → (22,6) = direction 5
+    assert!(hex::direction_between(21, 5, 22, 6) == Option::Some(5));
 }
 
 // H25: Returns None for non-adjacent tiles
 #[test]
 fn test_direction_between_non_adjacent() {
-    // Distance 2 — not adjacent
     let d = hex::direction_between(16, 10, 18, 10);
     assert!(d == Option::None);
-    // Same tile — not adjacent either
     let d2 = hex::direction_between(16, 10, 16, 10);
     assert!(d2 == Option::None);
 }

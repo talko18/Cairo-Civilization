@@ -9,8 +9,6 @@
 // ---------------------------------------------------------------------------
 
 pub const TURN_LIMIT: u32 = 150;
-pub const TURN_TIMEOUT_SECONDS: u64 = 300; // 5 minutes
-pub const MAX_CONSECUTIVE_TIMEOUTS: u8 = 3;
 pub const MIN_CITY_DISTANCE: u8 = 3;
 pub const STARTING_GOLD: u32 = 0;
 pub const BUILDER_STARTING_CHARGES: u8 = 3;
@@ -80,6 +78,15 @@ pub fn unit_production_cost(unit_type: u8) -> u16 {
 
 pub fn is_civilian(unit_type: u8) -> bool {
     unit_type == 0 || unit_type == 1 // Settler, Builder
+}
+
+/// Whether this unit type costs gold maintenance per turn.
+/// Basic units (warrior, scout) are free; advanced military costs 1 gold/turn.
+pub fn costs_maintenance(unit_type: u8) -> bool {
+    // Civilians (settler, builder): no
+    // Scout, Warrior: no (basic units)
+    // Slinger, Archer, and any future advanced units: yes
+    unit_type >= 4
 }
 
 /// Tech required to produce a unit. 0 = no tech needed.
