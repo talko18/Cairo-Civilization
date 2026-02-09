@@ -1,12 +1,12 @@
 === RELEASE (no "test" or "mock" in path, excluding *interface*) ===
-github.com/AlDanial/cloc v 1.98  T=0.01 s (949.7 files/s, 253505.1 lines/s)
+github.com/AlDanial/cloc v 1.98  T=0.01 s (1150.0 files/s, 354921.7 lines/s)
 -----------------------------------------------------------------------------------
 File                                 blank        comment           code
 -----------------------------------------------------------------------------------
-./src/contract.cairo                    55             93            805
-./src/city.cairo                        38             68            267
-./src/map_gen.cairo                     49             81            259
-./src/constants.cairo                   48             74            247
+./src/contract.cairo                    59            106            896
+./src/map_gen.cairo                    105            157            531
+./src/city.cairo                        39             71            280
+./src/constants.cairo                   49             75            258
 ./src/hex.cairo                         46             74            201
 ./src/types.cairo                       44            103            199
 ./src/combat.cairo                      35             39            158
@@ -17,17 +17,17 @@ File                                 blank        comment           code
 ./src/economy.cairo                      6             15             30
 ./src/lib.cairo                          1              4             12
 -----------------------------------------------------------------------------------
-SUM:                                   363            623           2484
+SUM:                                   425            716           2871
 -----------------------------------------------------------------------------------
 
 === TESTS (path contains "test" or "mock", excluding *interface*) ===
-github.com/AlDanial/cloc v 1.98  T=0.02 s (768.3 files/s, 279844.9 lines/s)
+github.com/AlDanial/cloc v 1.98  T=0.01 s (916.6 files/s, 485086.3 lines/s)
 ------------------------------------------------------------------------------------------
 File                                        blank        comment           code
 ------------------------------------------------------------------------------------------
-./tests/test_contract.cairo                   105            335            708
-./tests/test_system.cairo                     118            161            353
-./tests/test_city.cairo                        73            151            305
+./tests/test_contract.cairo                   273            539           1398
+./tests/test_system.cairo                     264            345           1039
+./tests/test_city.cairo                        81            168            347
 ./tests/test_combat.cairo                      53            124            205
 ./tests/test_movement.cairo                    38             93            205
 ./tests/test_hex.cairo                         38            128            168
@@ -39,5 +39,5 @@ File                                        blank        comment           code
 ./tests/test_economy.cairo                     25             57             78
 ./tests/test_types.cairo                        8             17             55
 ------------------------------------------------------------------------------------------
-SUM:                                          623           1432           2680
+SUM:                                          945           1837           4098
 ------------------------------------------------------------------------------------------

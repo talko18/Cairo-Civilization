@@ -100,6 +100,50 @@ function encodeAction(a) {
   }
 }
 
+/**
+ * Extract a human-readable error message from a starknet.js exception.
+ * Cairo panics encode the reason as felt252 short-strings inside the error.
+ */
+function extractRevertReason(e) {
+  // Try to find felt252 panic data in various error structures
+  const raw = e.baseError || e;
+  const str = typeof raw === 'string' ? raw : JSON.stringify(raw);
+
+  // Pattern 1: Look for hex-encoded short strings (0x followed by hex digits)
+  // Cairo panic data appears as hex felts that decode to ASCII
+  const hexMatches = str.match(/0x[0-9a-fA-F]{2,62}/g);
+  if (hexMatches) {
+    const decoded = [];
+    for (const h of hexMatches) {
+      try {
+        const s = shortString.decodeShortString(h);
+        // Filter out garbage — only keep printable ASCII strings
+        if (s && s.length > 1 && /^[\x20-\x7E]+$/.test(s)) {
+          decoded.push(s);
+        }
+      } catch (_) {}
+    }
+    if (decoded.length > 0) {
+      // Return the longest decoded string (most likely the panic message)
+      decoded.sort((a, b) => b.length - a.length);
+      return decoded[0];
+    }
+  }
+
+  // Pattern 2: Look for plain-text error in known fields
+  if (e.message && typeof e.message === 'string') {
+    // Execution reverted messages sometimes contain the reason in quotes
+    const quoted = e.message.match(/'([^']+)'/);
+    if (quoted) return quoted[1];
+    // Truncate long messages
+    if (e.message.length > 200) return e.message.slice(0, 200) + '...';
+    return e.message;
+  }
+
+  // Fallback
+  return str.length > 200 ? str.slice(0, 200) + '...' : str;
+}
+
 /** Verify Katana is reachable. */
 async function checkKatanaAlive() {
   try {
@@ -312,9 +356,13 @@ app.get('/api/state', async (_req, res) => {
         if (idx >= 640) break;
         const q = idx % 32, r = Math.floor(idx / 32);
         promises.push(
-          readContract.call('get_tile', [gid, q, r])
-            .then(t => ({ q, r, terrain: n(t.terrain), feature: n(t.feature), resource: n(t.resource), riverEdges: n(t.river_edges) }))
-            .catch(() => ({ q, r, terrain: 0, feature: 0, resource: 0, riverEdges: 0 }))
+          Promise.all([
+            readContract.call('get_tile', [gid, q, r]),
+            readContract.call('get_tile_owner', [gid, q, r]),
+          ]).then(([t, owner]) => ({
+            q, r, terrain: n(t.terrain), feature: n(t.feature), resource: n(t.resource), riverEdges: n(t.river_edges),
+            ownerPlayer: n(owner[0]), ownerCity: n(owner[1]),
+          })).catch(() => ({ q, r, terrain: 0, feature: 0, resource: 0, riverEdges: 0, ownerPlayer: 0, ownerCity: 0 }))
         );
       }
       tiles.push(...(await Promise.all(promises)));
@@ -323,12 +371,13 @@ app.get('/api/state', async (_req, res) => {
     // Fetch player data
     const players = [];
     for (let p = 0; p < 2; p++) {
-      const [unitCount, cityCount, treasury, techs, research, diplo] = await Promise.all([
+      const [unitCount, cityCount, treasury, techs, research, accSci, diplo] = await Promise.all([
         readContract.call('get_unit_count',     [gid, p]),
         readContract.call('get_city_count',     [gid, p]),
         readContract.call('get_treasury',       [gid, p]),
         readContract.call('get_completed_techs',[gid, p]),
         readContract.call('get_current_research',[gid, p]),
+        readContract.call('get_accumulated_science',[gid, p]),
         readContract.call('get_diplomacy_status',[gid, 0, 1]),
       ]);
 
@@ -360,10 +409,20 @@ app.get('/api/state', async (_req, res) => {
         });
       }
 
+      // Compute half-science per turn from city data
+      // Sources: palace bonus (4 half-sci), Library building bit 3 (+2 half-sci)
+      let halfSciPerTurn = 0;
+      for (const c of cities) {
+        if (c.isCapital) halfSciPerTurn += 4;  // PALACE_HALF_SCIENCE_BONUS
+        if (c.buildings & (1 << 3)) halfSciPerTurn += 2;  // Library: +2 half-sci
+      }
+
       players.push({
         units, cities, treasury: n(treasury),
         completedTechs: techs?.toString() || '0',
         currentResearch: n(research),
+        accumulatedHalfScience: n(accSci),
+        halfSciencePerTurn: halfSciPerTurn,
         diplomacy: n(diplo),
       });
     }
@@ -402,9 +461,7 @@ app.post('/api/turn', async (req, res) => {
     res.json({ ok: true, txHash: tx.transaction_hash });
   } catch (e) {
     console.error('Turn error:', e.baseError || e.message || e);
-    const msg = e.baseError
-      ? JSON.stringify(e.baseError)
-      : (e.message || String(e));
+    const msg = extractRevertReason(e);
     res.status(500).json({ error: msg });
   }
 });
@@ -432,9 +489,7 @@ app.post('/api/actions', async (req, res) => {
     res.json({ ok: true, txHash: tx.transaction_hash });
   } catch (e) {
     console.error('Actions error:', e.baseError || e.message || e);
-    const msg = e.baseError
-      ? JSON.stringify(e.baseError)
-      : (e.message || String(e));
+    const msg = extractRevertReason(e);
     res.status(500).json({ error: msg });
   }
 });

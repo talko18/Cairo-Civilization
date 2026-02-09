@@ -41,6 +41,23 @@ button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);t
 #end-btn:hover{background:linear-gradient(135deg,#a93226,#c0392b)}
 #end-btn:disabled{opacity:.5;cursor:wait}
 
+/* ── Toast notifications ── */
+#toast-container{position:fixed;top:60px;right:20px;z-index:9999;display:flex;flex-direction:column;gap:8px;pointer-events:none;max-width:420px}
+.toast{pointer-events:auto;padding:12px 18px;border-radius:8px;font-size:.85rem;line-height:1.4;
+  box-shadow:0 4px 20px rgba(0,0,0,.5);animation:toast-in .3s ease-out;display:flex;gap:10px;align-items:flex-start}
+.toast.toast-error{background:linear-gradient(135deg,#4a1a1a,#6b2020);border:1px solid #e74c3c;color:#f5c6cb}
+.toast.toast-error .toast-icon{color:#e74c3c;font-size:1.1rem;flex-shrink:0;margin-top:1px}
+.toast.toast-success{background:linear-gradient(135deg,#1a3a1a,#1e4d2b);border:1px solid #27ae60;color:#c3e6cb}
+.toast.toast-success .toast-icon{color:#27ae60;font-size:1.1rem;flex-shrink:0;margin-top:1px}
+.toast .toast-body{flex:1}
+.toast .toast-title{font-weight:700;font-size:.9rem;margin-bottom:3px}
+.toast .toast-detail{font-size:.78rem;color:rgba(255,255,255,.65);word-break:break-word}
+.toast .toast-close{cursor:pointer;color:rgba(255,255,255,.5);font-size:1rem;flex-shrink:0;margin:-2px -4px 0 0;background:none;padding:2px 6px;border-radius:4px}
+.toast .toast-close:hover{color:#fff;background:rgba(255,255,255,.1)}
+.toast.toast-out{animation:toast-out .25s ease-in forwards}
+@keyframes toast-in{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:translateX(0)}}
+@keyframes toast-out{from{opacity:1;transform:translateX(0)}to{opacity:0;transform:translateX(40px)}}
+
 /* ── Main layout ── */
 #main{flex:1;display:flex;overflow:hidden}
 
@@ -139,6 +156,9 @@ button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);t
 </head>
 <body>
 
+<!-- ═══ TOAST CONTAINER ═══ -->
+<div id="toast-container"></div>
+
 <!-- ═══ SETUP SCREEN ═══ -->
 <div id="setup">
   <h1>CAIRO CIV</h1>
@@ -220,6 +240,45 @@ const RESOURCE_NAMES = ['','Wheat','Cattle','Stone','Iron','Silver','Horses','Dy
 // Unit type indices match contract: 0=Settler, 1=Builder, 2=Scout, 3=Warrior, 4=Slinger, 5=Archer
 const UNIT_NAMES  = ['Settler','Builder','Scout','Warrior','Slinger','Archer','Spearman','Horseman','Swordsman','Crossbowman','Catapult'];
 const UNIT_ICONS  = ['\u{1F3D5}','\u{1F528}','\u{1F50D}','\u2694\uFE0F','\u{1F3AF}','\u{1F3F9}','\u{1F6E1}','\u{1F40E}','\u2694\uFE0F','\u{1F3F9}','\u{1F4A3}'];
+// ── Toast notification system ──
+function showToast(type, title, detail, durationMs = 6000) {
+  const container = document.getElementById('toast-container');
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  const icon = type === 'error' ? '\u26A0\uFE0F' : '\u2705';
+  el.innerHTML = `<span class="toast-icon">${icon}</span><div class="toast-body"><div class="toast-title">${title}</div>${detail ? `<div class="toast-detail">${detail}</div>` : ''}</div><button class="toast-close" onclick="dismissToast(this.parentElement)">\u00D7</button>`;
+  container.appendChild(el);
+  if (durationMs > 0) {
+    setTimeout(() => dismissToast(el), durationMs);
+  }
+}
+function dismissToast(el) {
+  if (!el || el.classList.contains('toast-out')) return;
+  el.classList.add('toast-out');
+  setTimeout(() => el.remove(), 300);
+}
+function actionLabel(a) {
+  switch (a.type) {
+    case 'MoveUnit':         return `Move unit #${a.unitId} to (${a.destQ},${a.destR})`;
+    case 'AttackUnit':       return `Attack with unit #${a.unitId}`;
+    case 'RangedAttack':     return `Ranged attack with unit #${a.unitId}`;
+    case 'FoundCity':        return `Found city "${a.name}"`;
+    case 'SetProduction':    return `Set city #${a.cityId} production`;
+    case 'SetResearch':      return `Set research to tech #${a.techId}`;
+    case 'BuildImprovement': return `Build improvement at (${a.q},${a.r})`;
+    case 'RemoveImprovement':return `Remove improvement at (${a.q},${a.r})`;
+    case 'FortifyUnit':      return `Fortify unit #${a.unitId}`;
+    case 'SkipUnit':         return `Skip unit #${a.unitId}`;
+    case 'DeclareWar':       return `Declare war`;
+    case 'UpgradeUnit':      return `Upgrade unit #${a.unitId}`;
+    case 'EndTurn':          return `End turn`;
+    default:                 return a.type;
+  }
+}
+function batchSummary(actions) {
+  return actions.map(a => actionLabel(a)).join(', ');
+}
+
 const TECH_NAMES  = {1:'Mining',2:'Pottery',3:'Animal Husb.',4:'Archery',5:'Sailing',6:'Irrigation',7:'Writing',
   8:'Masonry',9:'Bronze Working',10:'The Wheel',11:'Currency',12:'Construction',13:'Horseback',14:'Iron Working',
   15:'Celestial Nav.',16:'Mathematics',17:'Engineering',18:'Machinery'};
@@ -234,6 +293,12 @@ const PROD_ITEM_COST = {
   1:80, 2:50, 3:30, 4:40, 5:35, 6:60,
   64:60, 65:65, 66:80, 67:90, 68:100, 69:90, 70:80
 };
+// Tech costs in full science points (contract stores half-points internally)
+const TECH_COSTS = {
+  1:25, 2:25, 3:25, 4:35, 5:40, 6:40, 7:45, 8:50, 9:50,
+  10:50, 11:60, 12:80, 13:80, 14:80, 15:80, 16:100, 17:100, 18:100
+};
+
 function getBuildingList(bitmask) {
   const list = [];
   for (let i = 0; i < 7; i++) { if (bitmask & (1 << i)) list.push(BUILDING_NAMES[i]); }
@@ -274,6 +339,7 @@ async function doSetup() {
 async function refreshState() {
   const res = await fetch('/api/state');
   G = await res.json();
+  buildTileIndex();
   updateTopBar();
   renderSidebar();
   updateActionBar();
@@ -288,8 +354,30 @@ function updateTopBar() {
   pl.className = G.currentPlayer === 0 ? 'p0' : 'p1';
   const cp = G.players[G.currentPlayer];
   document.getElementById('gold-lbl').textContent = cp.treasury + ' gold';
+
+  // Science display: per-turn rate + current research progress
+  const sciPerTurn = cp.halfSciencePerTurn ? (cp.halfSciencePerTurn / 2) : 0;
   const techId = cp.currentResearch;
-  document.getElementById('tech-lbl').textContent = techId ? TECH_NAMES[techId] || 'Tech '+techId : '--';
+  let techText = '';
+  if (techId) {
+    const techName = TECH_NAMES[techId] || 'Tech '+techId;
+    const cost = TECH_COSTS[techId] || 0;
+    const accHalf = cp.accumulatedHalfScience || 0;
+    const accFull = Math.floor(accHalf / 2);
+    if (cost > 0 && sciPerTurn > 0) {
+      const remaining = Math.max(0, cost - accFull);
+      const turnsLeft = Math.ceil(remaining / sciPerTurn);
+      techText = `${techName} ${accFull}/${cost} (~${turnsLeft}T) | ${sciPerTurn}/t`;
+    } else if (cost > 0) {
+      techText = `${techName} ${accFull}/${cost} | ${sciPerTurn}/t`;
+    } else {
+      techText = `${techName} | ${sciPerTurn}/t`;
+    }
+  } else {
+    techText = sciPerTurn > 0 ? `None (${sciPerTurn}/t)` : '--';
+  }
+  document.getElementById('tech-lbl').textContent = techText;
+
   document.getElementById('diplo-lbl').textContent = G.players[0].diplomacy === 1 ? 'WAR' : 'Peace';
 }
 
@@ -379,10 +467,26 @@ function renderSidebar() {
   }
 
   // Treasury & research
+  const sciPT = pData.halfSciencePerTurn ? (pData.halfSciencePerTurn / 2) : 0;
+  const rTechId = pData.currentResearch;
+  let researchLine = '';
+  if (rTechId) {
+    const rName = TECH_NAMES[rTechId] || 'Tech '+rTechId;
+    const rCost = TECH_COSTS[rTechId] || 0;
+    const rAcc = Math.floor((pData.accumulatedHalfScience || 0) / 2);
+    const rPct = rCost > 0 ? Math.min(100, Math.round(rAcc / rCost * 100)) : 0;
+    const rTurns = (rCost > 0 && sciPT > 0) ? Math.ceil(Math.max(0, rCost - rAcc) / sciPT) : '?';
+    researchLine = `<b style="color:var(--sci)">${rName}</b> (${rAcc}/${rCost}, ~${rTurns}T)`
+      + `<div style="margin:3px 0;height:6px;background:rgba(255,255,255,.1);border-radius:3px;overflow:hidden">`
+      + `<div style="height:100%;width:${rPct}%;background:var(--sci);border-radius:3px"></div></div>`;
+  } else {
+    researchLine = '<b style="color:var(--dim)">None</b>';
+  }
   html += '<div class="s-section"><div class="s-section-title">Economy</div>';
   html += `<div style="padding:4px 10px;font-size:.78rem;color:var(--dim)">
     \u{1F4B0} Treasury: <b style="color:var(--gold)">${pData.treasury}</b><br>
-    \u{1F52C} Research: <b style="color:var(--sci)">${TECH_NAMES[pData.currentResearch] || 'None'}</b><br>
+    \u{1F52C} Science: <b style="color:var(--sci)">${sciPT}</b>/turn<br>
+    \u{1F4D6} Research: ${researchLine}
     \u{1F3F3} Diplomacy: <b style="color:${pData.diplomacy===1?'var(--p1)':'var(--food)'}">${pData.diplomacy===1?'At War':'Peace'}</b>
   </div></div>`;
 
@@ -534,10 +638,76 @@ function resizeCanvas() {
 }
 window.addEventListener('resize', resizeCanvas);
 
-function getTile(q,r) {
-  if (!G) return null;
-  return G.tiles.find(t => t.q===q && t.r===r);
+let tileIdx = {}; // q,r → tile lookup
+function buildTileIndex() {
+  tileIdx = {};
+  if (!G) return;
+  for (const t of G.tiles) tileIdx[t.q + ',' + t.r] = t;
 }
+function getTile(q,r) {
+  return tileIdx[q + ',' + r] || null;
+}
+
+// Offset-coordinate hex neighbors for flat-top grid with odd columns shifted down.
+// Indexed by visual edge (0-5): edge i connects vertex i to vertex (i+1)%6.
+// Each entry is the [dq, dr] offset of the neighbor across that edge.
+// Even columns (q%2===0):
+const EDGE_NEIGHBOR_EVEN = [
+  [+1, -1], // edge 0 (v0→v1): upper-right
+  [ 0, -1], // edge 1 (v1→v2): top
+  [-1, -1], // edge 2 (v2→v3): upper-left
+  [-1,  0], // edge 3 (v3→v4): lower-left
+  [ 0, +1], // edge 4 (v4→v5): bottom
+  [+1,  0], // edge 5 (v5→v0): lower-right
+];
+// Odd columns (q%2===1):
+const EDGE_NEIGHBOR_ODD = [
+  [+1,  0], // edge 0 (v0→v1): upper-right
+  [ 0, -1], // edge 1 (v1→v2): top
+  [-1,  0], // edge 2 (v2→v3): upper-left
+  [-1, +1], // edge 3 (v3→v4): lower-left
+  [ 0, +1], // edge 4 (v4→v5): bottom
+  [+1, +1], // edge 5 (v5→v0): lower-right
+];
+function edgeNeighbor(q, r, edge) {
+  const off = (q % 2 === 0) ? EDGE_NEIGHBOR_EVEN[edge] : EDGE_NEIGHBOR_ODD[edge];
+  return [q + off[0], r + off[1]];
+}
+// Get all 6 neighbors of a hex (unordered, for general use)
+function allNeighbors(q, r) {
+  const table = (q % 2 === 0) ? EDGE_NEIGHBOR_EVEN : EDGE_NEIGHBOR_ODD;
+  return table.map(off => [q + off[0], r + off[1]]);
+}
+
+// Compute which tiles a city is working (replicates contract's hexes_in_range order)
+function getWorkedTiles(city) {
+  const pop = city.population;
+  const rad = pop >= 6 ? 3 : pop >= 3 ? 2 : 1;
+  const tiles = [];
+  for (let dx = -rad; dx <= rad; dx++) {
+    const loA = -rad, loB = -rad - dx;
+    const lo = loA > loB ? loA : loB;
+    const hiA = rad, hiB = rad - dx;
+    const hi = hiA < hiB ? hiA : hiB;
+    for (let dr = lo; dr <= hi; dr++) {
+      const sq = city.q + dx, sr = city.r + dr;
+      if (sq >= 0 && sq < COLS && sr >= 0 && sr < ROWS) {
+        tiles.push({q: sq, r: sr});
+      }
+    }
+  }
+  // Only first `pop` tiles are worked
+  return tiles.slice(0, pop);
+}
+
+const PLAYER_TERRITORY_COLORS = [
+  'rgba(52,152,219,.15)',   // P0 blue overlay
+  'rgba(231,76,60,.15)',    // P1 red overlay
+];
+const PLAYER_BORDER_COLORS = [
+  'rgba(52,152,219,.7)',    // P0 blue border
+  'rgba(231,76,60,.7)',     // P1 red border
+];
 
 function drawMap() {
   if (!G) return;
@@ -576,6 +746,66 @@ function drawMap() {
     if (t.feature===2) { ctx2d.font='12px sans-serif'; ctx2d.textAlign='center'; ctx2d.fillText('\u{1F33F}',cx-6,cy-4); }
     if (t.resource) { ctx2d.font='11px sans-serif'; ctx2d.textAlign='center'; ctx2d.fillText([,'\u{1F33E}','\u{1F404}','\u{1FAA8}','\u26CF\uFE0F','\u{1F48E}','\u{1F40E}','\u{1F3A8}'][t.resource]||'',cx+10,cy-6); }
     if (t.terrain===12) { ctx2d.font='16px sans-serif'; ctx2d.textAlign='center'; ctx2d.fillText('\u26F0\uFE0F',cx,cy+5); }
+  }
+
+  // Territory overlays — color owned tiles
+  for (const t of G.tiles) {
+    if (t.ownerCity > 0) {
+      const p = t.ownerPlayer;
+      const [cx,cy] = hexCenter(t.q, t.r);
+      const pts = hexPts(cx,cy,sz);
+      ctx2d.beginPath(); ctx2d.moveTo(pts[0][0],pts[0][1]);
+      for(let i=1;i<6;i++) ctx2d.lineTo(pts[i][0],pts[i][1]);
+      ctx2d.closePath();
+      ctx2d.fillStyle = PLAYER_TERRITORY_COLORS[p] || 'rgba(255,255,255,.08)';
+      ctx2d.fill();
+    }
+  }
+  // Territory borders — thick colored lines on edges between owned and unowned/different-owner tiles
+  ctx2d.lineWidth = 2.5; ctx2d.lineCap = 'round';
+  for (const t of G.tiles) {
+    if (t.ownerCity <= 0) continue;
+    const p = t.ownerPlayer;
+    const [cx,cy] = hexCenter(t.q, t.r);
+    const pts = hexPts(cx,cy,sz);
+    ctx2d.strokeStyle = PLAYER_BORDER_COLORS[p] || 'rgba(255,255,255,.4)';
+    for (let edge = 0; edge < 6; edge++) {
+      const [nq, nr] = edgeNeighbor(t.q, t.r, edge);
+      let drawBorder = false;
+      if (nq < 0 || nq >= COLS || nr < 0 || nr >= ROWS) {
+        drawBorder = true; // map edge
+      } else {
+        const nt = getTile(nq, nr);
+        if (!nt || nt.ownerCity <= 0 || nt.ownerPlayer !== p) drawBorder = true;
+      }
+      if (drawBorder) {
+        ctx2d.beginPath();
+        ctx2d.moveTo(pts[edge][0], pts[edge][1]);
+        ctx2d.lineTo(pts[(edge+1)%6][0], pts[(edge+1)%6][1]);
+        ctx2d.stroke();
+      }
+    }
+  }
+  ctx2d.lineCap = 'butt';
+
+  // Worked tile highlights (when a city is selected)
+  if (selected && selected.type === 'city') {
+    const city = G.players[selected.player].cities.find(c => c.id === selected.id);
+    if (city) {
+      const worked = getWorkedTiles(city);
+      for (const wt of worked) {
+        const [cx,cy] = hexCenter(wt.q, wt.r);
+        const pts = hexPts(cx,cy,sz-1);
+        ctx2d.beginPath(); ctx2d.moveTo(pts[0][0],pts[0][1]);
+        for(let i=1;i<6;i++) ctx2d.lineTo(pts[i][0],pts[i][1]);
+        ctx2d.closePath();
+        ctx2d.fillStyle = 'rgba(102,187,106,.18)'; // green tint for worked
+        ctx2d.fill();
+        ctx2d.strokeStyle = 'rgba(102,187,106,.55)';
+        ctx2d.lineWidth = 1.5;
+        ctx2d.stroke();
+      }
+    }
   }
 
   // Selected hex highlight
@@ -734,6 +964,13 @@ function showTooltip(mx,my,hex) {
   let html=`<b>${TERRAIN_NAMES[t.terrain]||'?'}</b> (${hex.q},${hex.r})`;
   if(t.feature) html+=` \u2014 ${FEATURE_NAMES[t.feature]}`;
   if(t.resource) html+=`<br>Resource: ${RESOURCE_NAMES[t.resource]}`;
+  if(t.ownerCity > 0) {
+    const ownerLabel = t.ownerPlayer === 0 ? 'A' : 'B';
+    const ownerCities = G.players[t.ownerPlayer].cities;
+    const ownerCityObj = ownerCities.find(c => c.id === t.ownerCity - 1);
+    const cityName = ownerCityObj ? ownerCityObj.name : 'City #' + t.ownerCity;
+    html += `<br>Owner: <span style="color:var(--p${t.ownerPlayer})">${ownerLabel} \u2014 ${cityName}</span>`;
+  }
   for(let p=0;p<2;p++){
     for(const u of G.players[p].units){
       if(u.hp>0&&u.q===hex.q&&u.r===hex.r) html+=`<br>${p===0?'A':'B'}: ${UNIT_NAMES[u.unitType]} HP:${u.hp} MP:${u.mp}`;
@@ -848,11 +1085,18 @@ async function submitBatch(actions, isEndTurn) {
       body: JSON.stringify({player: G.currentPlayer, actions})
     });
     const data = await res.json();
-    if(!res.ok) { alert('Error: ' + data.error); loading=false; document.getElementById('end-btn').disabled=false; return; }
+    if(!res.ok) {
+      const summary = batchSummary(actions);
+      showToast('error', 'Transaction failed', `<b>Reason:</b> ${data.error}<br><b>Actions:</b> ${summary}`, 10000);
+      loading=false; document.getElementById('end-btn').disabled=false; return;
+    }
     selected=null; actionMode=null; setModeBanner(null);
     await refreshState();
     if (isEndTurn) centerCamera();
-  } catch(e) { alert('Error: '+e.message); }
+  } catch(e) {
+    const summary = batchSummary(actions);
+    showToast('error', 'Network error', `<b>Details:</b> ${e.message}<br><b>Actions:</b> ${summary}`, 10000);
+  }
   loading=false;
   document.getElementById('end-btn').disabled=false;
 }
@@ -1096,7 +1340,7 @@ function setProduction(itemId) {
   if(!selected || selected.type!=='city') {
     const cp = G.currentPlayer;
     const city = G.players[cp].cities[0];
-    if(!city){ alert('No city to set production'); closePanel(); return; }
+    if(!city){ showToast('error', 'No city', 'You need a city to set production.'); closePanel(); return; }
     cityId = city.id;
   } else {
     cityId = selected.id;

@@ -30,6 +30,7 @@ pub trait ICairoCiv<TContractState> {
     fn get_treasury(self: @TContractState, game_id: u64, player_idx: u8) -> u32;
     fn get_completed_techs(self: @TContractState, game_id: u64, player_idx: u8) -> u64;
     fn get_current_research(self: @TContractState, game_id: u64, player_idx: u8) -> u8;
+    fn get_accumulated_science(self: @TContractState, game_id: u64, player_idx: u8) -> u32;
     fn get_winner(self: @TContractState, game_id: u64) -> u8;
     fn get_score(self: @TContractState, game_id: u64, player_idx: u8) -> u32;
     fn get_diplomacy_status(self: @TContractState, game_id: u64, p1: u8, p2: u8) -> u8;
@@ -309,6 +310,7 @@ mod CairoCiv {
         fn get_treasury(self: @ContractState, game_id: u64, player_idx: u8) -> u32 { self.player_treasury.read((game_id, player_idx)) }
         fn get_completed_techs(self: @ContractState, game_id: u64, player_idx: u8) -> u64 { self.player_completed_techs.read((game_id, player_idx)) }
         fn get_current_research(self: @ContractState, game_id: u64, player_idx: u8) -> u8 { self.player_current_research.read((game_id, player_idx)) }
+        fn get_accumulated_science(self: @ContractState, game_id: u64, player_idx: u8) -> u32 { self.player_accumulated_half_science.read((game_id, player_idx)) }
         fn get_winner(self: @ContractState, game_id: u64) -> u8 { self.game_winner.read(game_id) }
         fn get_score(self: @ContractState, game_id: u64, player_idx: u8) -> u32 { 0 }
         fn get_diplomacy_status(self: @ContractState, game_id: u64, p1: u8, p2: u8) -> u8 { self.diplomacy.read((game_id, p1, p2)) }
