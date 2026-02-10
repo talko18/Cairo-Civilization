@@ -380,3 +380,38 @@ fn test_fortify_resets_on_attack() {
     // Fortify resets on move/attack — verified in integration
     assert!(true);
 }
+
+// C37: Melee attack on city deals damage and takes counter-damage
+#[test]
+fn test_city_melee_damage() {
+    let attacker = Unit {
+        unit_type: UNIT_WARRIOR, q: 10, r: 10, hp: 100,
+        movement_remaining: 2, charges: 0, fortify_turns: 0,
+    };
+    let city = make_city(1, 200);
+    let result = combat::resolve_city_melee(@attacker, @city, false);
+    // Warrior CS=10 vs City CS=15+1*2=17. Attacker should deal and take damage.
+    assert!(result.damage_to_defender > 0, "Should damage city");
+    assert!(result.damage_to_attacker > 0, "City should counter-attack");
+}
+
+// C38: Ranged attack on city deals damage, no counter
+#[test]
+fn test_city_ranged_damage() {
+    let attacker = Unit {
+        unit_type: UNIT_ARCHER, q: 10, r: 10, hp: 100,
+        movement_remaining: 2, charges: 0, fortify_turns: 0,
+    };
+    let city = make_city(1, 200);
+    let result = combat::resolve_city_ranged(@attacker, @city, false);
+    assert!(result.damage_to_defender > 0, "Ranged should damage city");
+    assert!(result.damage_to_attacker == 0, "Ranged should not take counter-damage");
+}
+
+// C39: City combat strength with walls
+#[test]
+fn test_city_cs_with_walls() {
+    let cs_no_walls = combat::city_combat_strength(2, false);
+    let cs_walls = combat::city_combat_strength(2, true);
+    assert!(cs_walls > cs_no_walls, "Walls should increase city CS");
+}

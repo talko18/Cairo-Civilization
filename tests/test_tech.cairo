@@ -211,7 +211,27 @@ fn test_building_required_tech() {
 // T17: Farm requires Irrigation (tech 6)
 #[test]
 fn test_improvement_required_tech() {
-    // This is verified via city::is_valid_improvement_for_tile and tech checks
-    // For now, verify Irrigation is tech 6
-    assert!(constants::tech_cost(6) == 40); // Irrigation costs 40
+    // Farm: no tech (0)
+    assert!(constants::improvement_required_tech(1) == 0);
+    // Mine: Mining (1)
+    assert!(constants::improvement_required_tech(2) == 1);
+    // Quarry: Mining (1)
+    assert!(constants::improvement_required_tech(3) == 1);
+    // Pasture: Animal Husbandry (3)
+    assert!(constants::improvement_required_tech(4) == 3);
+    // Lumber Mill: Mining (1)
+    assert!(constants::improvement_required_tech(5) == 1);
+}
+
+#[test]
+fn test_feature_remove_required_tech() {
+    // Woods: Mining (1)
+    assert!(constants::feature_remove_tech(1) == 1);
+    // Rainforest: Bronze Working (9)
+    assert!(constants::feature_remove_tech(2) == 9);
+    // Marsh: Irrigation (6)
+    assert!(constants::feature_remove_tech(3) == 6);
+    // None/Oasis: cannot remove (255)
+    assert!(constants::feature_remove_tech(0) == 255);
+    assert!(constants::feature_remove_tech(4) == 255);
 }

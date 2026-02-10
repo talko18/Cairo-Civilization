@@ -79,7 +79,8 @@ mod CairoCiv {
         STATUS_LOBBY, STATUS_ACTIVE, STATUS_FINISHED,
         VICTORY_FORFEIT,
         UNIT_SETTLER, UNIT_WARRIOR, UNIT_BUILDER,
-        DIPLO_WAR,
+        BUILDING_WALLS,
+        DIPLO_WAR, VICTORY_DOMINATION,
         IMPROVEMENT_NONE,
     };
     use cairo_civ::{hex, map_gen, movement, combat, city, tech, economy, turn, constants};
@@ -372,6 +373,7 @@ mod CairoCiv {
                 Action::SetResearch(tid) => Self::act_set_research(ref self, game_id, player, tid),
                 Action::BuildImprovement((bid, q, r, imp)) => Self::act_build_improvement(ref self, game_id, player, bid, q, r, imp),
                 Action::RemoveImprovement((bid, q, r)) => Self::act_remove_improvement(ref self, game_id, player, bid, q, r),
+                Action::RemoveFeature((bid, q, r)) => Self::act_remove_feature(ref self, game_id, player, bid, q, r),
                 Action::FortifyUnit(uid) => Self::act_fortify(ref self, game_id, player, uid),
                 Action::SkipUnit(_) => { },
                 Action::PurchaseWithGold((cid, item)) => Self::act_purchase(ref self, game_id, player, cid, item),
@@ -395,13 +397,24 @@ mod CairoCiv {
             let dist = hex::hex_distance(unit.q, unit.r, dq, dr);
             assert(dist > 0, 'Already there');
 
+            let mover_is_combat = !constants::is_civilian(unit.unit_type);
+
+            // --- Destination checks ---
+            // Can't move onto a tile with an enemy combat unit (use AttackUnit instead)
+            assert(!Self::has_enemy_combat_at(@self, game_id, player, dq, dr),
+                'Enemy military blocking');
+            // Can't stack two friendly combat units on the same tile
+            if mover_is_combat {
+                assert(!Self::has_friendly_combat_at(@self, game_id, player, dq, dr, uid),
+                    'Friendly military blocking');
+            }
+
             if dist == 1 {
                 // Adjacent: simple single-step move
                 let dest_tile = self.tiles.read((game_id, dq, dr));
                 let cost = movement::tile_movement_cost(@dest_tile);
                 assert(cost > 0, 'Impassable');
                 assert(unit.movement_remaining >= cost, 'Insufficient MP');
-                // Step through this tile (hook point for ZOC / fog of war)
                 unit.q = dq;
                 unit.r = dr;
                 unit.movement_remaining -= cost;
@@ -463,29 +476,32 @@ mod CairoCiv {
                     let nlen = nspan.len();
                     while ni < nlen {
                         let (nq, nr) = *nspan.at(ni);
-                        let td = self.tiles.read((game_id, nq, nr));
-                        let cost = movement::tile_movement_cost(@td);
-                        if cost > 0 && cmp >= cost {
-                            let new_mp = cmp - cost;
-                            // Check if already visited with equal or better MP
-                            let mut already_better = false;
-                            let vspan = visited.span();
-                            let mut vi: u32 = 0;
-                            while vi < vspan.len() {
-                                let (vq, vr, vmp, _, _) = *vspan.at(vi);
-                                if vq == nq && vr == nr && vmp >= new_mp {
-                                    already_better = true;
-                                    break;
-                                }
-                                vi += 1;
-                            };
-                            if !already_better {
-                                // Record with parent = (cq, cr)
-                                visited.append((nq, nr, new_mp, cq, cr));
-                                if nq == dq && nr == dr {
-                                    found = true;
-                                } else {
-                                    new_open.append((nq, nr, new_mp));
+                        // Enemy combat units block pathfinding (can't move through them)
+                        if !Self::has_enemy_combat_at(@self, game_id, player, nq, nr) {
+                            let td = self.tiles.read((game_id, nq, nr));
+                            let cost = movement::tile_movement_cost(@td);
+                            if cost > 0 && cmp >= cost {
+                                let new_mp = cmp - cost;
+                                // Check if already visited with equal or better MP
+                                let mut already_better = false;
+                                let vspan = visited.span();
+                                let mut vi: u32 = 0;
+                                while vi < vspan.len() {
+                                    let (vq, vr, vmp, _, _) = *vspan.at(vi);
+                                    if vq == nq && vr == nr && vmp >= new_mp {
+                                        already_better = true;
+                                        break;
+                                    }
+                                    vi += 1;
+                                };
+                                if !already_better {
+                                    // Record with parent = (cq, cr)
+                                    visited.append((nq, nr, new_mp, cq, cr));
+                                    if nq == dq && nr == dr {
+                                        found = true;
+                                    } else {
+                                        new_open.append((nq, nr, new_mp));
+                                    }
                                 }
                             }
                         }
@@ -532,18 +548,29 @@ mod CairoCiv {
                     let cost = movement::tile_movement_cost(@td);
 
                     // Step through this tile — unit physically enters it.
-                    // Future hook: check ZOC, discover fog-of-war tiles in LOS, etc.
                     unit.q = sq;
                     unit.r = sr;
                     unit.movement_remaining -= cost;
+
+                    // Auto-capture enemy civilians on intermediate tiles
+                    if mover_is_combat {
+                        Self::try_capture_civilian_at(ref self, game_id, player, sq, sr);
+                    }
                 };
 
                 unit.fortify_turns = 0;
                 self.units.write((game_id, player, uid), unit);
             }
+
+            // Auto-capture enemy civilians at final destination
+            if mover_is_combat {
+                Self::try_capture_civilian_at(ref self, game_id, player, dq, dr);
+            }
         }
 
         // ---- AttackUnit ----
+        // Melee attack on enemy combat unit or city. If attacker kills the defender/city,
+        // attacker advances onto the tile (like Civ). City capture only via melee.
         fn act_attack(ref self: ContractState, game_id: u64, player: u8, uid: u32, tq: u8, tr: u8) {
             let uc = self.player_unit_count.read((game_id, player));
             assert(uid < uc, 'Invalid unit id');
@@ -553,57 +580,129 @@ mod CairoCiv {
             let atk_cs = constants::unit_combat_strength(attacker.unit_type);
             assert(atk_cs > 0, 'Civilians cannot attack');
 
-            // Find enemy unit at target
+            // Check adjacent
+            let dist = hex::hex_distance(attacker.q, attacker.r, tq, tr);
+            assert(dist == 1, 'Not adjacent');
+
+            // Look for enemy city at target first
             let np = self.game_num_players.read(game_id);
+            let mut city_owner: u8 = 255;
+            let mut city_id: u32 = 0;
+            let mut city_found = false;
+            let mut cp: u8 = 0;
+            while cp < np && !city_found {
+                if cp != player {
+                    let cc = self.player_city_count.read((game_id, cp));
+                    let mut ci: u32 = 0;
+                    while ci < cc && !city_found {
+                        let c = self.cities.read((game_id, cp, ci));
+                        if c.hp > 0 && c.q == tq && c.r == tr {
+                            city_owner = cp;
+                            city_id = ci;
+                            city_found = true;
+                        }
+                        ci += 1;
+                    };
+                }
+                cp += 1;
+            };
+
+            // Look for enemy combat unit at target
             let mut enemy_player: u8 = 255;
             let mut enemy_uid: u32 = 0;
-            let mut found = false;
+            let mut unit_found = false;
             let mut ep: u8 = 0;
-            while ep < np && !found {
+            while ep < np && !unit_found {
                 if ep != player {
                     let euc = self.player_unit_count.read((game_id, ep));
                     let mut eu: u32 = 0;
-                    while eu < euc && !found {
+                    while eu < euc && !unit_found {
                         let eunit = self.units.read((game_id, ep, eu));
-                        if eunit.hp > 0 && eunit.q == tq && eunit.r == tr {
+                        if eunit.hp > 0 && eunit.q == tq && eunit.r == tr
+                            && !constants::is_civilian(eunit.unit_type) {
                             enemy_player = ep;
                             enemy_uid = eu;
-                            found = true;
+                            unit_found = true;
                         }
                         eu += 1;
                     };
                 }
                 ep += 1;
             };
-            assert(found, 'No enemy at target');
-            // Check at war
-            let diplo = self.diplomacy.read((game_id, player, enemy_player));
-            assert(diplo == DIPLO_WAR, 'Not at war');
-            // Check adjacent
-            let dist = hex::hex_distance(attacker.q, attacker.r, tq, tr);
-            assert(dist == 1, 'Not adjacent');
 
-            let mut defender = self.units.read((game_id, enemy_player, enemy_uid));
-            let def_tile = self.tiles.read((game_id, tq, tr));
-            let result = combat::resolve_melee(@attacker, @defender, @def_tile, defender.fortify_turns, false);
-            // Apply damage
-            if result.defender_killed {
-                defender.hp = 0;
+            // Must have either a city or a combat unit to attack
+            assert(city_found || unit_found, 'No enemy target at tile');
+            // Check at war with the target
+            let war_target = if unit_found { enemy_player } else { city_owner };
+            let diplo = self.diplomacy.read((game_id, player, war_target));
+            assert(diplo == DIPLO_WAR, 'Not at war');
+
+            // If there's a combat unit, fight it first (unit has priority as defender)
+            if unit_found {
+                let mut defender = self.units.read((game_id, enemy_player, enemy_uid));
+                let def_tile = self.tiles.read((game_id, tq, tr));
+                let result = combat::resolve_melee(
+                    @attacker, @defender, @def_tile, defender.fortify_turns, false,
+                );
+                // Apply damage to defender
+                if result.defender_killed {
+                    defender.hp = 0;
+                } else {
+                    defender.hp = defender.hp - result.damage_to_defender;
+                }
+                self.units.write((game_id, enemy_player, enemy_uid), defender);
+                // Apply damage to attacker
+                if result.attacker_killed {
+                    attacker.hp = 0;
+                } else {
+                    attacker.hp = attacker.hp - result.damage_to_attacker;
+                    // Attacker survives and defender killed → advance onto tile
+                    if result.defender_killed {
+                        attacker.q = tq;
+                        attacker.r = tr;
+                        // Capture civilians on that tile
+                        Self::try_capture_civilian_at(ref self, game_id, player, tq, tr);
+                    }
+                }
             } else {
-                defender.hp = defender.hp - result.damage_to_defender;
+                // No combat unit — attack the city directly
+                assert(city_found, 'No enemy target at tile');
+                let mut city = self.cities.read((game_id, city_owner, city_id));
+                let has_walls = city::has_building(city.buildings, BUILDING_WALLS);
+                let result = combat::resolve_city_melee(@attacker, @city, has_walls);
+                // Apply damage to city
+                if result.defender_killed {
+                    // City captured by melee — transfer ownership
+                    Self::capture_city(ref self, game_id, player, city_owner, city_id);
+                    // Attacker advances onto the city tile
+                    if !result.attacker_killed {
+                        attacker.hp = attacker.hp - result.damage_to_attacker;
+                        attacker.q = tq;
+                        attacker.r = tr;
+                        // Capture civilians on the tile
+                        Self::try_capture_civilian_at(ref self, game_id, player, tq, tr);
+                    } else {
+                        attacker.hp = 0;
+                    }
+                } else {
+                    city.hp = city.hp - result.damage_to_defender;
+                    self.cities.write((game_id, city_owner, city_id), city);
+                    if result.attacker_killed {
+                        attacker.hp = 0;
+                    } else {
+                        attacker.hp = attacker.hp - result.damage_to_attacker;
+                    }
+                }
             }
-            self.units.write((game_id, enemy_player, enemy_uid), defender);
-            if result.attacker_killed {
-                attacker.hp = 0;
-            } else {
-                attacker.hp = attacker.hp - result.damage_to_attacker;
-            }
+
             attacker.movement_remaining = 0;
             attacker.fortify_turns = 0;
             self.units.write((game_id, player, uid), attacker);
         }
 
         // ---- RangedAttack ----
+        // Ranged attacks can target units or cities. Cities at 0 HP from ranged fire
+        // are NOT captured — they stay at 1 HP minimum (only melee can capture).
         fn act_ranged(ref self: ContractState, game_id: u64, player: u8, uid: u32, tq: u8, tr: u8) {
             let uc = self.player_unit_count.read((game_id, player));
             assert(uid < uc, 'Invalid unit id');
@@ -615,40 +714,82 @@ mod CairoCiv {
             let dist = hex::hex_distance(unit.q, unit.r, tq, tr);
             assert(dist <= range, 'Out of range');
 
-            // Find enemy
             let np = self.game_num_players.read(game_id);
-            let mut found = false;
+
+            // Try to find enemy unit at target
+            let mut unit_found = false;
             let mut ep: u8 = 0;
             let mut euid: u32 = 0;
             let mut eplayer: u8 = 0;
-            while ep < np && !found {
+            while ep < np && !unit_found {
                 if ep != player {
                     let euc = self.player_unit_count.read((game_id, ep));
                     let mut eu: u32 = 0;
-                    while eu < euc && !found {
+                    while eu < euc && !unit_found {
                         let eunit = self.units.read((game_id, ep, eu));
                         if eunit.hp > 0 && eunit.q == tq && eunit.r == tr {
                             eplayer = ep;
                             euid = eu;
-                            found = true;
+                            unit_found = true;
                         }
                         eu += 1;
                     };
                 }
                 ep += 1;
             };
-            assert(found, 'No enemy at target');
-            assert(self.diplomacy.read((game_id, player, eplayer)) == DIPLO_WAR, 'Not at war');
 
-            let mut defender = self.units.read((game_id, eplayer, euid));
-            let def_tile = self.tiles.read((game_id, tq, tr));
-            let result = combat::resolve_ranged(@unit, @defender, @def_tile, defender.fortify_turns);
-            if result.defender_killed {
-                defender.hp = 0;
+            // Try to find enemy city at target
+            let mut city_found = false;
+            let mut city_owner: u8 = 255;
+            let mut city_cid: u32 = 0;
+            let mut cp: u8 = 0;
+            while cp < np && !city_found {
+                if cp != player {
+                    let cc = self.player_city_count.read((game_id, cp));
+                    let mut ci: u32 = 0;
+                    while ci < cc && !city_found {
+                        let c = self.cities.read((game_id, cp, ci));
+                        if c.hp > 0 && c.q == tq && c.r == tr {
+                            city_owner = cp;
+                            city_cid = ci;
+                            city_found = true;
+                        }
+                        ci += 1;
+                    };
+                }
+                cp += 1;
+            };
+
+            assert(unit_found || city_found, 'No enemy target at tile');
+            let war_target = if unit_found { eplayer } else { city_owner };
+            assert(self.diplomacy.read((game_id, player, war_target)) == DIPLO_WAR, 'Not at war');
+
+            if unit_found {
+                // Ranged attack on unit
+                let mut defender = self.units.read((game_id, eplayer, euid));
+                let def_tile = self.tiles.read((game_id, tq, tr));
+                let result = combat::resolve_ranged(
+                    @unit, @defender, @def_tile, defender.fortify_turns,
+                );
+                if result.defender_killed {
+                    defender.hp = 0;
+                } else {
+                    defender.hp = defender.hp - result.damage_to_defender;
+                }
+                self.units.write((game_id, eplayer, euid), defender);
             } else {
-                defender.hp = defender.hp - result.damage_to_defender;
+                // Ranged attack on city — can damage but NEVER capture
+                let mut city = self.cities.read((game_id, city_owner, city_cid));
+                let has_walls = city::has_building(city.buildings, BUILDING_WALLS);
+                let result = combat::resolve_city_ranged(@unit, @city, has_walls);
+                // City HP cannot go below 1 from ranged attacks (only melee can capture)
+                if result.damage_to_defender >= city.hp {
+                    city.hp = 1;
+                } else {
+                    city.hp = city.hp - result.damage_to_defender;
+                }
+                self.cities.write((game_id, city_owner, city_cid), city);
             }
-            self.units.write((game_id, eplayer, euid), defender);
         }
 
         // ---- FoundCity ----
@@ -758,10 +899,21 @@ mod CairoCiv {
             assert(builder.charges > 0, 'No charges');
             assert(builder.movement_remaining > 0, 'No movement');
             assert(builder.q == q && builder.r == r, 'Not on tile');
+            // Tile must be in one of the player's city territories
+            let packed_own = self.tile_ownership.read((game_id, q, r));
+            let owner_city: u32 = (packed_own & 0xFFFFFFFF).try_into().unwrap();
+            let owner_player: u8 = ((packed_own / 0x100000000) & 0xFF).try_into().unwrap();
+            assert(city::is_friendly_territory(player, owner_player, owner_city), 'Not in your territory');
             // Check no existing improvement
             let existing = self.tile_improvement.read((game_id, q, r));
             assert(existing == IMPROVEMENT_NONE, 'Already improved');
-            // Validate improvement for terrain
+            // Check tech requirement for this improvement
+            let req_tech = constants::improvement_required_tech(imp);
+            if req_tech > 0 {
+                let techs = self.player_completed_techs.read((game_id, player));
+                assert(tech::is_researched(req_tech, techs), 'Tech not researched');
+            }
+            // Validate improvement for terrain/feature
             let tile = self.tiles.read((game_id, q, r));
             assert(city::is_valid_improvement_for_tile(imp, tile.terrain, tile.feature), 'Invalid for terrain');
             // Build
@@ -775,13 +927,65 @@ mod CairoCiv {
         fn act_remove_improvement(ref self: ContractState, game_id: u64, player: u8, bid: u32, q: u8, r: u8) {
             let uc = self.player_unit_count.read((game_id, player));
             assert(bid < uc, 'Invalid unit id');
-            let builder = self.units.read((game_id, player, bid));
+            let mut builder = self.units.read((game_id, player, bid));
             assert(builder.hp > 0, 'Unit is dead');
             assert(builder.unit_type == UNIT_BUILDER, 'Not a builder');
             assert(builder.movement_remaining > 0, 'No movement');
+            assert(builder.q == q && builder.r == r, 'Not on tile');
+            // Tile must be in one of the player's city territories
+            let packed_own = self.tile_ownership.read((game_id, q, r));
+            let owner_city: u32 = (packed_own & 0xFFFFFFFF).try_into().unwrap();
+            let owner_player: u8 = ((packed_own / 0x100000000) & 0xFF).try_into().unwrap();
+            assert(city::is_friendly_territory(player, owner_player, owner_city), 'Not in your territory');
             let existing = self.tile_improvement.read((game_id, q, r));
             assert(existing != IMPROVEMENT_NONE, 'No improvement');
             self.tile_improvement.write((game_id, q, r), IMPROVEMENT_NONE);
+            builder.movement_remaining = 0;
+            self.units.write((game_id, player, bid), builder);
+        }
+
+        // ---- RemoveFeature ----
+        // Chop woods, clear rainforest, drain marsh. Costs 1 builder charge.
+        // Grants one-time yield bonus to the owning city.
+        fn act_remove_feature(ref self: ContractState, game_id: u64, player: u8, bid: u32, q: u8, r: u8) {
+            let uc = self.player_unit_count.read((game_id, player));
+            assert(bid < uc, 'Invalid unit id');
+            let mut builder = self.units.read((game_id, player, bid));
+            assert(builder.hp > 0, 'Unit is dead');
+            assert(builder.unit_type == UNIT_BUILDER, 'Not a builder');
+            assert(builder.charges > 0, 'No charges');
+            assert(builder.movement_remaining > 0, 'No movement');
+            assert(builder.q == q && builder.r == r, 'Not on tile');
+            // Tile must be in one of the player's city territories
+            let packed_own = self.tile_ownership.read((game_id, q, r));
+            let owner_city: u32 = (packed_own & 0xFFFFFFFF).try_into().unwrap();
+            let owner_player: u8 = ((packed_own / 0x100000000) & 0xFF).try_into().unwrap();
+            assert(city::is_friendly_territory(player, owner_player, owner_city), 'Not in your territory');
+            // Check tile has a removable feature
+            let mut tile = self.tiles.read((game_id, q, r));
+            let removed_feature = tile.feature;
+            assert(removed_feature != 0, 'No feature to remove');
+            // Check tech requirement for removing this feature
+            let req_tech = constants::feature_remove_tech(removed_feature);
+            assert(req_tech != 255, 'Cannot remove this feature');
+            if req_tech > 0 {
+                let techs = self.player_completed_techs.read((game_id, player));
+                assert(tech::is_researched(req_tech, techs), 'Tech not researched');
+            }
+            // Remove the feature
+            tile.feature = 0;
+            self.tiles.write((game_id, q, r), tile);
+            // Grant chop yields to the owning city (city_id stored as id+1)
+            let city_id: u32 = owner_city - 1;
+            let mut owning_city = self.cities.read((game_id, player, city_id));
+            let (bonus_food, bonus_production) = constants::feature_chop_yields(removed_feature);
+            owning_city.food_stockpile += bonus_food;
+            owning_city.production_stockpile += bonus_production;
+            self.cities.write((game_id, player, city_id), owning_city);
+            // Consume builder charge and movement
+            builder.charges -= 1;
+            builder.movement_remaining = 0;
+            self.units.write((game_id, player, bid), builder);
         }
 
         // ---- FortifyUnit ----
@@ -1097,6 +1301,33 @@ mod CairoCiv {
             let mut total_half_science: u32 = 0;
             let mut military_count: u32 = 0;
 
+            // Count unique luxury resources in all city territories for amenities.
+            // Luxury resources: Silver(8), Silk(9), Dyes(10).
+            // Track with 3 bools (cheap in Cairo — avoids a set data structure).
+            let mut has_silver = false;
+            let mut has_silk = false;
+            let mut has_dyes = false;
+            let mut lci: u32 = 0;
+            while lci < cc {
+                let lc = self.cities.read((game_id, player, lci));
+                let lrad = constants::territory_radius(lc.population);
+                let ltiles = hex::hexes_in_range(lc.q, lc.r, lrad);
+                let ltspan = ltiles.span();
+                let mut lti: u32 = 0;
+                while lti < ltspan.len() {
+                    let (ltq, ltr) = *ltspan.at(lti);
+                    let ltd = self.tiles.read((game_id, ltq, ltr));
+                    if ltd.resource == 8 { has_silver = true; }
+                    else if ltd.resource == 9 { has_silk = true; }
+                    else if ltd.resource == 10 { has_dyes = true; }
+                    lti += 1;
+                };
+                lci += 1;
+            };
+            let unique_luxuries: u8 = if has_silver { 1 } else { 0 }
+                + if has_silk { 1 } else { 0 }
+                + if has_dyes { 1 } else { 0 };
+
             // Process each city
             let mut ci: u32 = 0;
             while ci < cc {
@@ -1131,25 +1362,58 @@ mod CairoCiv {
                     gold += constants::PALACE_GOLD_BONUS;
                     total_half_science += constants::PALACE_HALF_SCIENCE_BONUS.into();
                 }
+                // Per-citizen science
+                total_half_science += (constants::HALF_SCIENCE_PER_CITIZEN * c.population.into()).into();
+                // Building bonuses
+                if city::has_building(c.buildings, 3) {
+                    total_half_science += 2; // Library: +2 half-science
+                }
+                if city::has_building(c.buildings, 4) {
+                    gold += 3; // Market: +3 gold
+                }
+
+                // Amenity modifiers
+                let amenity_surplus = city::compute_amenity_surplus(@c, unique_luxuries);
+                let (food_mod_pct, prod_mod_pct) = constants::amenity_modifiers(amenity_surplus);
+
                 // Food consumption
                 let consumption: u16 = constants::FOOD_PER_CITIZEN * c.population.into();
-                let food_surplus: i16 = if food >= consumption {
+                let raw_food_surplus: i16 = if food >= consumption {
                     (food - consumption).try_into().unwrap()
                 } else {
                     let deficit: u16 = consumption - food;
                     -(deficit.try_into().unwrap())
                 };
+                // Apply amenity modifier to food surplus (growth bonus/penalty)
+                let food_surplus: i16 = if food_mod_pct == 0 || raw_food_surplus <= 0 {
+                    raw_food_surplus // No modifier on deficit or zero modifier
+                } else if food_mod_pct > 0 {
+                    let base: u16 = raw_food_surplus.try_into().unwrap();
+                    let bonus: u16 = (base * food_mod_pct.try_into().unwrap()) / 100;
+                    (base + bonus).try_into().unwrap()
+                } else {
+                    // Negative modifier on positive surplus → reduce growth
+                    let base: u16 = raw_food_surplus.try_into().unwrap();
+                    let abs_mod: u16 = (-food_mod_pct).try_into().unwrap();
+                    let penalty: u16 = (base * abs_mod) / 100;
+                    if penalty >= base { 0 } else { (base - penalty).try_into().unwrap() }
+                };
+
+                // Apply amenity modifier to production
+                prod = city::apply_amenity_modifier(prod, prod_mod_pct);
+
                 // Check for river adjacency (inline)
                 let city_tile = self.tiles.read((game_id, c.q, c.r));
                 let has_river = city_tile.river_edges > 0;
                 let has_coast = false; // simplified
                 let housing = city::compute_housing(@c, has_river, has_coast);
                 // Growth
+                let old_pop = c.population;
                 let (new_pop, new_food) = city::process_growth(c.population, c.food_stockpile, food_surplus, housing);
                 c.population = new_pop;
                 c.food_stockpile = new_food;
                 // Update territory if population changed
-                if new_pop > c.population {
+                if new_pop > old_pop {
                     let new_rad = constants::territory_radius(new_pop);
                     if new_rad > radius {
                         let new_tiles = hex::hexes_in_range(c.q, c.r, new_rad);
@@ -1227,6 +1491,176 @@ mod CairoCiv {
                     self.tech_accumulated_half_science.write((game_id, player, completed_tech), 0);
                     self.emit(TechCompleted { game_id, player_idx: player, tech_id: completed_tech });
                 }
+            }
+        }
+
+        /// Check if there's a friendly combat (non-civilian) unit at (tq, tr),
+        /// excluding a specific unit id.
+        fn has_friendly_combat_at(
+            self: @ContractState, game_id: u64, player: u8, tq: u8, tr: u8, exclude_uid: u32,
+        ) -> bool {
+            let uc = self.player_unit_count.read((game_id, player));
+            let mut i: u32 = 0;
+            let mut found = false;
+            while i < uc && !found {
+                if i != exclude_uid {
+                    let u = self.units.read((game_id, player, i));
+                    if u.hp > 0 && u.q == tq && u.r == tr && !constants::is_civilian(u.unit_type) {
+                        found = true;
+                    }
+                }
+                i += 1;
+            };
+            found
+        }
+
+        /// Check if there's an enemy combat (non-civilian) unit at (tq, tr).
+        fn has_enemy_combat_at(
+            self: @ContractState, game_id: u64, player: u8, tq: u8, tr: u8,
+        ) -> bool {
+            let np = self.game_num_players.read(game_id);
+            let mut ep: u8 = 0;
+            let mut found = false;
+            while ep < np && !found {
+                if ep != player {
+                    let euc = self.player_unit_count.read((game_id, ep));
+                    let mut eu: u32 = 0;
+                    while eu < euc && !found {
+                        let eunit = self.units.read((game_id, ep, eu));
+                        if eunit.hp > 0 && eunit.q == tq && eunit.r == tr
+                            && !constants::is_civilian(eunit.unit_type) {
+                            found = true;
+                        }
+                        eu += 1;
+                    };
+                }
+                ep += 1;
+            };
+            found
+        }
+
+        /// Capture any enemy capturable civilian at (tq, tr). Only captures from
+        /// players at war with the capturing player.
+        fn try_capture_civilian_at(
+            ref self: ContractState, game_id: u64, player: u8, tq: u8, tr: u8,
+        ) {
+            let np = self.game_num_players.read(game_id);
+            let mut ep: u8 = 0;
+            while ep < np {
+                if ep != player {
+                    let diplo = self.diplomacy.read((game_id, player, ep));
+                    if diplo == DIPLO_WAR {
+                        let euc = self.player_unit_count.read((game_id, ep));
+                        let mut eu: u32 = 0;
+                        while eu < euc {
+                            let eunit = self.units.read((game_id, ep, eu));
+                            if eunit.hp > 0 && eunit.q == tq && eunit.r == tr
+                                && constants::is_capturable(eunit.unit_type) {
+                                // Kill the enemy unit
+                                let mut dead = eunit;
+                                dead.hp = 0;
+                                self.units.write((game_id, ep, eu), dead);
+                                // Add captured unit to the capturing player
+                                let new_uid = self.player_unit_count.read((game_id, player));
+                                self.units.write((game_id, player, new_uid), Unit {
+                                    unit_type: eunit.unit_type,
+                                    q: tq, r: tr, hp: 100,
+                                    movement_remaining: 0,
+                                    charges: if eunit.unit_type == UNIT_BUILDER {
+                                        eunit.charges
+                                    } else { 0 },
+                                    fortify_turns: 0,
+                                });
+                                self.player_unit_count.write((game_id, player), new_uid + 1);
+                            }
+                            eu += 1;
+                        };
+                    }
+                }
+                ep += 1;
+            };
+        }
+
+        /// Capture an enemy city: transfer ownership to the capturing player.
+        /// City loses half population (min 1), HP resets to 100, production resets.
+        /// Walls are destroyed. Territory is reassigned.
+        fn capture_city(
+            ref self: ContractState, game_id: u64, capturer: u8, victim: u8, city_id: u32,
+        ) {
+            let mut city = self.cities.read((game_id, victim, city_id));
+            let city_q = city.q;
+            let city_r = city.r;
+
+            // Halve population (min 1)
+            let new_pop: u8 = if city.population > 1 { city.population / 2 } else { 1 };
+            city.population = new_pop;
+            city.hp = 100; // reset HP
+            city.food_stockpile = 0;
+            city.production_stockpile = 0;
+            city.current_production = 0;
+            // Destroy walls on capture
+            let walls_mask = Self::pow2_u32(BUILDING_WALLS.into());
+            city.buildings = city.buildings & (0xFFFFFFFF - walls_mask);
+            // Capital status: captured city is not a capital for the new owner
+            city.is_capital = false;
+
+            // Remove from victim's city list: swap with last, shrink count
+            let victim_cc = self.player_city_count.read((game_id, victim));
+            let last_idx = victim_cc - 1;
+            if city_id != last_idx {
+                // Swap with last city
+                let last_city = self.cities.read((game_id, victim, last_idx));
+                self.cities.write((game_id, victim, city_id), last_city);
+            }
+            // Clear the last slot
+            self.cities.write((game_id, victim, last_idx), City {
+                name: 0, q: 0, r: 0, population: 0, hp: 0,
+                food_stockpile: 0, production_stockpile: 0, current_production: 0,
+                buildings: 0, founded_turn: 0, original_owner: 0, is_capital: false,
+            });
+            self.player_city_count.write((game_id, victim), victim_cc - 1);
+
+            // Add to capturer's city list
+            let capturer_cc = self.player_city_count.read((game_id, capturer));
+            self.cities.write((game_id, capturer, capturer_cc), city);
+            self.player_city_count.write((game_id, capturer), capturer_cc + 1);
+
+            // Reassign territory tiles to new owner
+            let radius = constants::territory_radius(new_pop);
+            let tiles = hex::hexes_in_range(city_q, city_r, radius);
+            let tspan = tiles.span();
+            let mut ti: u32 = 0;
+            while ti < tspan.len() {
+                let (tq, tr) = *tspan.at(ti);
+                let current_owner = self.tile_ownership.read((game_id, tq, tr));
+                // Only reassign tiles that belonged to the victim
+                if current_owner != 0 {
+                    let owner_player: u8 = (current_owner / 0x100000000).try_into().unwrap();
+                    if owner_player == victim.into() {
+                        let packed: u64 = (capturer_cc + 1).into()
+                            | (Into::<u8, u64>::into(capturer) * 0x100000000);
+                        self.tile_ownership.write((game_id, tq, tr), packed);
+                    }
+                }
+                ti += 1;
+            };
+
+            // Kill all victim's units at the city tile (combat units should already
+            // be dead, but clean up any stragglers)
+            let vuc = self.player_unit_count.read((game_id, victim));
+            let mut vu: u32 = 0;
+            while vu < vuc {
+                let mut u = self.units.read((game_id, victim, vu));
+                if u.hp > 0 && u.q == city_q && u.r == city_r {
+                    u.hp = 0;
+                    self.units.write((game_id, victim, vu), u);
+                }
+                vu += 1;
+            };
+
+            // Check domination victory: if victim has 0 cities left, capturer wins
+            if victim_cc - 1 == 0 {
+                Self::end_game(ref self, game_id, capturer, VICTORY_DOMINATION);
             }
         }
 

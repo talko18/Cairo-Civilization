@@ -12,10 +12,10 @@ use cairo_civ::types::{
     RESOURCE_SILVER, RESOURCE_SILK, RESOURCE_DYES,
     IMPROVEMENT_NONE, IMPROVEMENT_FARM, IMPROVEMENT_MINE, IMPROVEMENT_QUARRY,
     IMPROVEMENT_PASTURE, IMPROVEMENT_LUMBER_MILL,
-    TERRAIN_GRASSLAND, TERRAIN_PLAINS,
+    TERRAIN_GRASSLAND, TERRAIN_PLAINS, TERRAIN_DESERT,
     TERRAIN_GRASSLAND_HILLS, TERRAIN_PLAINS_HILLS, TERRAIN_DESERT_HILLS,
     TERRAIN_TUNDRA_HILLS, TERRAIN_SNOW_HILLS,
-    BUILDING_GRANARY,
+    BUILDING_GRANARY, BUILDING_ARENA,
 };
 use cairo_civ::constants;
 use cairo_civ::tech;
@@ -154,6 +154,9 @@ pub fn compute_city_yields(
         total_gold += y.gold.into();
         i += 1;
     };
+
+    // Population science: each citizen produces science
+    total_sci += constants::HALF_SCIENCE_PER_CITIZEN * (*city.population).into();
 
     // Palace bonus (capital)
     if *city.is_capital {
@@ -316,10 +319,11 @@ pub fn max_worked_tiles(population: u8) -> u8 {
 // ---------------------------------------------------------------------------
 
 /// Check if an improvement is valid for the given tile terrain.
-pub fn is_valid_improvement_for_tile(improvement_type: u8, terrain: u8, _feature: u8) -> bool {
+pub fn is_valid_improvement_for_tile(improvement_type: u8, terrain: u8, feature: u8) -> bool {
     if improvement_type == IMPROVEMENT_FARM {
-        // Farm on flat grassland or plains
-        terrain == TERRAIN_GRASSLAND || terrain == TERRAIN_PLAINS
+        // Farm on flat grassland, plains, or desert (no hills, no woods/rainforest)
+        (terrain == TERRAIN_GRASSLAND || terrain == TERRAIN_PLAINS || terrain == TERRAIN_DESERT)
+            && feature != FEATURE_WOODS && feature != FEATURE_RAINFOREST
     } else if improvement_type == IMPROVEMENT_MINE {
         // Mine on hills
         terrain == TERRAIN_GRASSLAND_HILLS
@@ -328,18 +332,67 @@ pub fn is_valid_improvement_for_tile(improvement_type: u8, terrain: u8, _feature
             || terrain == TERRAIN_TUNDRA_HILLS
             || terrain == TERRAIN_SNOW_HILLS
     } else if improvement_type == IMPROVEMENT_QUARRY {
-        // Quarry on hills (same as mine for now)
+        // Quarry on hills with stone/iron resource, or just hills
         terrain == TERRAIN_GRASSLAND_HILLS
             || terrain == TERRAIN_PLAINS_HILLS
             || terrain == TERRAIN_DESERT_HILLS
     } else if improvement_type == IMPROVEMENT_PASTURE {
-        // Pasture on flat grassland or plains
-        terrain == TERRAIN_GRASSLAND || terrain == TERRAIN_PLAINS
+        // Pasture on flat grassland or plains (no forest)
+        (terrain == TERRAIN_GRASSLAND || terrain == TERRAIN_PLAINS)
+            && feature != FEATURE_WOODS && feature != FEATURE_RAINFOREST
     } else if improvement_type == IMPROVEMENT_LUMBER_MILL {
-        // Lumber mill in woods (feature check would be more appropriate)
-        terrain == TERRAIN_GRASSLAND || terrain == TERRAIN_PLAINS
+        // Lumber mill requires woods feature on the tile
+        feature == FEATURE_WOODS
     } else {
         false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Amenities
+// ---------------------------------------------------------------------------
+
+/// Compute amenity surplus for a city.
+/// `unique_luxuries` = number of distinct luxury resource types the player has access to.
+/// Returns the amenity surplus (positive = happy, negative = unhappy) as i8.
+pub fn compute_amenity_surplus(city: @City, unique_luxuries: u8) -> i8 {
+    let needed: u8 = constants::amenities_needed(*city.population);
+    let mut available: u8 = 0;
+
+    // Palace bonus (capital)
+    if *city.is_capital {
+        available += constants::PALACE_AMENITY_BONUS;
+    }
+
+    // Building amenities
+    let buildings = *city.buildings;
+    if has_building(buildings, BUILDING_ARENA) {
+        available += constants::building_amenities(7); // Arena: +1
+    }
+
+    // Luxury resources — each unique type gives +1 amenity to every city
+    available += unique_luxuries;
+
+    // Surplus = available - needed
+    let avail_i: i8 = available.try_into().unwrap();
+    let need_i: i8 = needed.try_into().unwrap();
+    avail_i - need_i
+}
+
+/// Apply amenity modifier percentage to a value.
+/// modifier_pct is e.g. +10 for +10%, -15 for -15%.
+/// Returns the modified value (never below 0).
+pub fn apply_amenity_modifier(base: u16, modifier_pct: i8) -> u16 {
+    if modifier_pct == 0 {
+        return base;
+    }
+    if modifier_pct > 0 {
+        let bonus: u16 = (base * modifier_pct.try_into().unwrap()) / 100;
+        base + bonus
+    } else {
+        let abs_mod: u16 = (-modifier_pct).try_into().unwrap();
+        let penalty: u16 = (base * abs_mod) / 100;
+        if penalty >= base { 0 } else { base - penalty }
     }
 }
 
@@ -369,7 +422,7 @@ pub fn is_friendly_territory(player: u8, tile_owner_player: u8, tile_owner_city_
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-fn has_building(buildings: u32, bit: u8) -> bool {
+pub fn has_building(buildings: u32, bit: u8) -> bool {
     let mask = pow2_u32(bit.into());
     (buildings & mask) != 0
 }

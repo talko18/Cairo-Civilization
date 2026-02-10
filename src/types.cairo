@@ -93,6 +93,7 @@ pub const BUILDING_LIBRARY: u8 = 3;
 pub const BUILDING_MARKET: u8 = 4;
 pub const BUILDING_BARRACKS: u8 = 5;
 pub const BUILDING_WATER_MILL: u8 = 6;
+pub const BUILDING_ARENA: u8 = 7;
 // 7+ reserved for civ-unique buildings (Phase 3) and future expansion
 
 // ---------------------------------------------------------------------------
@@ -122,6 +123,7 @@ pub const PROD_LIBRARY: u8 = 67;
 pub const PROD_MARKET: u8 = 68;
 pub const PROD_BARRACKS: u8 = 69;
 pub const PROD_WATER_MILL: u8 = 70;
+pub const PROD_ARENA: u8 = 71;
 
 // ---------------------------------------------------------------------------
 // Game status
@@ -227,6 +229,7 @@ pub enum Action {
     SetResearch: u8,                      // tech_id
     BuildImprovement: (u32, u8, u8, u8),  // builder_id, q, r, improvement_type
     RemoveImprovement: (u32, u8, u8),     // builder_id, q, r
+    RemoveFeature: (u32, u8, u8),         // builder_id, q, r — chops woods/rainforest, drains marsh
     FortifyUnit: u32,                     // unit_id
     SkipUnit: u32,                        // unit_id
     PurchaseWithGold: (u32, u8),          // city_id, item_id

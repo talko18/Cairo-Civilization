@@ -647,8 +647,74 @@ fn is_far_from_edge(q: u8, r: u8, width: u8, height: u8) -> bool {
         && r >= MIN_EDGE_DIST && r + MIN_EDGE_DIST < height
 }
 
+/// Minimum average yield (food + production + gold) across the 2-ring
+/// for a starting position to be considered balanced.
+const MIN_AVG_YIELD: u32 = 2;
+
+/// Compute total yield (food + production + gold) for a single tile from its TileData.
+/// Does not include improvements (none exist at game start).
+fn tile_total_yield(td: @TileData) -> u8 {
+    use cairo_civ::constants;
+
+    let mut total: u8 = constants::base_terrain_yield_food(*td.terrain)
+        + constants::base_terrain_yield_production(*td.terrain)
+        + constants::base_terrain_yield_gold(*td.terrain);
+
+    // Feature bonus
+    if *td.feature == FEATURE_WOODS {
+        total += 1; // +1 production
+    }
+
+    // Resource bonus
+    let res = *td.resource;
+    if res == RESOURCE_WHEAT || res == RESOURCE_CATTLE {
+        total += 1; // +1 food
+    } else if res == RESOURCE_STONE || res == RESOURCE_IRON || res == RESOURCE_HORSES {
+        total += 1; // +1 production
+    } else if res == RESOURCE_SILVER {
+        total += 3; // +3 gold
+    } else if res == RESOURCE_DYES {
+        total += 2; // +2 gold
+    }
+
+    total
+}
+
+/// Check if a position has good enough yields in its 2-ring neighborhood.
+/// Returns true if the average total yield across all tiles in radius 2 is >= MIN_AVG_YIELD.
+fn has_balanced_yields(q: u8, r: u8, tiles: Span<(u8, u8, TileData)>) -> bool {
+    let ring = hex::hexes_in_range(q, r, 2);
+    let rspan = ring.span();
+    let rlen = rspan.len();
+    let h: u32 = MAP_HEIGHT.into();
+
+    let mut yield_sum: u32 = 0;
+    let mut count: u32 = 0;
+    let mut i: u32 = 0;
+    while i < rlen {
+        let (tq, tr) = *rspan.at(i);
+        let idx: u32 = tq.into() * h + tr.into();
+        if idx < tiles.len() {
+            let (_, _, td) = *tiles.at(idx);
+            yield_sum += tile_total_yield(@td).into();
+            count += 1;
+        }
+        i += 1;
+    };
+
+    if count == 0 {
+        return false;
+    }
+    // Average >= MIN_AVG_YIELD ⟺ yield_sum >= MIN_AVG_YIELD * count
+    yield_sum >= MIN_AVG_YIELD * count
+}
+
 /// Find valid starting positions for 2 players.
-/// Constraints: >= 8 hexes apart, both on walkable land, >= 4 tiles from edge.
+/// Constraints:
+///   - Both on walkable land, >= 4 tiles from edge
+///   - >= 8 hexes apart
+///   - Both have balanced yields: average (food+prod+gold) >= 2 across 2-ring tiles
+/// Falls back to unbalanced positions if no balanced pair is found.
 /// Uses seed-based shuffling so positions vary across games.
 pub fn find_starting_positions(
     tiles: Span<(u8, u8, TileData)>, seed: felt252,
@@ -657,7 +723,7 @@ pub fn find_starting_positions(
     let width = MAP_WIDTH;
     let height = MAP_HEIGHT;
 
-    // 1. Collect all valid candidate tiles (land, far from edge)
+    // 1. Collect all base candidate tiles (land, far from edge)
     let mut candidates: Array<(u8, u8)> = array![];
     let mut i: u32 = 0;
     while i < len {
@@ -673,15 +739,79 @@ pub fn find_starting_positions(
         return Option::None;
     }
 
-    // 2. Pick first player start: use seed to choose a random candidate
+    // 2. Try to find a balanced pair first (both positions have good yields)
+    //    Yield quality is checked lazily — only for the positions we try,
+    //    not for all candidates upfront.
     let cspan = candidates.span();
+    let result = pick_balanced_pair(cspan, tiles, seed);
+
+    match result {
+        Option::Some(_) => result,
+        Option::None => {
+            // Fallback: pick any valid pair ignoring yield quality
+            pick_any_pair(cspan, seed)
+        },
+    }
+}
+
+/// Try to find a pair of starting positions where both have balanced yields.
+/// Tries multiple first-player candidates (up to 5) to maximize chances.
+fn pick_balanced_pair(
+    candidates: Span<(u8, u8)>, tiles: Span<(u8, u8, TileData)>, seed: felt252,
+) -> Option<((u8, u8), (u8, u8))> {
+    let clen = candidates.len();
+    if clen < 2 {
+        return Option::None;
+    }
+
+    // Try up to 20 different first-player picks
+    let max_attempts: u32 = if clen < 20 { clen } else { 20 };
+    let mut attempt: u32 = 0;
+    let mut result: Option<((u8, u8), (u8, u8))> = Option::None;
+
+    while attempt < max_attempts && result.is_none() {
+        let hash1 = PoseidonTrait::new().update(seed).update(101 + attempt.into()).finalize();
+        let h1_u256: u256 = hash1.into();
+        let start1_idx: u32 = (h1_u256 % clen.into()).try_into().unwrap();
+        let (q1, r1) = *candidates.at(start1_idx);
+
+        // Check yield quality for first position
+        if has_balanced_yields(q1, r1, tiles) {
+            // Scan for second position with good yields and >= 8 hexes away
+            let hash2 = PoseidonTrait::new().update(seed).update(201 + attempt.into()).finalize();
+            let h2_u256: u256 = hash2.into();
+            let offset2: u32 = (h2_u256 % clen.into()).try_into().unwrap();
+            let mut k: u32 = 0;
+            while k < clen && result.is_none() {
+                let idx2 = (offset2 + k) % clen;
+                let (q2, r2) = *candidates.at(idx2);
+                let dist = hex::hex_distance(q1, r1, q2, r2);
+                if dist >= 8 && has_balanced_yields(q2, r2, tiles) {
+                    result = Option::Some(((q1, r1), (q2, r2)));
+                }
+                k += 1;
+            };
+        }
+
+        attempt += 1;
+    };
+    result
+}
+
+/// Pick any pair of starting positions that are >= 8 hexes apart (no yield check).
+fn pick_any_pair(
+    candidates: Span<(u8, u8)>, seed: felt252,
+) -> Option<((u8, u8), (u8, u8))> {
+    let clen = candidates.len();
+    if clen < 2 {
+        return Option::None;
+    }
+
     let hash1 = PoseidonTrait::new().update(seed).update(101).finalize();
     let h1_u256: u256 = hash1.into();
     let start1_idx: u32 = (h1_u256 % clen.into()).try_into().unwrap();
-    let (q1, r1) = *cspan.at(start1_idx);
+    let (q1, r1) = *candidates.at(start1_idx);
 
-    // 3. Pick second player start: scan candidates starting from a seed-based offset,
-    //    looking for one >= 8 hexes from first
     let hash2 = PoseidonTrait::new().update(seed).update(102).finalize();
     let h2_u256: u256 = hash2.into();
     let offset2: u32 = (h2_u256 % clen.into()).try_into().unwrap();
@@ -689,7 +819,7 @@ pub fn find_starting_positions(
     let mut result: Option<((u8, u8), (u8, u8))> = Option::None;
     while k < clen && result.is_none() {
         let idx2 = (offset2 + k) % clen;
-        let (q2, r2) = *cspan.at(idx2);
+        let (q2, r2) = *candidates.at(idx2);
         let dist = hex::hex_distance(q1, r1, q2, r2);
         if dist >= 8 {
             result = Option::Some(((q1, r1), (q2, r2)));

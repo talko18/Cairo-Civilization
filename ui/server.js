@@ -62,7 +62,7 @@ let gameId        = null;
 // ---------------------------------------------------------------------------
 const n = v => (typeof v === 'bigint' ? Number(v) : Number(v || 0));
 
-// Action enum variant indices (must match Cairo enum order)
+// Action enum variant indices (must match Cairo enum order in types.cairo)
 const ACTION = {
   MoveUnit:          0,
   AttackUnit:        1,
@@ -72,14 +72,15 @@ const ACTION = {
   SetResearch:       5,
   BuildImprovement:  6,
   RemoveImprovement: 7,
-  FortifyUnit:       8,
-  SkipUnit:          9,
-  PurchaseWithGold: 10,
-  UpgradeUnit:      11,
-  DeclareWar:       12,
-  AssignCitizen:    13,
-  UnassignCitizen:  14,
-  EndTurn:          15,
+  RemoveFeature:     8,
+  FortifyUnit:       9,
+  SkipUnit:         10,
+  PurchaseWithGold: 11,
+  UpgradeUnit:      12,
+  DeclareWar:       13,
+  AssignCitizen:    14,
+  UnassignCitizen:  15,
+  EndTurn:          16,
 };
 
 /** Encode a single UI action object into raw calldata felts. */
@@ -93,6 +94,7 @@ function encodeAction(a) {
     case 'SetResearch':       return [ACTION.SetResearch, a.techId];
     case 'BuildImprovement':  return [ACTION.BuildImprovement, a.builderId, a.q, a.r, a.improvement];
     case 'RemoveImprovement': return [ACTION.RemoveImprovement, a.builderId, a.q, a.r];
+    case 'RemoveFeature':     return [ACTION.RemoveFeature, a.builderId, a.q, a.r];
     case 'FortifyUnit':       return [ACTION.FortifyUnit, a.unitId];
     case 'SkipUnit':          return [ACTION.SkipUnit, a.unitId];
     case 'DeclareWar':        return [ACTION.DeclareWar, a.target];
@@ -429,9 +431,10 @@ app.get('/api/state', async (_req, res) => {
       }
 
       // Compute half-science per turn from city data
-      // Sources: palace bonus (4 half-sci), Library building bit 3 (+2 half-sci)
+      // Sources: population (1 half-sci per citizen), palace (4 half-sci), Library (+2 half-sci)
       let halfSciPerTurn = 0;
       for (const c of cities) {
+        halfSciPerTurn += c.population * 1;    // HALF_SCIENCE_PER_CITIZEN
         if (c.isCapital) halfSciPerTurn += 4;  // PALACE_HALF_SCIENCE_BONUS
         if (c.buildings & (1 << 3)) halfSciPerTurn += 2;  // Library: +2 half-sci
       }

@@ -80,6 +80,12 @@ pub fn is_civilian(unit_type: u8) -> bool {
     unit_type == 0 || unit_type == 1 // Settler, Builder
 }
 
+/// Whether a civilian unit can be captured by an enemy combat unit.
+/// All civilians except traders (when added) are capturable.
+pub fn is_capturable(unit_type: u8) -> bool {
+    is_civilian(unit_type) // Settler, Builder — all current civilians
+}
+
 /// Whether this unit type costs gold maintenance per turn.
 /// Basic units (warrior, scout) are free; advanced military costs 1 gold/turn.
 pub fn costs_maintenance(unit_type: u8) -> bool {
@@ -107,6 +113,43 @@ pub fn is_ranged_unit(unit_type: u8) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Improvement tech requirements
+// ---------------------------------------------------------------------------
+
+/// Tech required to build an improvement. 0 = no tech needed.
+pub fn improvement_required_tech(improvement: u8) -> u8 {
+    match improvement {
+        1 => 0,   // Farm: no tech (available from start)
+        2 => 1,   // Mine: Mining
+        3 => 1,   // Quarry: Mining
+        4 => 3,   // Pasture: Animal Husbandry
+        5 => 1,   // Lumber Mill: Mining
+        _ => 0,
+    }
+}
+
+/// Tech required to remove a feature. 0 = no tech needed. 255 = cannot remove.
+pub fn feature_remove_tech(feature: u8) -> u8 {
+    match feature {
+        1 => 1,     // Woods: Mining
+        2 => 9,     // Rainforest: Bronze Working
+        3 => 6,     // Marsh: Irrigation
+        _ => 255,   // Cannot remove (none, oasis, etc.)
+    }
+}
+
+/// One-time yield bonus for removing (chopping) a feature.
+/// Returns (food_bonus, production_bonus) added to the owning city's stockpile.
+pub fn feature_chop_yields(feature: u8) -> (u16, u16) {
+    match feature {
+        1 => (0, 20),    // Woods → production
+        2 => (10, 10),   // Rainforest → food + production
+        3 => (20, 0),    // Marsh → food
+        _ => (0, 0),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Building stats: (cost, tech_requirement)
 // ---------------------------------------------------------------------------
 
@@ -119,6 +162,7 @@ pub fn building_production_cost(building_bit: u8) -> u16 {
         4 => 100,  // Market
         5 => 90,   // Barracks
         6 => 80,   // Water Mill
+        7 => 150,  // Arena (Entertainment Complex)
         _ => 0,
     }
 }
@@ -133,6 +177,7 @@ pub fn building_required_tech(building_bit: u8) -> u8 {
         4 => 11,  // Market: Currency
         5 => 9,   // Barracks: Bronze Working
         6 => 10,  // Water Mill: The Wheel
+        7 => 12,  // Arena: Construction
         _ => 0,
     }
 }
@@ -225,6 +270,7 @@ pub const HOUSING_GRANARY_BONUS: u8 = 2;
 // ---------------------------------------------------------------------------
 
 pub const FOOD_PER_CITIZEN: u16 = 2;
+pub const HALF_SCIENCE_PER_CITIZEN: u16 = 1; // +0.5 science per population
 
 /// food_for_growth = 15 + 6 * pop
 pub fn food_for_growth(population: u8) -> u16 {
@@ -239,6 +285,62 @@ pub const UNIT_MAINTENANCE_COST: u32 = 1; // per military unit per turn
 pub const PALACE_GOLD_BONUS: u16 = 5;
 pub const PALACE_PRODUCTION_BONUS: u16 = 2;
 pub const PALACE_HALF_SCIENCE_BONUS: u16 = 4; // +2 science = +4 half-science
+
+// ---------------------------------------------------------------------------
+// Amenities (Happiness) — Civ VI style
+// ---------------------------------------------------------------------------
+
+/// Number of amenities a city needs based on population.
+/// Pop 1-2: 0, Pop 3-4: 1, Pop 5-6: 2, etc.
+/// Formula: (population - 1) / 2
+pub fn amenities_needed(population: u8) -> u8 {
+    if population <= 2 {
+        0
+    } else {
+        (population - 1) / 2
+    }
+}
+
+/// Whether a resource is a luxury (provides amenities).
+pub fn is_luxury_resource(resource: u8) -> bool {
+    resource == 8 || resource == 9 || resource == 10 // Silver, Silk, Dyes
+}
+
+/// Amenities provided by a building.
+pub fn building_amenities(building_bit: u8) -> u8 {
+    match building_bit {
+        7 => 1,   // Arena: +1 amenity
+        _ => 0,
+    }
+}
+
+/// Capital palace provides +1 amenity.
+pub const PALACE_AMENITY_BONUS: u8 = 1;
+
+/// Amenity status thresholds and modifiers.
+/// Returns (food_modifier_percent, production_modifier_percent) based on amenity surplus.
+/// surplus = amenities_available - amenities_needed
+///   Ecstatic (>= +3): +10% growth, +10% non-food yields
+///   Happy (+1 to +2): +10% growth
+///   Content (0): no effect
+///   Displeased (-1 to -2): -15% growth, -5% non-food yields
+///   Unhappy (-3 to -4): -30% growth, -10% non-food yields
+///   Unrest (<= -5): -30% growth, -15% non-food yields
+pub fn amenity_modifiers(surplus: i8) -> (i8, i8) {
+    if surplus >= 3 {
+        (10, 10)     // Ecstatic
+    } else if surplus >= 1 {
+        (10, 0)      // Happy
+    } else if surplus == 0 {
+        (0, 0)       // Content
+    } else if surplus >= -2 {
+        (-15, -5)    // Displeased
+    } else if surplus >= -4 {
+        (-30, -10)   // Unhappy
+    } else {
+        (-30, -15)   // Unrest / Revolt
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Score weights

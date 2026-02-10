@@ -1,43 +1,43 @@
 === RELEASE (no "test" or "mock" in path, excluding *interface*) ===
-github.com/AlDanial/cloc v 1.98  T=0.01 s (1143.9 files/s, 344832.5 lines/s)
+github.com/AlDanial/cloc v 1.98  T=0.02 s (750.3 files/s, 291067.5 lines/s)
 -----------------------------------------------------------------------------------
 File                                 blank        comment           code
 -----------------------------------------------------------------------------------
-./src/contract.cairo                    59            104            876
-./src/map_gen.cairo                    100            148            507
-./src/city.cairo                        39             71            278
-./src/constants.cairo                   49             75            258
-./src/types.cairo                       44            103            199
-./src/hex.cairo                         42             73            187
+./src/contract.cairo                   107            219           1443
+./src/map_gen.cairo                    123            175            622
+./src/constants.cairo                   61            107            323
+./src/city.cairo                        47             85            309
+./src/hex.cairo                         45             92            236
+./src/types.cairo                       44            103            204
 ./src/combat.cairo                      35             39            158
 ./src/tech.cairo                         8             12             87
 ./src/victory.cairo                      8             12             75
-./src/turn.cairo                        12             23             68
 ./src/movement.cairo                    13             25             64
+./src/turn.cairo                        11             22             61
 ./src/economy.cairo                      6             15             30
 ./src/lib.cairo                          1              4             12
 -----------------------------------------------------------------------------------
-SUM:                                   416            704           2799
+SUM:                                   509            910           3624
 -----------------------------------------------------------------------------------
 
 === TESTS (path contains "test" or "mock", excluding *interface*) ===
-github.com/AlDanial/cloc v 1.98  T=0.01 s (920.5 files/s, 485875.4 lines/s)
+github.com/AlDanial/cloc v 1.98  T=0.02 s (547.8 files/s, 421027.5 lines/s)
 ------------------------------------------------------------------------------------------
 File                                        blank        comment           code
 ------------------------------------------------------------------------------------------
-./tests/test_contract.cairo                   273            539           1398
-./tests/test_system.cairo                     264            345           1024
-./tests/test_city.cairo                        81            168            346
-./tests/test_combat.cairo                      53            124            205
+./tests/test_system.cairo                     435            583           2225
+./tests/test_contract.cairo                   362            671           2073
+./tests/test_city.cairo                       111            249            528
+./tests/test_map_gen.cairo                     42            127            339
+./tests/test_combat.cairo                      56            131            230
 ./tests/test_movement.cairo                    38             93            205
-./tests/test_hex.cairo                         38            128            168
-./tests/test_map_gen.cairo                     33             99            151
+./tests/test_hex.cairo                         42            146            194
 ./tests/test_constants.cairo                   39             62            127
-./tests/test_turn.cairo                        36             71            122
-./tests/test_tech.cairo                        31             80            106
+./tests/test_tech.cairo                        32             88            117
+./tests/test_turn.cairo                        35             69            116
 ./tests/test_victory.cairo                     26             54             95
-./tests/test_economy.cairo                     25             57             78
+./tests/test_economy.cairo                     26             59             86
 ./tests/test_types.cairo                        8             17             55
 ------------------------------------------------------------------------------------------
-SUM:                                          945           1837           4080
+SUM:                                         1252           2349           6390
 ------------------------------------------------------------------------------------------
