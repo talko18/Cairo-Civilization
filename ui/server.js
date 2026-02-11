@@ -339,116 +339,146 @@ app.post('/api/setup', async (_req, res) => {
   }
 });
 
-// ---- Full game state ----
+// ---- Full game state (FAST — uses batch view functions, ~5 RPC calls total) ----
 app.get('/api/state', async (_req, res) => {
   if (!contract || !gameId) return res.status(400).json({ error: 'Game not set up yet' });
   try {
     const gid = gameId;
-    const readContract = new Contract(sierraAbi, contractAddr, provider);
+    const rc = new Contract(sierraAbi, contractAddr, provider);
+    const t0 = Date.now();
 
-    // Game metadata
-    const [status, turn, currentPlayer] = await Promise.all([
-      readContract.call('get_game_status',   [gid]),
-      readContract.call('get_current_turn',  [gid]),
-      readContract.call('get_current_player',[gid]),
+    // ── 1. Fire ALL batch calls in parallel (5 RPC calls total) ──
+    const [status, turn, currentPlayer, mapBatch, p0summary, p1summary, p0units, p1units, p0cities, p1cities] = await Promise.all([
+      rc.call('get_game_status',   [gid]),
+      rc.call('get_current_turn',  [gid]),
+      rc.call('get_current_player',[gid]),
+      rc.call('get_map_batch',     [gid]),
+      rc.call('get_player_summary',[gid, 0]),
+      rc.call('get_player_summary',[gid, 1]),
+      rc.call('get_all_units',     [gid, 0]),
+      rc.call('get_all_units',     [gid, 1]),
+      rc.call('get_all_cities',    [gid, 0]),
+      rc.call('get_all_cities',    [gid, 1]),
     ]);
 
-    // Fetch map tiles (32x20 = 640) in batches of 64
+    // ── 2. Decode map batch (640 packed felt252 values) ──
+    const mapArr = Array.isArray(mapBatch) ? mapBatch : (mapBatch || []);
     const tiles = [];
-    for (let batch = 0; batch < 10; batch++) {
-      const promises = [];
-      for (let i = 0; i < 64; i++) {
-        const idx = batch * 64 + i;
-        if (idx >= 640) break;
-        const q = idx % 32, r = Math.floor(idx / 32);
-        promises.push(
-          Promise.all([
-            readContract.call('get_tile', [gid, q, r]),
-            readContract.call('get_tile_owner', [gid, q, r]),
-            readContract.call('get_tile_improvement', [gid, q, r]),
-          ]).then(([t, owner, imp]) => ({
-            q, r, terrain: n(t.terrain), feature: n(t.feature), resource: n(t.resource), riverEdges: n(t.river_edges),
-            ownerPlayer: n(owner[0]), ownerCity: n(owner[1]), improvement: n(imp),
-          })).catch(() => ({ q, r, terrain: 0, feature: 0, resource: 0, riverEdges: 0, ownerPlayer: 0, ownerCity: 0, improvement: 0 }))
-        );
+    for (let idx = 0; idx < 640; idx++) {
+      const q = idx % 32, r = Math.floor(idx / 32);
+      const raw = mapArr[idx];
+      if (!raw) {
+        tiles.push({ q, r, terrain: 0, feature: 0, resource: 0, riverEdges: 0, improvement: 0, ownerPlayer: 0, ownerCity: 0 });
+        continue;
       }
-      tiles.push(...(await Promise.all(promises)));
+      const v = BigInt(raw.toString());
+      tiles.push({
+        q, r,
+        terrain:     Number(v & 0xFFn),
+        feature:     Number((v >> 8n)  & 0xFFn),
+        resource:    Number((v >> 16n) & 0xFFn),
+        riverEdges:  Number((v >> 24n) & 0xFFn),
+        improvement: Number((v >> 32n) & 0xFFn),
+        ownerPlayer: Number((v >> 40n) & 0xFFn),
+        ownerCity:   Number((v >> 48n) & 0xFFFFFFFFn),
+      });
     }
 
-    // Fetch player data
+    // ── 3. Decode player data ──
     const players = [];
-    for (let p = 0; p < 2; p++) {
-      const [unitCount, cityCount, treasury, techs, research, diplo] = await Promise.all([
-        readContract.call('get_unit_count',     [gid, p]),
-        readContract.call('get_city_count',     [gid, p]),
-        readContract.call('get_treasury',       [gid, p]),
-        readContract.call('get_completed_techs',[gid, p]),
-        readContract.call('get_current_research',[gid, p]),
-        readContract.call('get_diplomacy_status',[gid, 0, 1]),
-      ]);
-      // Fetch per-tech accumulated science for the current research target
-      const curResearch = n(research);
-      const accSci = curResearch > 0
-        ? await readContract.call('get_accumulated_science', [gid, p, curResearch])
-        : 0;
+    const summaries = [p0summary, p1summary];
+    const unitBatches = [p0units, p1units];
+    const cityBatches = [p0cities, p1cities];
 
-      // Fetch units
-      const uc = n(unitCount);
+    for (let p = 0; p < 2; p++) {
+      // Decode player summary: [uc, cc, treasury, techs, research, accSci, diplo]
+      const sm = Array.isArray(summaries[p]) ? summaries[p] : [];
+      const uc       = n(sm[0]);
+      const cc       = n(sm[1]);
+      const treasury = n(sm[2]);
+      const techs    = sm[3]?.toString() || '0';
+      const curResearch = n(sm[4]);
+      const accSci   = n(sm[5]);
+      const diplo    = n(sm[6]);
+
+      // Decode units
+      const uArr = Array.isArray(unitBatches[p]) ? unitBatches[p] : [];
       const units = [];
-      for (let u = 0; u < uc; u++) {
-        const unit = await readContract.call('get_unit', [gid, p, u]);
+      for (let i = 0; i < uArr.length; i++) {
+        const v = BigInt(uArr[i].toString());
         units.push({
-          id: u, unitType: n(unit.unit_type), q: n(unit.q), r: n(unit.r),
-          hp: n(unit.hp), mp: n(unit.movement_remaining),
-          charges: n(unit.charges), fortify: n(unit.fortify_turns),
+          id: i,
+          unitType: Number(v & 0xFFn),
+          q:        Number((v >> 8n)  & 0xFFn),
+          r:        Number((v >> 16n) & 0xFFn),
+          hp:       Number((v >> 24n) & 0xFFn),
+          mp:       Number((v >> 32n) & 0xFFn),
+          charges:  Number((v >> 40n) & 0xFFn),
+          fortify:  Number((v >> 48n) & 0xFFn),
         });
       }
 
-      // Fetch cities + locked tile assignments
-      const cc = n(cityCount);
+      // Decode cities (3 words per city: name, packed_fields, locked_tiles)
+      const cArr = Array.isArray(cityBatches[p]) ? cityBatches[p] : [];
       const cities = [];
-      for (let c = 0; c < cc; c++) {
-        const [city, lockedCount] = await Promise.all([
-          readContract.call('get_city', [gid, p, c]),
-          readContract.call('get_city_locked_count', [gid, p, c]),
-        ]);
-        const lc = n(lockedCount);
+      for (let ci = 0; ci * 3 + 2 < cArr.length + 1 && ci * 3 < cArr.length; ci++) {
+        const nameRaw = cArr[ci * 3];
+        const fieldsRaw = cArr[ci * 3 + 1];
+        const lockedRaw = cArr[ci * 3 + 2];
+
+        const name = shortString.decodeShortString(nameRaw?.toString() || '0');
+        const f = BigInt((fieldsRaw || 0).toString());
+
+        const population = Number((f >> 16n) & 0xFFn);
+        const buildings = Number((f >> 72n) & 0xFFFFFFFFn);
+        const isCapital = Number((f >> 128n) & 0xFFn) !== 0;
+
+        // Decode locked tiles from packed word
+        const lv = BigInt((lockedRaw || 0).toString());
+        const lockedCount = Number(lv & 0xFFn);
         const lockedTiles = [];
-        for (let s = 0; s < lc; s++) {
-          const lt = await readContract.call('get_city_locked_tile', [gid, p, c, s]);
-          lockedTiles.push({ q: n(lt[0]), r: n(lt[1]) });
+        for (let s = 0; s < lockedCount && s < 6; s++) {
+          const shift = BigInt(8 + s * 16);
+          const lq = Number((lv >> shift) & 0xFFn);
+          const lr = Number((lv >> (shift + 8n)) & 0xFFn);
+          lockedTiles.push({ q: lq, r: lr });
         }
+
         cities.push({
-          id: c, name: shortString.decodeShortString(city.name?.toString() || '0'),
-          q: n(city.q), r: n(city.r), population: n(city.population), hp: n(city.hp),
-          production: n(city.current_production), buildings: n(city.buildings),
-          isCapital: !!city.is_capital,
-          foodStockpile: n(city.food_stockpile),
-          prodStockpile: n(city.production_stockpile),
-          foundedTurn: n(city.founded_turn),
+          id: ci, name,
+          q:          Number(f & 0xFFn),
+          r:          Number((f >> 8n)  & 0xFFn),
+          population,
+          hp:         Number((f >> 24n) & 0xFFn),
+          foodStockpile:  Number((f >> 32n) & 0xFFFFn),
+          prodStockpile:  Number((f >> 48n) & 0xFFFFn),
+          production: Number((f >> 64n) & 0xFFn),
+          buildings,
+          foundedTurn: Number((f >> 104n) & 0xFFFFn),
+          isCapital,
           lockedTiles,
         });
       }
 
-      // Compute half-science per turn from city data
-      // Sources: population (1 half-sci per citizen), palace (4 half-sci), Library (+2 half-sci)
+      // Compute half-science per turn
       let halfSciPerTurn = 0;
       for (const c of cities) {
-        halfSciPerTurn += c.population * 1;    // HALF_SCIENCE_PER_CITIZEN
-        if (c.isCapital) halfSciPerTurn += 4;  // PALACE_HALF_SCIENCE_BONUS
-        if (c.buildings & (1 << 3)) halfSciPerTurn += 2;  // Library: +2 half-sci
+        halfSciPerTurn += c.population * 1;
+        if (c.isCapital) halfSciPerTurn += 4;
+        if (c.buildings & (1 << 3)) halfSciPerTurn += 2;
       }
 
       players.push({
-        units, cities, treasury: n(treasury),
-        completedTechs: techs?.toString() || '0',
+        units, cities, treasury,
+        completedTechs: techs,
         currentResearch: curResearch,
-        accumulatedHalfScience: n(accSci),
+        accumulatedHalfScience: accSci,
         halfSciencePerTurn: halfSciPerTurn,
-        diplomacy: n(diplo),
+        diplomacy: diplo,
       });
     }
 
+    console.log(`State fetched in ${Date.now() - t0}ms (batch mode)`);
     res.json({
       status: n(status), turn: n(turn), currentPlayer: n(currentPlayer),
       tiles, players, gameId: gid,

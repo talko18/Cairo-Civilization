@@ -3241,3 +3241,79 @@ fn test_amenity_ecstatic_bonus() {
     // Verify modifier application: 50 prod → 55
     assert!(city::apply_amenity_modifier(50, prod_mod) == 55);
 }
+
+// S43: Batch view functions return correct data
+#[test]
+fn test_batch_view_functions() {
+    let (d, addr) = deploy();
+    let gid = setup_active_game(d, addr);
+
+    // ── Test get_map_batch: 640 tiles ──
+    let map_data = d.get_map_batch(gid);
+    assert!(map_data.len() == 640, "Map batch should have 640 entries");
+
+    // Tile at (0,0) should match get_tile
+    let tile00 = d.get_tile(gid, 0, 0);
+    let packed00: u128 = (*map_data.at(0)).try_into().unwrap();
+    let terrain: u8 = (packed00 & 0xFF).try_into().unwrap();
+    let feature: u8 = ((packed00 / 0x100) & 0xFF).try_into().unwrap();
+    let resource: u8 = ((packed00 / 0x10000) & 0xFF).try_into().unwrap();
+    assert!(terrain == tile00.terrain, "Terrain mismatch");
+    assert!(feature == tile00.feature, "Feature mismatch");
+    assert!(resource == tile00.resource, "Resource mismatch");
+
+    // ── Test get_all_units for player 0 ──
+    let p0units = d.get_all_units(gid, 0);
+    let p0count = d.get_unit_count(gid, 0);
+    assert!(p0units.len() == p0count, "Unit batch count mismatch");
+
+    // Decode first unit and compare
+    if p0units.len() > 0 {
+        let uv: u128 = (*p0units.at(0)).try_into().unwrap();
+        let u0 = d.get_unit(gid, 0, 0);
+        let ut: u8 = (uv & 0xFF).try_into().unwrap();
+        let uq: u8 = ((uv / 0x100) & 0xFF).try_into().unwrap();
+        let ur: u8 = ((uv / 0x10000) & 0xFF).try_into().unwrap();
+        assert!(ut == u0.unit_type, "Unit type mismatch");
+        assert!(uq == u0.q, "Unit q mismatch");
+        assert!(ur == u0.r, "Unit r mismatch");
+    }
+
+    // ── Test get_player_summary ──
+    let summary = d.get_player_summary(gid, 0);
+    assert!(summary.len() == 7, "Summary should have 7 elements");
+    let uc_felt: u32 = (*summary.at(0)).try_into().unwrap();
+    assert!(uc_felt == p0count, "Summary unit count mismatch");
+
+    // ── Test get_all_cities (initially empty) ──
+    let p0cities = d.get_all_cities(gid, 0);
+    assert!(p0cities.len() == 0, "No cities at start");
+
+    // Found a city, then check batch
+    submit_turn(d, addr, player_a(), gid, array![Action::FoundCity((0, 'TestCity'))]);
+
+    let p0cities2 = d.get_all_cities(gid, 0);
+    assert!(p0cities2.len() == 3, "Should have 3 words for 1 city");
+
+    // Decode city and verify
+    let c0 = d.get_city(gid, 0, 0);
+    let city_name = *p0cities2.at(0);
+    assert!(city_name == c0.name, "City name mismatch");
+
+    // Decode packed fields — bits: q(0-7), r(8-15), pop(16-23), hp(24-31),
+    //   food(32-47), prod_stock(48-63), cur_prod(64-71), bldgs(72-103),
+    //   founded(104-119), owner(120-127), cap(128-135)
+    let cf: u256 = (*p0cities2.at(1)).into();
+    let cq: u8 = (cf & 0xFF).try_into().unwrap();
+    let cr: u8 = ((cf / 0x100) & 0xFF).try_into().unwrap();
+    let cpop: u8 = ((cf / 0x10000) & 0xFF).try_into().unwrap();
+    let chp: u8 = ((cf / 0x1000000) & 0xFF).try_into().unwrap();
+    let cbldg: u32 = ((cf / 0x1000000000000000000) & 0xFFFFFFFF).try_into().unwrap();
+    let is_cap: u8 = ((cf / 0x100000000000000000000000000000000) & 0xFF).try_into().unwrap();
+    assert!(cq == c0.q, "City q mismatch");
+    assert!(cr == c0.r, "City r mismatch");
+    assert!(cpop == c0.population, "City pop mismatch");
+    assert!(chp == c0.hp, "City hp mismatch");
+    assert!(cbldg == c0.buildings, "City buildings mismatch");
+    assert!(is_cap == 1, "City should be capital");
+}

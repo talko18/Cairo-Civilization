@@ -1323,11 +1323,25 @@ function drawMap() {
     }
   }
 
-  // Units
+  // Units — with animation support
+  const now = performance.now();
   for (let p=0;p<2;p++) {
     for (const u of G.players[p].units) {
       if (u.hp<=0) continue;
-      const [cx,cy]=hexCenter(u.q,u.r);
+      let [cx,cy]=hexCenter(u.q,u.r);
+
+      // Check for active slide animation on this unit
+      const slideAnim = activeAnimations.find(a =>
+        a.type === 'unitSlide' && a.player === p && a.unitId === u.id
+      );
+      if (slideAnim) {
+        const t = Math.min(1, (now - slideAnim.startTime) / slideAnim.duration);
+        // Ease-out cubic for smooth deceleration
+        const ease = 1 - Math.pow(1 - t, 3);
+        cx = slideAnim.fromX + (slideAnim.toX - slideAnim.fromX) * ease;
+        cy = slideAnim.fromY + (slideAnim.toY - slideAnim.fromY) * ease;
+      }
+
       let ox=0, oy=0;
       const cityHere = G.players[p].cities.some(c=>c.q===u.q&&c.r===u.r);
       if(cityHere){ox=14;oy=-10;}
@@ -1345,6 +1359,67 @@ function drawMap() {
       }
       ctx2d.font='7px sans-serif'; ctx2d.fillStyle='#ccc';
       ctx2d.fillText((UNIT_NAMES[u.unitType]||'Unit')+(p===1?' (B)':''),cx+ox,cy+oy+20);
+    }
+  }
+
+  // ── Render overlay animations ──
+  for (const anim of activeAnimations) {
+    const t = Math.min(1, (now - anim.startTime) / anim.duration);
+
+    if (anim.type === 'combatFlash') {
+      // Red flash that fades on the target hex
+      const [cx, cy] = hexCenter(anim.q, anim.r);
+      const pts = hexPts(cx, cy, S);
+      const alpha = (1 - t) * 0.5;
+      ctx2d.beginPath(); ctx2d.moveTo(pts[0][0],pts[0][1]);
+      for(let i=1;i<6;i++) ctx2d.lineTo(pts[i][0],pts[i][1]);
+      ctx2d.closePath();
+      ctx2d.fillStyle = `rgba(231,76,60,${alpha})`;
+      ctx2d.fill();
+      // Expanding ring
+      ctx2d.beginPath();
+      ctx2d.arc(cx, cy, S * 0.5 + S * 0.8 * t, 0, Math.PI*2);
+      ctx2d.strokeStyle = `rgba(255,100,80,${(1-t)*0.7})`;
+      ctx2d.lineWidth = 3 * (1 - t);
+      ctx2d.stroke();
+    }
+
+    else if (anim.type === 'floatingText') {
+      // Text that floats upward and fades
+      const alpha = 1 - t;
+      const yOff = -30 * t; // float up 30px
+      ctx2d.save();
+      ctx2d.font = 'bold 14px sans-serif';
+      ctx2d.textAlign = 'center';
+      ctx2d.textBaseline = 'middle';
+      ctx2d.globalAlpha = alpha;
+      // Shadow for readability
+      ctx2d.fillStyle = 'rgba(0,0,0,.7)';
+      ctx2d.fillText(anim.text, anim.x + 1, anim.y + yOff + 1);
+      ctx2d.fillStyle = anim.color || '#fff';
+      ctx2d.fillText(anim.text, anim.x, anim.y + yOff);
+      ctx2d.restore();
+    }
+
+    else if (anim.type === 'cityFound') {
+      // Expanding circle that fades — city appearing
+      const radius = S * 2.5 * t;
+      const alpha = (1 - t) * 0.6;
+      ctx2d.beginPath();
+      ctx2d.arc(anim.x, anim.y, radius, 0, Math.PI*2);
+      const pColor = anim.player === 0 ? '40,116,166' : '192,57,43';
+      ctx2d.fillStyle = `rgba(${pColor},${alpha * 0.3})`;
+      ctx2d.fill();
+      ctx2d.strokeStyle = `rgba(${pColor},${alpha})`;
+      ctx2d.lineWidth = 3 * (1 - t);
+      ctx2d.stroke();
+      // Inner glow
+      if (t < 0.5) {
+        ctx2d.beginPath();
+        ctx2d.arc(anim.x, anim.y, S * 0.8 * (1 + t), 0, Math.PI*2);
+        ctx2d.fillStyle = `rgba(255,213,79,${0.4 * (1 - t*2)})`;
+        ctx2d.fill();
+      }
     }
   }
 
@@ -1542,11 +1617,9 @@ function startRanged(){ actionMode='ranged'; setModeBanner('Click enemy unit for
 // ═══════════════════════════════════════════════════════════════
 // ACTION QUEUE — predicted actions are batched with next unpredicted
 // ═══════════════════════════════════════════════════════════════
-const PREDICTED_ACTIONS = new Set([
-  'SetResearch', 'SetProduction', 'FortifyUnit', 'SkipUnit',
-  'DeclareWar', 'BuildImprovement', 'RemoveImprovement', 'RemoveFeature',
-  'PurchaseWithGold', 'UpgradeUnit', 'AssignCitizen', 'UnassignCitizen'
-]);
+// ═══════════════════════════════════════════════════════════════
+// ACTION QUEUE — ALL actions are queued locally; only EndTurn flushes
+// ═══════════════════════════════════════════════════════════════
 let pendingActions = [];
 
 function updateQueueBadge() {
@@ -1557,29 +1630,180 @@ function updateQueueBadge() {
   lbl.textContent = pendingActions.length + ' queued';
 }
 
-// Queue a predicted action — no transaction sent yet
-function queuePredicted(action) {
+// Queue any action — apply optimistic state + animation, no transaction
+function queueAction(action) {
   pendingActions.push(action);
+  applyOptimistic(action);
   updateQueueBadge();
 }
 
-// Flush queued predicted actions + the triggering unpredicted action
-async function flushWithAction(unpredictedAction) {
-  const batch = [...pendingActions, unpredictedAction];
-  pendingActions = [];
-  updateQueueBadge();
-  const hasEndTurn = batch.some(a => a.type === 'EndTurn');
-  await submitBatch(batch, hasEndTurn);
+// Legacy compat — same as queueAction now
+function queuePredicted(action) { queueAction(action); }
+
+// ═══════════════════════════════════════════════════════════════
+// ANIMATION SYSTEM — smooth visual transitions
+// ═══════════════════════════════════════════════════════════════
+let activeAnimations = [];  // {type, startTime, duration, ...params}
+let animFrameId = null;
+
+function startAnimation(anim) {
+  anim.startTime = performance.now();
+  activeAnimations.push(anim);
+  if (!animFrameId) animFrameId = requestAnimationFrame(animLoop);
 }
 
-// Send a batch to the server
+function animLoop(now) {
+  // Remove completed animations
+  activeAnimations = activeAnimations.filter(a => now - a.startTime < a.duration);
+  drawMap();
+  if (activeAnimations.length > 0) {
+    animFrameId = requestAnimationFrame(animLoop);
+  } else {
+    animFrameId = null;
+  }
+}
+
+// ── Optimistic local state update with animations ──
+function applyOptimistic(action) {
+  if (!G) return;
+  const cp = G.currentPlayer;
+  const p = G.players[cp];
+
+  if (action.type === 'MoveUnit') {
+    const u = p.units.find(x => x.id === action.unitId);
+    if (u) {
+      const fromQ = u.q, fromR = u.r;
+      u.q = action.destQ;
+      u.r = action.destR;
+      if (u.mp > 0) u.mp -= 1;
+      // Start slide animation
+      const [fx, fy] = hexCenter(fromQ, fromR);
+      const [tx, ty] = hexCenter(u.q, u.r);
+      startAnimation({
+        type: 'unitSlide', duration: 250,
+        player: cp, unitId: u.id,
+        fromX: fx, fromY: fy, toX: tx, toY: ty,
+      });
+    }
+  } else if (action.type === 'AttackUnit' || action.type === 'RangedAttack') {
+    const u = p.units.find(x => x.id === action.unitId);
+    if (u && u.mp > 0) u.mp = 0;
+    // Flash animation on target hex
+    startAnimation({
+      type: 'combatFlash', duration: 400,
+      q: action.targetQ, r: action.targetR,
+    });
+    // Floating damage text
+    const [tx, ty] = hexCenter(action.targetQ, action.targetR);
+    startAnimation({
+      type: 'floatingText', duration: 800,
+      text: '\u2694\uFE0F', x: tx, y: ty, color: '#e74c3c',
+    });
+    // Shake the attacker briefly
+    if (action.type === 'AttackUnit' && u) {
+      const [ax, ay] = hexCenter(u.q, u.r);
+      startAnimation({
+        type: 'unitSlide', duration: 150,
+        player: cp, unitId: u.id,
+        fromX: ax + (action.targetQ > u.q ? 8 : -8), fromY: ay,
+        toX: ax, toY: ay,
+      });
+    }
+  } else if (action.type === 'FoundCity') {
+    const u = p.units.find(x => x.id === action.settlerId);
+    if (u) {
+      const sq = u.q, sr = u.r;
+      const [px, py] = hexCenter(sq, sr);
+      u.hp = 0; // settler consumed
+
+      // ── Create optimistic city ──
+      const cid = p.cities.length;
+      const isCapital = cid === 0;
+      const newCity = {
+        id: cid, name: action.name || 'City',
+        q: sq, r: sr, population: 1, hp: 200,
+        foodStockpile: 0, prodStockpile: 0,
+        production: 0, buildings: 0,
+        foundedTurn: G.turn || 1,
+        isCapital, lockedTiles: [],
+      };
+      p.cities.push(newCity);
+
+      // ── Update tile ownership for territory (radius 1 for pop 1) ──
+      const territoryTiles = getTerritoryTiles(newCity);
+      for (const tt of territoryTiles) {
+        const tile = getTile(tt.q, tt.r);
+        if (tile && tile.ownerCity === 0) {
+          tile.ownerPlayer = cp;
+          tile.ownerCity = cid + 1;
+        }
+      }
+
+      // City pop-in animation
+      startAnimation({
+        type: 'cityFound', duration: 600,
+        x: px, y: py, player: cp,
+      });
+      // Floating text
+      startAnimation({
+        type: 'floatingText', duration: 1000,
+        text: '\u{1F3D9}\uFE0F ' + newCity.name,
+        x: px, y: py - 20, color: '#ffd54f',
+      });
+    }
+  } else if (action.type === 'BuildImprovement') {
+    // Sparkle on the tile
+    const [cx, cy] = hexCenter(action.q, action.r);
+    startAnimation({
+      type: 'floatingText', duration: 600,
+      text: '\u{1F528}', x: cx, y: cy, color: '#ff9800',
+    });
+    const u = p.units.find(x => x.id === action.builderId);
+    if (u && u.charges > 0) { u.charges -= 1; u.mp = 0; }
+    // Update tile improvement
+    const tile = getTile(action.q, action.r);
+    if (tile) tile.improvement = action.improvement;
+  } else if (action.type === 'RemoveFeature') {
+    const [cx, cy] = hexCenter(action.q, action.r);
+    startAnimation({
+      type: 'floatingText', duration: 600,
+      text: '\u{1FA93}', x: cx, y: cy, color: '#8d6e63',
+    });
+    const u = p.units.find(x => x.id === action.builderId);
+    if (u && u.charges > 0) { u.charges -= 1; u.mp = 0; }
+    // Remove feature from tile
+    const tile = getTile(action.q, action.r);
+    if (tile) tile.feature = 0;
+  } else if (action.type === 'RemoveImprovement') {
+    const u = p.units.find(x => x.id === action.builderId);
+    if (u && u.charges > 0) { u.charges -= 1; u.mp = 0; }
+    const tile = getTile(action.q, action.r);
+    if (tile) tile.improvement = 0;
+  } else if (action.type === 'SetProduction') {
+    const c = p.cities.find(x => x.id === action.cityId);
+    if (c) { c.production = action.itemId; c.prodStockpile = 0; }
+  } else if (action.type === 'SetResearch') {
+    p.currentResearch = action.techId;
+    p.accumulatedHalfScience = 0;
+  } else if (action.type === 'FortifyUnit') {
+    const u = p.units.find(x => x.id === action.unitId);
+    if (u) { u.fortify = (u.fortify || 0) + 1; u.mp = 0; }
+  } else if (action.type === 'SkipUnit') {
+    const u = p.units.find(x => x.id === action.unitId);
+    if (u) u.mp = 0;
+  }
+
+  // Redraw immediately with new state
+  updateActionBar(); renderSidebar(); drawMap();
+}
+
+// Send all queued actions to the server (only on EndTurn)
 async function submitBatch(actions, isEndTurn) {
   if(loading) return;
   loading=true;
   document.getElementById('end-btn').disabled=true;
+
   try {
-    // Use /api/turn for EndTurn (triggers end-of-turn processing),
-    // /api/actions for mid-turn batches
     const endpoint = isEndTurn ? '/api/turn' : '/api/actions';
     const res = await fetch(endpoint, {
       method:'POST',
@@ -1590,14 +1814,18 @@ async function submitBatch(actions, isEndTurn) {
     if(!res.ok) {
       const summary = batchSummary(actions);
       showToast('error', 'Transaction failed', `<b>Reason:</b> ${data.error}<br><b>Actions:</b> ${summary}`, 10000);
+      // Revert optimistic state — re-fetch real state
+      await refreshState();
       loading=false; document.getElementById('end-btn').disabled=false; return;
     }
+    // Confirm with real server state
     selected=null; actionMode=null; setModeBanner(null);
     await refreshState();
     if (isEndTurn) centerCamera();
   } catch(e) {
     const summary = batchSummary(actions);
     showToast('error', 'Network error', `<b>Details:</b> ${e.message}<br><b>Actions:</b> ${summary}`, 10000);
+    await refreshState(); // revert on error
   }
   loading=false;
   document.getElementById('end-btn').disabled=false;
@@ -1621,33 +1849,83 @@ function declareWar() {
   queuePredicted({type:'DeclareWar', target});
 }
 
-// --- Unpredicted actions (flush queue + send transaction) ---
+// --- All actions are now queued locally with optimistic updates ---
 
-async function doAction(action) {
+function doAction(action) {
   actionMode=null; setModeBanner(null);
-  await flushWithAction(action);
+  queueAction(action);
+  // After move, keep unit selected so player can continue commanding
+  if (action.type === 'MoveUnit') {
+    const cp = G.currentPlayer;
+    const u = G.players[cp].units.find(x => x.id === action.unitId);
+    if (u && u.hp > 0 && u.mp > 0) {
+      selected = { type: 'unit', player: cp, id: u.id, q: u.q, r: u.r,
+                   unitType: u.unitType, mp: u.mp, hp: u.hp, charges: u.charges };
+      actionMode = 'move'; setModeBanner('Click destination to move (or press Esc)');
+    } else {
+      selected = null;
+    }
+  }
 }
 
-async function foundCity() {
+function foundCity() {
   if(!selected||selected.unitType!==0) return;
+  const cp = G.currentPlayer;
+  const settlerQ = selected.q, settlerR = selected.r;
   const name = prompt('City name:', 'City');
   if(!name) return;
-  await flushWithAction({type:'FoundCity', settlerId:selected.id, name});
+  queueAction({type:'FoundCity', settlerId:selected.id, name});
+  // Auto-select the new city and open production panel
+  const newCity = G.players[cp].cities.find(c => c.q === settlerQ && c.r === settlerR);
+  if (newCity) {
+    selected = { type: 'city', player: cp, id: newCity.id, q: newCity.q, r: newCity.r };
+    actionMode = null; setModeBanner(null);
+    // Small delay so the animation plays, then open production
+    setTimeout(() => openPanel('prod'), 400);
+  } else {
+    selected = null; actionMode = null; setModeBanner(null);
+  }
 }
 
 async function endTurn() {
-  await flushWithAction({type:'EndTurn'});
+  if (!G) return;
+  const cp = G.currentPlayer;
+  const p = G.players[cp];
+
+  // Client-side validation: all cities must have production
+  const noProd = p.cities.filter(c => c.production === 0);
+  if (noProd.length > 0) {
+    showToast('error', 'Cannot end turn', `<b>${noProd[0].name}</b> has no production set. Click the city and press <b>P</b> to set production.`, 5000);
+    // Auto-select the first city without production
+    const c = noProd[0];
+    selected = { type: 'city', player: cp, id: c.id, q: c.q, r: c.r };
+    renderSidebar(); updateActionBar(); drawMap();
+    openPanel('prod');
+    return;
+  }
+  // Client-side validation: research must be set if cities exist
+  if (p.cities.length > 0 && !p.currentResearch) {
+    showToast('error', 'Cannot end turn', 'You must set a research target. Press <b>T</b> to open the tech tree.', 5000);
+    openPanel('tech');
+    return;
+  }
+
+  // Flush all queued actions + EndTurn in one batch
+  const batch = [...pendingActions, {type:'EndTurn'}];
+  pendingActions = [];
+  updateQueueBadge();
+  await submitBatch(batch, true);
 }
 
 // --- Builder actions ---
-async function buildImprovement(builderId, q, r, impType) {
-  await doAction({type:'BuildImprovement', builderId, q, r, improvement: impType});
+function buildImprovement(builderId, q, r, impType) {
+  doAction({type:'BuildImprovement', builderId, q, r, improvement: impType});
 }
-async function removeFeature(builderId, q, r) {
-  await doAction({type:'RemoveFeature', builderId, q, r});
+function removeFeature(builderId, q, r) {
+  doAction({type:'RemoveFeature', builderId, q, r});
 }
-async function removeImprovement(builderId, q, r) {
-  await doAction({type:'RemoveImprovement', builderId, q, r});
+function removeImprovement(builderId, q, r) {
+  doAction({type:'RemoveImprovement', builderId, q, r});
 }
 
 // Legacy alias — kept for backward compatibility

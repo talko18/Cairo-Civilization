@@ -35,6 +35,15 @@ pub trait ICairoCiv<TContractState> {
     fn get_diplomacy_status(self: @TContractState, game_id: u64, p1: u8, p2: u8) -> u8;
     fn get_city_locked_count(self: @TContractState, game_id: u64, player_idx: u8, city_id: u32) -> u8;
     fn get_city_locked_tile(self: @TContractState, game_id: u64, player_idx: u8, city_id: u32, slot: u8) -> (u8, u8);
+    // ---- Batch view functions (performance) ----
+    /// Returns all 640 tiles packed: each tile = (terrain, feature, resource, river_edges, improvement, owner_player, owner_city_u32) packed into one felt252.
+    fn get_map_batch(self: @TContractState, game_id: u64) -> Array<felt252>;
+    /// Returns all units for a player, packed: each unit = one felt252.
+    fn get_all_units(self: @TContractState, game_id: u64, player_idx: u8) -> Array<felt252>;
+    /// Returns all cities for a player as serialized data.
+    fn get_all_cities(self: @TContractState, game_id: u64, player_idx: u8) -> Array<felt252>;
+    /// Returns player-level scalar data in one call: (unit_count, city_count, treasury, completed_techs, current_research, acc_science_for_current_research, diplomacy_vs_other)
+    fn get_player_summary(self: @TContractState, game_id: u64, player_idx: u8) -> Array<felt252>;
 }
 
 // Events
@@ -282,6 +291,153 @@ mod CairoCiv {
         fn get_city_locked_tile(self: @ContractState, game_id: u64, player_idx: u8, city_id: u32, slot: u8) -> (u8, u8) {
             let packed = self.city_locked_tile.read((game_id, player_idx, city_id, slot));
             ((packed & 0xFF).try_into().unwrap(), ((packed / 0x100) & 0xFF).try_into().unwrap())
+        }
+
+        // ---- Batch view functions ----
+
+        /// Pack all 640 tiles into an array. Each tile → one felt252:
+        ///   bits 0-7: terrain, 8-15: feature, 16-23: resource, 24-31: river_edges,
+        ///   32-39: improvement, 40-47: owner_player, 48-79: owner_city (u32)
+        /// Tiles in row-major order: index = r * 32 + q
+        fn get_map_batch(self: @ContractState, game_id: u64) -> Array<felt252> {
+            let mut result: Array<felt252> = array![];
+            let mut r: u8 = 0;
+            while r < 20 {
+                let mut q: u8 = 0;
+                while q < 32 {
+                    let td = self.tiles.read((game_id, q, r));
+                    let imp: u8 = self.tile_improvement.read((game_id, q, r));
+                    let packed_own: u64 = self.tile_ownership.read((game_id, q, r));
+                    let owner_city: u32 = (packed_own & 0xFFFFFFFF).try_into().unwrap();
+                    let owner_player: u8 = ((packed_own / 0x100000000) & 0xFF).try_into().unwrap();
+
+                    let val: u128 = td.terrain.into()
+                        + td.feature.into() * 0x100
+                        + td.resource.into() * 0x10000
+                        + td.river_edges.into() * 0x1000000
+                        + imp.into() * 0x100000000
+                        + Into::<u8, u128>::into(owner_player) * 0x10000000000
+                        + Into::<u32, u128>::into(owner_city) * 0x1000000000000;
+                    result.append(val.into());
+                    q += 1;
+                };
+                r += 1;
+            };
+            result
+        }
+
+        /// Pack all units for a player. Each unit → one felt252:
+        ///   bits 0-7: unit_type, 8-15: q, 16-23: r, 24-31: hp,
+        ///   32-39: movement_remaining, 40-47: charges, 48-55: fortify_turns
+        fn get_all_units(self: @ContractState, game_id: u64, player_idx: u8) -> Array<felt252> {
+            let mut result: Array<felt252> = array![];
+            let uc = self.player_unit_count.read((game_id, player_idx));
+            let mut i: u32 = 0;
+            while i < uc {
+                let u = self.units.read((game_id, player_idx, i));
+                let val: u128 = u.unit_type.into()
+                    + u.q.into() * 0x100
+                    + u.r.into() * 0x10000
+                    + u.hp.into() * 0x1000000
+                    + u.movement_remaining.into() * 0x100000000
+                    + u.charges.into() * 0x10000000000
+                    + u.fortify_turns.into() * 0x1000000000000;
+                result.append(val.into());
+                i += 1;
+            };
+            result
+        }
+
+        /// Pack all cities for a player. Each city → 2 felt252 values.
+        /// Word 0: name (felt252)
+        /// Word 1: packed numeric fields:
+        ///   bits 0-7: q, 8-15: r, 16-23: population, 24-31: hp,
+        ///   32-47: food_stockpile (u16), 48-63: production_stockpile (u16),
+        ///   64-71: current_production, 72-103: buildings (u32),
+        ///   104-119: founded_turn (u16), 120-127: original_owner,
+        ///   128: is_capital, then locked count + locked tiles packed
+        /// For simplicity, we output 3 words per city:
+        ///   [0] = name, [1] = packed_fields, [2] = packed_locked_tiles
+        fn get_all_cities(self: @ContractState, game_id: u64, player_idx: u8) -> Array<felt252> {
+            let mut result: Array<felt252> = array![];
+            let cc = self.player_city_count.read((game_id, player_idx));
+            let mut i: u32 = 0;
+            while i < cc {
+                let c = self.cities.read((game_id, player_idx, i));
+                // Word 0: name
+                result.append(c.name);
+
+                // Word 1: packed numeric fields (fits in u256 → split into felt252)
+                let is_cap: u8 = if c.is_capital { 1 } else { 0 };
+                // Tight packing: q(8) r(8) pop(8) hp(8) food(16) prod_stock(16) cur_prod(8) bldgs(32) founded(16) owner(8) cap(8)
+                // Total: 136 bits
+                let val: u256 = c.q.into()                                                           // bits 0-7
+                    + Into::<u8, u256>::into(c.r) * 0x100                                            // bits 8-15
+                    + Into::<u8, u256>::into(c.population) * 0x10000                                 // bits 16-23
+                    + Into::<u8, u256>::into(c.hp) * 0x1000000                                       // bits 24-31
+                    + Into::<u16, u256>::into(c.food_stockpile) * 0x100000000                        // bits 32-47
+                    + Into::<u16, u256>::into(c.production_stockpile) * 0x1000000000000               // bits 48-63
+                    + Into::<u8, u256>::into(c.current_production) * 0x10000000000000000              // bits 64-71
+                    + Into::<u32, u256>::into(c.buildings) * 0x1000000000000000000                    // bits 72-103
+                    + Into::<u16, u256>::into(c.founded_turn) * 0x100000000000000000000000000         // bits 104-119
+                    + Into::<u8, u256>::into(c.original_owner) * 0x1000000000000000000000000000000    // bits 120-127
+                    + Into::<u8, u256>::into(is_cap) * 0x100000000000000000000000000000000;           // bits 128-135
+                // val fits in ~145 bits, safe as felt252
+                let val_felt: felt252 = val.try_into().unwrap();
+                result.append(val_felt);
+
+                // Word 2: locked tiles — byte 0 = count, then pairs of (q, r)
+                // Up to 6 locked tiles fit in ~104 bits (8 + 6*16)
+                let lc = self.city_locked_count.read((game_id, player_idx, i));
+                let mut locked_packed: u128 = lc.into();
+                let mut s: u8 = 0;
+                while s < lc && s < 6 {
+                    let lt = self.city_locked_tile.read((game_id, player_idx, i, s));
+                    let lq: u8 = (lt & 0xFF).try_into().unwrap();
+                    let lr: u8 = ((lt / 0x100) & 0xFF).try_into().unwrap();
+                    // Each slot occupies 16 bits starting at bit 8 + s*16
+                    let base_shift: u32 = 8 + s.into() * 16;
+                    let tile_val: u128 = lq.into() + Into::<u8, u128>::into(lr) * 0x100;
+                    // Manual shift since Cairo has no << for u128
+                    let shifted: u128 = if base_shift == 8 { tile_val * 0x100 }
+                        else if base_shift == 24 { tile_val * 0x1000000 }
+                        else if base_shift == 40 { tile_val * 0x10000000000 }
+                        else if base_shift == 56 { tile_val * 0x100000000000000 }
+                        else if base_shift == 72 { tile_val * 0x1000000000000000000 }
+                        else { tile_val * 0x10000000000000000000000 }; // base_shift == 88
+                    locked_packed += shifted;
+                    s += 1;
+                };
+                result.append(locked_packed.into());
+
+                i += 1;
+            };
+            result
+        }
+
+        /// Player summary in one call. Returns 7 felt252 values:
+        /// [0]=unit_count, [1]=city_count, [2]=treasury, [3]=completed_techs,
+        /// [4]=current_research, [5]=accumulated_science_for_current, [6]=diplomacy
+        fn get_player_summary(self: @ContractState, game_id: u64, player_idx: u8) -> Array<felt252> {
+            let uc: u32 = self.player_unit_count.read((game_id, player_idx));
+            let cc: u32 = self.player_city_count.read((game_id, player_idx));
+            let treasury: u32 = self.player_treasury.read((game_id, player_idx));
+            let techs: u64 = self.player_completed_techs.read((game_id, player_idx));
+            let research: u8 = self.player_current_research.read((game_id, player_idx));
+            let acc_sci: u32 = if research > 0 {
+                self.tech_accumulated_half_science.read((game_id, player_idx, research))
+            } else { 0 };
+            let other: u8 = if player_idx == 0 { 1 } else { 0 };
+            let diplo: u8 = self.diplomacy.read((game_id, player_idx, other));
+            let mut result: Array<felt252> = array![];
+            result.append(uc.into());
+            result.append(cc.into());
+            result.append(treasury.into());
+            result.append(techs.into());
+            result.append(research.into());
+            result.append(acc_sci.into());
+            result.append(diplo.into());
+            result
         }
     }
 
