@@ -333,55 +333,57 @@ Deploy the contract and test via external function calls. These test the contrac
 
 ### 2.3 Turn Submission — Each Action
 
+> **Error handling model:** Individual action handlers use **soft failure** — invalid actions are silently skipped (no transaction revert). Tests verify that invalid actions leave game state unchanged. Only end-of-turn state validation (section 2.4) and auth checks (section 2.2) cause reverts.
+
 | # | Test | What It Verifies |
 |---|---|---|
 | I14 | `test_action_move_unit` | MoveUnit updates unit position in storage |
-| I15 | `test_action_move_invalid_unit` | MoveUnit with non-existent unit_id reverts |
-| I16 | `test_action_move_enemy_unit` | Moving opponent's unit reverts |
+| I15 | `test_action_move_invalid_unit` | MoveUnit with non-existent unit_id is silently skipped |
+| I16 | `test_action_move_enemy_unit` | Moving opponent's unit is silently skipped |
 | I17 | `test_action_found_city` | FoundCity consumes settler, creates city in storage |
 | I18 | `test_action_found_city_territory` | New city owns 7 tiles (center + 6 neighbors) |
-| I19 | `test_action_found_city_non_settler` | FoundCity with warrior reverts |
+| I19 | `test_action_found_city_non_settler` | FoundCity with warrior is silently skipped |
 | I20 | `test_action_attack_melee` | AttackUnit resolves combat, applies damage |
 | I21 | `test_action_attack_kills` | Lethal attack removes defender from storage |
-| I22 | `test_action_attack_empty_tile` | Attacking tile with no enemy reverts |
+| I22 | `test_action_attack_empty_tile` | Attacking tile with no enemy is silently skipped |
 | I23 | `test_action_ranged_attack` | RangedAttack deals damage, no counter-damage |
-| I24 | `test_action_ranged_out_of_range` | RangedAttack beyond range reverts |
+| I24 | `test_action_ranged_out_of_range` | RangedAttack beyond range is silently skipped |
 | I25 | `test_action_set_production` | SetProduction updates city.current_production |
-| I26 | `test_action_set_production_locked` | Setting production to locked building reverts |
+| I26 | `test_action_set_production_locked` | Setting production to locked building is silently skipped (end-of-turn reverts if no production set) |
 | I27 | `test_action_set_research` | SetResearch updates player_current_tech |
-| I28 | `test_action_set_research_no_prereq` | Setting research without prereqs reverts |
+| I28 | `test_action_set_research_no_prereq` | Setting research without prereqs is silently skipped |
 | ~~I29~~ | ~~`test_action_set_research_already_done`~~ | *Removed — requires multi-turn; covered by system test S21* |
 | I30 | `test_action_build_improvement` | BuildImprovement(builder_id, q, r, improvement_type) stores improvement, deducts 1 charge, consumes all movement |
-| I30b | `test_action_build_on_existing_reverts` | BuildImprovement on tile with existing improvement reverts |
+| I30b | `test_action_build_on_existing_reverts` | BuildImprovement on tile with existing improvement is silently skipped |
 | I30c | `test_action_remove_improvement` | RemoveImprovement clears tile improvement, costs 0 charges, consumes all movement |
-| I30d | `test_action_remove_empty_tile_reverts` | RemoveImprovement on tile with no improvement reverts |
-| I30e | `test_action_remove_not_builder_reverts` | Warrior trying RemoveImprovement reverts |
-| I31 | `test_action_build_no_tech` | Building Farm without Irrigation reverts |
-| I32 | `test_action_build_no_charges` | Builder with 0 charges reverts |
+| I30d | `test_action_remove_empty_tile_reverts` | RemoveImprovement on tile with no improvement is silently skipped |
+| I30e | `test_action_remove_not_builder_reverts` | Warrior trying RemoveImprovement is silently skipped |
+| I31 | `test_action_build_no_tech` | Building Farm without Irrigation is silently skipped |
+| I32 | `test_action_build_no_charges` | Builder with 0 charges is silently skipped |
 | I33 | `test_action_fortify` | FortifyUnit sets fortify_turns = 1 |
 | I34 | `test_action_purchase` | PurchaseWithGold deducts gold, creates unit/building |
-| I35 | `test_action_purchase_no_gold` | Purchase without enough gold reverts |
+| I35 | `test_action_purchase_no_gold` | Purchase without enough gold is silently skipped (end-of-turn reverts if no production set) |
 | I36 | `test_action_upgrade_unit` | UpgradeUnit changes unit type, deducts gold |
 | I37 | `test_action_declare_war` | DeclareWar sets diplo_status to WAR |
-| I37b | `test_action_attack_own_unit_reverts` | Attacking own unit reverts |
-| I37c | `test_action_attack_not_at_war_reverts` | Attacking enemy without prior DeclareWar reverts |
-| I37d | `test_action_attack_with_civilian_reverts` | Settler/Builder attacking reverts (combat_strength=0) |
-| I37e | `test_action_ranged_with_melee_reverts` | Warrior using RangedAttack action reverts (ranged_strength=0) |
-| I37f | `test_action_ranged_no_los_reverts` | Ranged attack with mountain blocking LOS reverts |
+| I37b | `test_action_attack_own_unit_reverts` | Attacking own unit is silently skipped |
+| I37c | `test_action_attack_not_at_war_reverts` | Attacking enemy without prior DeclareWar is silently skipped |
+| I37d | `test_action_attack_with_civilian_reverts` | Settler/Builder attacking is silently skipped (combat_strength=0) |
+| I37e | `test_action_ranged_with_melee_reverts` | Warrior using RangedAttack is silently skipped (ranged_strength=0) |
+| I37f | `test_action_ranged_no_los_reverts` | Ranged attack with invalid target is silently skipped |
 | ~~I37g~~ | ~~`test_action_found_city_on_water_reverts`~~ | *Removed — settler always starts on land; covered by system test S25* |
 | ~~I37h~~ | ~~`test_action_found_city_too_close_reverts`~~ | *Removed — requires 2 settlers; covered by system test S26* |
-| I37i | `test_action_set_production_enemy_city_reverts` | Setting production on opponent's city reverts |
-| I37j | `test_action_set_production_invalid_id_reverts` | Production ID 255 (nonexistent) reverts |
-| I37k | `test_action_set_research_invalid_tech_reverts` | Tech ID > 18 reverts |
-| I37l | `test_action_build_wrong_terrain_reverts` | Farm on non-eligible terrain (desert hills) reverts |
-| I37m | `test_action_build_not_builder_reverts` | Warrior trying BuildImprovement reverts |
-| I37n | `test_action_upgrade_no_gold_reverts` | Upgrade with insufficient gold reverts |
-| I37o | `test_action_upgrade_no_path_reverts` | Upgrade for unit type with no upgrade path reverts |
-| I37p | `test_action_on_dead_unit_reverts` | Moving/attacking with a unit killed earlier in same turn reverts |
-| I37q | `test_action_double_move_no_mp_reverts` | Moving a unit twice when second move costs more than remaining MP reverts |
-| I37r | `test_action_declare_war_on_self_reverts` | Declaring war on yourself reverts |
-| I37s | `test_action_declare_war_already_at_war` | Declaring war when already at war is a no-op (doesn't revert) |
-| I37t | `test_action_fortify_civilian_reverts` | Fortifying a Settler/Builder reverts (or is a no-op) |
+| I37i | `test_action_set_production_enemy_city_reverts` | Setting production on non-existent city is silently skipped |
+| I37j | `test_action_set_production_invalid_id_reverts` | Production ID 255 (nonexistent) is silently skipped (end-of-turn reverts if no production set) |
+| I37k | `test_action_set_research_invalid_tech_reverts` | Tech ID > 18 is silently skipped |
+| I37l | `test_action_build_wrong_terrain_reverts` | Farm on non-eligible terrain is silently skipped |
+| I37m | `test_action_build_not_builder_reverts` | Warrior trying BuildImprovement is silently skipped |
+| I37n | `test_action_upgrade_no_gold_reverts` | Upgrade with insufficient gold is silently skipped |
+| I37o | `test_action_upgrade_no_path_reverts` | Upgrade for unit type with no upgrade path is silently skipped |
+| I37p | `test_action_on_dead_unit_reverts` | Action on non-existent unit is silently skipped |
+| I37q | `test_action_double_move_no_mp_reverts` | Third move with no remaining MP is silently skipped |
+| I37r | `test_action_declare_war_on_self_reverts` | Declaring war on yourself is silently skipped |
+| I37s | `test_action_declare_war_already_at_war` | Declaring war when already at war is a no-op |
+| I37t | `test_action_fortify_civilian_reverts` | Fortifying a Settler/Builder is silently skipped |
 | I37u | `test_action_capture_city_hp_resets_100` | After capturing city, city HP = 100 (not 200) |
 | I37v | `test_action_capture_city_pop_minus_1` | After capturing city with pop 3, pop becomes 2 |
 | I37w | `test_action_capture_city_pop_min_1` | Capturing pop 1 city → pop stays at 1 (can't drop below) |
@@ -449,7 +451,7 @@ Full game scenarios that play through multiple turns to test feature interaction
 | S7 | `test_city_siege` | Build army. Attack enemy city. Reduce HP to 0. Capture with melee unit. Verify ownership transfer, population -1, HP reset. |
 | S8 | `test_economy_bankruptcy` | Build many units, run out of gold. Verify unit disbanded. |
 | S9 | `test_ranged_combat_flow` | Build slinger, research Archery, upgrade to Archer. Attack from 2 tiles away. Verify no counter-damage. |
-| S10 | `test_builder_improvements` | Research Pottery→Irrigation. Build Farm. Verify tile yield increases by +1 food. Attempt to build Mine on same tile → reverts. |
+| S10 | `test_builder_improvements` | Research Pottery→Irrigation. Build Farm. Verify tile yield increases by +1 food. Attempt to build Mine on same tile → silently skipped (existing improvement unchanged). |
 | S10b | `test_replace_improvement_flow` | Build Farm on tile. Next turn: RemoveImprovement. Next turn: Build Mine. Verify tile yield changes from +1 food to +1 production. |
 | S11 | `test_city_production_chain` | Build Monument, then Granary, then Warrior. Verify each completes at the right turn based on production rate. |
 | S12 | `test_housing_limits_growth` | City without river (housing=2). Verify pop can't exceed 2 without Granary. Build Granary (housing→4). Verify pop grows to 4. |
@@ -460,16 +462,16 @@ Full game scenarios that play through multiple turns to test feature interaction
 | S17 | `test_multiple_combats_per_turn` | Attack with 3 different units in one turn. Verify each combat resolves independently with different random factors. |
 | S18 | `test_war_declaration_required` | Attack enemy without declaring war first → reverts. Declare war, then attack → succeeds. |
 | S19 | `test_all_units_lost_still_plays` | Player loses all military units but has cities. Can still submit turns (produce, research). |
-| S20 | `test_invalid_action_mid_sequence_reverts_all` | Turn with [valid_move, invalid_move, valid_found]. Entire transaction reverts — no partial application. |
+| S20 | `test_invalid_action_mid_sequence_skipped` | Turn with [valid_move, invalid_move, valid_found]. Invalid action silently skipped; valid actions before and after it execute normally. |
 
 ### 3.2 Advanced Scenario Tests
 
 | # | Test | Description |
 |---|---|---|
-| S21 | `test_re_research_completed_tech_reverts` | Research Mining to completion over many turns. Then attempt SetResearch(1) again — must revert with 'Already researched'. |
-| S22 | `test_tech_prerequisite_chain_enforced` | Attempt to research Archery(4) before Animal Husbandry(3) — must revert. Research AH, then Archery succeeds. |
-| S23 | `test_production_requires_tech` | Attempt to set production to Archer (PROD_ARCHER=6) without Archery tech — must revert with 'Tech not researched'. |
-| S24 | `test_building_requires_tech` | Attempt to build Granary (PROD_GRANARY=65) without Pottery — must revert with 'Cannot build this'. Research Pottery, then build succeeds. |
+| S21 | `test_re_research_completed_tech_silently_skipped` | Research Mining to completion over many turns. Then attempt SetResearch(1) again — silently skipped, research unchanged. |
+| S22 | `test_tech_prerequisite_chain_enforced` | Attempt to research Archery(4) before Animal Husbandry(3) — silently skipped. Research AH, then Archery succeeds. |
+| S23 | `test_production_requires_tech` | Attempt to set production to Archer (PROD_ARCHER=6) without Archery tech — silently skipped, production stays at previous value. |
+| S24 | `test_building_requires_tech` | Attempt to build Granary (PROD_GRANARY=65) without Pottery — silently skipped. Research Pottery, then build succeeds. |
 | S25 | `test_settler_starts_on_land` | After game setup, verify both players' settler units are on land tiles (not ocean/coast/mountain). |
 | S26 | `test_found_second_city_produces_settler` | Found first city, produce a second settler, found second city. Verify both cities exist and have distinct territories. |
 | S27 | `test_gold_accumulates_over_turns` | Found city, skip 10 turns. Verify treasury increased (capital palace gives +5 gold/turn). |

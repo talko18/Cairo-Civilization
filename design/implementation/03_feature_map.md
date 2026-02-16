@@ -218,7 +218,7 @@ Every module only depends on modules above it. We implement top-down through thi
 
 ### 7h: Improvements (Y43–Y44f)
 - `is_valid_improvement_for_tile` — terrain/feature/resource match
-- Build on existing reverts, remove flow, mine on flat fails
+- Build on existing silently skipped, remove flow, mine on flat silently skipped
 
 **Done when**: All 58 city tests pass.
 
@@ -389,7 +389,7 @@ These are end-to-end tests. Each scenario exercises a specific gameplay arc:
 17. **S2** — Full game score victory
 18. **S3** — Forfeit via timeout
 19. **S19** — All units lost, still plays
-20. **S20** — Invalid mid-sequence reverts all
+20. **S20** — Invalid mid-sequence silently skipped (valid actions still execute)
 
 **Done when**: All 21 system tests pass.
 

@@ -1,0 +1,8 @@
+# Scarb build artifacts
+target/
+
+# StarkNet Foundry test cache
+.snfoundry_cache/
+
+# Node.js dependencies
+ui/node_modules/

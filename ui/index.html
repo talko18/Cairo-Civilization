@@ -152,6 +152,16 @@ button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);t
 .tree-line{stroke:rgba(255,255,255,.18);stroke-width:1.5;fill:none}
 .tree-line.done{stroke:rgba(76,175,80,.55);stroke-width:2}
 
+/* ── Zoom controls ── */
+#zoom-controls{position:absolute;bottom:14px;left:14px;z-index:18;display:flex;flex-direction:column;
+  align-items:center;gap:2px;background:rgba(15,25,45,.85);border:1px solid var(--border);
+  border-radius:8px;padding:4px;box-shadow:0 4px 12px rgba(0,0,0,.5)}
+#zoom-controls button{width:30px;height:26px;background:rgba(255,255,255,.08);color:#fff;
+  border:1px solid rgba(255,255,255,.12);border-radius:5px;font-size:1.1rem;font-weight:700;
+  cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s}
+#zoom-controls button:hover{background:rgba(255,255,255,.18)}
+#zoom-lbl{font-size:.65rem;color:var(--dim);padding:1px 0;min-width:32px;text-align:center}
+
 /* ── Mini-map ── */
 #minimap-container{position:absolute;bottom:10px;right:10px;z-index:18;border:2px solid var(--border);border-radius:6px;
   overflow:hidden;background:#0a1628;box-shadow:0 4px 16px rgba(0,0,0,.6);cursor:pointer;opacity:.85;transition:opacity .15s}
@@ -219,6 +229,10 @@ button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);t
     <span class="kb-hint">E</span> End Turn
     <span class="kb-hint">Tab</span> Next Unit
     <span class="kb-hint">Esc</span> Cancel
+    <br>
+    <span class="kb-hint">Arrows</span> Pan Map
+    <span class="kb-hint">+/-</span> Zoom
+    <span class="kb-hint">Scroll</span> Zoom
   </div>
 </div>
 
@@ -252,6 +266,11 @@ button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);t
     <div id="tile-tip"></div>
     <div id="mode-banner"></div>
     <div id="turn-notify"><h2 id="turn-notify-title">Your Turn</h2><p id="turn-notify-sub">Player A - Turn 1</p></div>
+    <div id="zoom-controls">
+      <button onclick="zoomAtCenter(ZOOM_STEP)" title="Zoom in (+)">+</button>
+      <span id="zoom-lbl">100%</span>
+      <button onclick="zoomAtCenter(-ZOOM_STEP)" title="Zoom out (-)">&#x2212;</button>
+    </div>
     <div id="minimap-container">
       <canvas id="minimap-canvas" width="192" height="120"></canvas>
       <div id="minimap-viewport"></div>
@@ -283,6 +302,8 @@ let sidebarTab = 'mine';
 // Map rendering
 const COLS=32, ROWS=20, S=26, HW=2*S, HH=Math.sqrt(3)*S;
 let camX=0, camY=0;
+let zoom=1.8;           // start zoomed in so tiles are large and readable
+const ZOOM_MIN=0.6, ZOOM_MAX=3.5, ZOOM_STEP=0.15;
 let hoveredHex = null;
 
 const TERRAIN_COLORS = [
@@ -724,8 +745,8 @@ function selectFromSidebar(type, player, id) {
 
 function panToHex(q, r) {
   const [hx, hy] = hexCenter(q, r);
-  camX = -hx + canvas.width / 2;
-  camY = -hy + canvas.height / 2;
+  camX = -hx * zoom + canvas.width / 2;
+  camY = -hy * zoom + canvas.height / 2;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -856,7 +877,10 @@ function hexPts(cx, cy, s) {
   for (let i = 0; i < 6; i++) { const a = i * Math.PI / 3; p.push([cx + s * Math.cos(a), cy + s * Math.sin(a)]); }
   return p;
 }
-function pixelToHex(px, py) {
+// Convert screen-relative pixel (already offset by camX,camY) to hex
+function pixelToHex(sx, sy) {
+  // sx,sy are already in "world" coords pre-zoom; apply zoom inverse
+  const px = sx / zoom, py = sy / zoom;
   let best=null, bd=Infinity;
   for (let q=0;q<COLS;q++) for (let r=0;r<ROWS;r++) {
     const [hx,hy]=hexCenter(q,r); const d=(px-hx)**2+(py-hy)**2;
@@ -1019,6 +1043,7 @@ function drawMap() {
   ctx2d.clearRect(0,0,canvas.width,canvas.height);
   ctx2d.save();
   ctx2d.translate(camX, camY);
+  ctx2d.scale(zoom, zoom);
   const sz = S;
 
   // Terrain
@@ -1323,77 +1348,259 @@ function drawMap() {
     }
   }
 
-  // Units — with animation support
+  // ═══════════════════════════════════════════════════════════
+  // UNITS — rendered with full animation support
+  // ═══════════════════════════════════════════════════════════
   const now = performance.now();
-  for (let p=0;p<2;p++) {
-    for (const u of G.players[p].units) {
-      if (u.hp<=0) continue;
-      let [cx,cy]=hexCenter(u.q,u.r);
 
-      // Check for active slide animation on this unit
-      const slideAnim = activeAnimations.find(a =>
-        a.type === 'unitSlide' && a.player === p && a.unitId === u.id
-      );
-      if (slideAnim) {
-        const t = Math.min(1, (now - slideAnim.startTime) / slideAnim.duration);
-        // Ease-out cubic for smooth deceleration
-        const ease = 1 - Math.pow(1 - t, 3);
-        cx = slideAnim.fromX + (slideAnim.toX - slideAnim.fromX) * ease;
-        cy = slideAnim.fromY + (slideAnim.toY - slideAnim.fromY) * ease;
-      }
+  // Helper: draw a single unit at (cx,cy) with optional visual modifiers
+  function drawUnit(u, p, cx, cy, extraScale, extraRotation) {
+    const scale = extraScale || 1;
+    let ox=0, oy=0;
+    const cityHere = G.players[p].cities.some(c=>c.q===u.q&&c.r===u.r);
+    if(cityHere){ox=14;oy=-10;}
 
-      let ox=0, oy=0;
-      const cityHere = G.players[p].cities.some(c=>c.q===u.q&&c.r===u.r);
-      if(cityHere){ox=14;oy=-10;}
-      ctx2d.beginPath(); ctx2d.arc(cx+ox,cy+oy-2,11,0,Math.PI*2);
-      ctx2d.fillStyle=p===0?'#1a5276':'#922b21'; ctx2d.fill();
-      const isSel = selected&&selected.type==='unit'&&selected.player===p&&selected.id===u.id;
-      ctx2d.strokeStyle=isSel?'#f5c542':'rgba(255,255,255,.5)'; ctx2d.lineWidth=isSel?2.5:1.5; ctx2d.stroke();
-      ctx2d.font='12px sans-serif'; ctx2d.textAlign='center';
-      ctx2d.fillText(UNIT_ICONS[u.unitType]||'?',cx+ox,cy+oy+3);
-      if (u.hp<100 && u.hp>0) {
-        const bw=18;
-        ctx2d.fillStyle='#333'; ctx2d.fillRect(cx+ox-bw/2,cy+oy+10,bw,3);
-        ctx2d.fillStyle=u.hp>50?'#66bb6a':u.hp>25?'#ff9800':'#e74c3c';
-        ctx2d.fillRect(cx+ox-bw/2,cy+oy+10,bw*u.hp/100,3);
-      }
-      ctx2d.font='7px sans-serif'; ctx2d.fillStyle='#ccc';
-      ctx2d.fillText((UNIT_NAMES[u.unitType]||'Unit')+(p===1?' (B)':''),cx+ox,cy+oy+20);
+    ctx2d.save();
+    if (extraRotation) {
+      ctx2d.translate(cx+ox, cy+oy);
+      ctx2d.rotate(extraRotation);
+      ctx2d.translate(-(cx+ox), -(cy+oy));
+    }
+
+    // Unit circle
+    const r = 11 * scale;
+    ctx2d.beginPath(); ctx2d.arc(cx+ox,cy+oy-2,r,0,Math.PI*2);
+    ctx2d.fillStyle=p===0?'#1a5276':'#922b21'; ctx2d.fill();
+    const isSel = selected&&selected.type==='unit'&&selected.player===p&&selected.id===u.id;
+    ctx2d.strokeStyle=isSel?'#f5c542':'rgba(255,255,255,.5)'; ctx2d.lineWidth=isSel?2.5:1.5; ctx2d.stroke();
+
+    // Icon
+    ctx2d.font=`${Math.round(12*scale)}px sans-serif`; ctx2d.textAlign='center'; ctx2d.textBaseline='middle';
+    ctx2d.fillText(UNIT_ICONS[u.unitType]||'?',cx+ox,cy+oy+1);
+
+    // HP bar
+    if (u.hp<100 && u.hp>0) {
+      const bw=18*scale;
+      ctx2d.fillStyle='#333'; ctx2d.fillRect(cx+ox-bw/2,cy+oy+10*scale,bw,3);
+      ctx2d.fillStyle=u.hp>50?'#66bb6a':u.hp>25?'#ff9800':'#e74c3c';
+      ctx2d.fillRect(cx+ox-bw/2,cy+oy+10*scale,bw*u.hp/100,3);
+    }
+    // Name
+    ctx2d.font=`${Math.round(7*scale)}px sans-serif`; ctx2d.fillStyle='#ccc';
+    ctx2d.fillText((UNIT_NAMES[u.unitType]||'Unit')+(p===1?' (B)':''),cx+ox,cy+oy+20*scale);
+    ctx2d.restore();
+  }
+
+  // Collect units being animated so we skip their normal render
+  const animatedUnits = new Set();
+  for (const anim of activeAnimations) {
+    if ((anim.type === 'unitWalk' || anim.type === 'meleeCharge' || anim.type === 'archerFire')
+        && animT(anim, now) >= 0) {
+      animatedUnits.add(anim.player + ':' + anim.unitId);
     }
   }
 
-  // ── Render overlay animations ──
-  for (const anim of activeAnimations) {
-    const t = Math.min(1, (now - anim.startTime) / anim.duration);
+  // Render non-animated units normally
+  for (let p=0;p<2;p++) {
+    for (const u of G.players[p].units) {
+      if (u.hp<=0) continue;
+      const key = p + ':' + u.id;
+      if (animatedUnits.has(key)) continue; // drawn by animation code below
+      // Check for shake animation
+      const shakeAnim = activeAnimations.find(a => a.type === 'unitShake' && a.player === p && a.unitId === u.id);
+      let [cx,cy]=hexCenter(u.q,u.r);
+      if (shakeAnim) {
+        const t = animT(shakeAnim, now);
+        if (t >= 0) {
+          const intensity = 6 * (1 - t);
+          cx += Math.sin(t * Math.PI * 8) * intensity;
+          cy += Math.cos(t * Math.PI * 6) * intensity * 0.5;
+        }
+      }
+      drawUnit(u, p, cx, cy);
+    }
+  }
 
-    if (anim.type === 'combatFlash') {
-      // Red flash that fades on the target hex
-      const [cx, cy] = hexCenter(anim.q, anim.r);
-      const pts = hexPts(cx, cy, S);
-      const alpha = (1 - t) * 0.5;
-      ctx2d.beginPath(); ctx2d.moveTo(pts[0][0],pts[0][1]);
-      for(let i=1;i<6;i++) ctx2d.lineTo(pts[i][0],pts[i][1]);
-      ctx2d.closePath();
-      ctx2d.fillStyle = `rgba(231,76,60,${alpha})`;
-      ctx2d.fill();
-      // Expanding ring
-      ctx2d.beginPath();
-      ctx2d.arc(cx, cy, S * 0.5 + S * 0.8 * t, 0, Math.PI*2);
-      ctx2d.strokeStyle = `rgba(255,100,80,${(1-t)*0.7})`;
-      ctx2d.lineWidth = 3 * (1 - t);
-      ctx2d.stroke();
+  // ═══════════════════════════════════════════════════════════
+  // OVERLAY ANIMATIONS
+  // ═══════════════════════════════════════════════════════════
+  for (const anim of activeAnimations) {
+    const t = animT(anim, now);
+    if (t < 0) continue; // hasn't started due to delay
+
+    // ── Walking movement: bob up/down like walking ──
+    if (anim.type === 'unitWalk') {
+      const ease = easeInOutQuad(t);
+      const cx = anim.fromX + (anim.toX - anim.fromX) * ease;
+      const cy = anim.fromY + (anim.toY - anim.fromY) * ease;
+      // Walking bob — two full steps during the walk
+      const bob = Math.sin(t * Math.PI * 4) * 3;
+      // Slight tilt in movement direction
+      const angle = Math.sin(t * Math.PI * 4) * 0.08;
+      const u = G.players[anim.player]?.units.find(x => x.id === anim.unitId);
+      if (u) drawUnit(u, anim.player, cx, cy + bob, 1, angle);
     }
 
-    else if (anim.type === 'floatingText') {
-      // Text that floats upward and fades
-      const alpha = 1 - t;
-      const yOff = -30 * t; // float up 30px
+    // ── Dust particles from walking ──
+    else if (anim.type === 'dustParticle') {
+      const alpha = (1 - t) * 0.5;
+      const size = 2 + t * 4;
+      const yOff = -t * 8;
+      ctx2d.beginPath();
+      ctx2d.arc(anim.x, anim.y + yOff, size, 0, Math.PI*2);
+      ctx2d.fillStyle = `rgba(180,160,120,${alpha})`;
+      ctx2d.fill();
+    }
+
+    // ── Melee charge: attacker runs to target and bounces back ──
+    else if (anim.type === 'meleeCharge') {
+      const u = G.players[anim.player]?.units.find(x => x.id === anim.unitId);
+      if (!u) continue;
+      let cx, cy, scale = 1, rot = 0;
+      if (t < 0.4) {
+        // Phase 1: charge forward (0 → 0.4) — move 70% of the way to target
+        const pt = t / 0.4;
+        const ease = easeOutCubic(pt);
+        cx = anim.fromX + (anim.toX - anim.fromX) * 0.7 * ease;
+        cy = anim.fromY + (anim.toY - anim.fromY) * 0.7 * ease;
+        // Lean forward
+        const dx = anim.toX - anim.fromX;
+        rot = (dx > 0 ? 1 : -1) * 0.15 * ease;
+        scale = 1 + 0.1 * ease;
+        // Bob while running
+        cy += Math.sin(pt * Math.PI * 3) * 2;
+      } else if (t < 0.55) {
+        // Phase 2: clash — hold at 70% with a jitter
+        const pt = (t - 0.4) / 0.15;
+        cx = anim.fromX + (anim.toX - anim.fromX) * 0.7;
+        cy = anim.fromY + (anim.toY - anim.fromY) * 0.7;
+        cx += Math.sin(pt * Math.PI * 6) * 4;
+        cy += Math.cos(pt * Math.PI * 4) * 2;
+        scale = 1.1;
+        rot = Math.sin(pt * Math.PI * 4) * 0.1;
+      } else {
+        // Phase 3: recoil back to start (0.55 → 1.0)
+        const pt = (t - 0.55) / 0.45;
+        const ease = easeOutCubic(pt);
+        const clashX = anim.fromX + (anim.toX - anim.fromX) * 0.7;
+        const clashY = anim.fromY + (anim.toY - anim.fromY) * 0.7;
+        cx = clashX + (anim.fromX - clashX) * ease;
+        cy = clashY + (anim.fromY - clashY) * ease;
+        scale = 1.1 - 0.1 * ease;
+      }
+      drawUnit(u, anim.player, cx, cy, scale, rot);
+    }
+
+    // ── Clash sparks — burst of particles at collision point ──
+    else if (anim.type === 'clashSparks') {
+      const sparkCount = 8;
+      for (let i = 0; i < sparkCount; i++) {
+        const angle = (i / sparkCount) * Math.PI * 2 + t * 2;
+        const dist = t * 18 + 4;
+        const sx = anim.x + Math.cos(angle) * dist;
+        const sy = anim.y + Math.sin(angle) * dist;
+        const alpha = (1 - t);
+        const size = (1 - t) * 3;
+        // Alternate yellow and orange sparks
+        ctx2d.fillStyle = i % 2 === 0
+          ? `rgba(255,220,50,${alpha})`
+          : `rgba(255,140,30,${alpha})`;
+        ctx2d.fillRect(sx - size/2, sy - size/2, size, size);
+      }
+      // Central flash
+      if (t < 0.3) {
+        const flashAlpha = (1 - t / 0.3) * 0.8;
+        ctx2d.beginPath();
+        ctx2d.arc(anim.x, anim.y, 8 * (1 - t), 0, Math.PI*2);
+        ctx2d.fillStyle = `rgba(255,255,200,${flashAlpha})`;
+        ctx2d.fill();
+      }
+    }
+
+    // ── Archer fire: unit recoils backward briefly ──
+    else if (anim.type === 'archerFire') {
+      const u = G.players[anim.player]?.units.find(x => x.id === anim.unitId);
+      if (!u) continue;
+      // Normalize direction
+      const mag = Math.sqrt(anim.dirX*anim.dirX + anim.dirY*anim.dirY) || 1;
+      const nx = anim.dirX / mag, ny = anim.dirY / mag;
+      // Recoil backward then settle
+      const recoil = Math.sin(t * Math.PI) * 5;
+      const cx = anim.baseX - nx * recoil;
+      const cy = anim.baseY - ny * recoil;
+      drawUnit(u, anim.player, cx, cy, 1, -nx * 0.15 * Math.sin(t * Math.PI));
+    }
+
+    // ── Projectile: arrow/stone arcs from attacker to target ──
+    else if (anim.type === 'projectile') {
+      const ease = easeInOutQuad(t);
+      const px = anim.fromX + (anim.toX - anim.fromX) * ease;
+      const baseY = anim.fromY + (anim.toY - anim.fromY) * ease;
+      // Parabolic arc
+      const arc = -4 * anim.arcHeight * ease * (1 - ease);
+      const py = baseY + arc;
+      // Arrow rotation — point in direction of travel
+      const dx = anim.toX - anim.fromX;
+      const dyCurve = (anim.toY - anim.fromY) + anim.arcHeight * (4 * ease - 2) * (-1);
+      const rot = Math.atan2(dyCurve < 0 ? -3 : 3, dx > 0 ? 5 : -5);
+      // Draw arrow
       ctx2d.save();
-      ctx2d.font = 'bold 14px sans-serif';
+      ctx2d.translate(px, py);
+      ctx2d.rotate(rot);
+      // Arrow body
+      ctx2d.strokeStyle = '#ddd';
+      ctx2d.lineWidth = 2;
+      ctx2d.beginPath(); ctx2d.moveTo(-8, 0); ctx2d.lineTo(8, 0); ctx2d.stroke();
+      // Arrow head
+      ctx2d.fillStyle = '#ff8800';
+      ctx2d.beginPath(); ctx2d.moveTo(8, 0); ctx2d.lineTo(4, -3); ctx2d.lineTo(4, 3); ctx2d.closePath(); ctx2d.fill();
+      // Trail
+      ctx2d.strokeStyle = `rgba(255,200,100,${0.3*(1-t)})`;
+      ctx2d.lineWidth = 1;
+      ctx2d.beginPath(); ctx2d.moveTo(-8, 0); ctx2d.lineTo(-18, 0); ctx2d.stroke();
+      ctx2d.restore();
+    }
+
+    // ── Ranged impact: burst at target ──
+    else if (anim.type === 'rangedImpact') {
+      const alpha = (1 - t) * 0.8;
+      const radius = 5 + t * 15;
+      ctx2d.beginPath();
+      ctx2d.arc(anim.x, anim.y, radius, 0, Math.PI*2);
+      ctx2d.fillStyle = `rgba(255,150,50,${alpha * 0.4})`;
+      ctx2d.fill();
+      ctx2d.strokeStyle = `rgba(255,200,100,${alpha})`;
+      ctx2d.lineWidth = 2 * (1 - t);
+      ctx2d.stroke();
+      // Small debris particles
+      for (let i = 0; i < 5; i++) {
+        const a = (i / 5) * Math.PI * 2 + t * 3;
+        const d = t * 12;
+        ctx2d.fillStyle = `rgba(200,180,140,${alpha})`;
+        ctx2d.fillRect(anim.x + Math.cos(a)*d - 1, anim.y + Math.sin(a)*d - 1, 2, 2);
+      }
+    }
+
+    // ── Screen flash ──
+    else if (anim.type === 'screenFlash') {
+      const alpha = (1 - t) * 0.15;
+      ctx2d.save();
+      ctx2d.setTransform(1,0,0,1,0,0); // reset to screen coords
+      ctx2d.fillStyle = `rgba(${anim.color},${alpha})`;
+      ctx2d.fillRect(0, 0, canvas.width, canvas.height);
+      ctx2d.restore();
+    }
+
+    // ── Floating text ──
+    else if (anim.type === 'floatingText') {
+      const alpha = t < 0.1 ? t / 0.1 : (1 - t); // fade in quickly, fade out
+      const yOff = -35 * t;
+      const scale = t < 0.15 ? 0.5 + 0.5 * (t / 0.15) : 1; // pop in
+      ctx2d.save();
+      ctx2d.font = `bold ${Math.round(14 * scale)}px sans-serif`;
       ctx2d.textAlign = 'center';
       ctx2d.textBaseline = 'middle';
-      ctx2d.globalAlpha = alpha;
-      // Shadow for readability
+      ctx2d.globalAlpha = Math.max(0, alpha);
       ctx2d.fillStyle = 'rgba(0,0,0,.7)';
       ctx2d.fillText(anim.text, anim.x + 1, anim.y + yOff + 1);
       ctx2d.fillStyle = anim.color || '#fff';
@@ -1401,9 +1608,9 @@ function drawMap() {
       ctx2d.restore();
     }
 
+    // ── City founding ──
     else if (anim.type === 'cityFound') {
-      // Expanding circle that fades — city appearing
-      const radius = S * 2.5 * t;
+      const radius = S * 2.5 * easeOutBack(Math.min(1, t * 1.5));
       const alpha = (1 - t) * 0.6;
       ctx2d.beginPath();
       ctx2d.arc(anim.x, anim.y, radius, 0, Math.PI*2);
@@ -1413,12 +1620,17 @@ function drawMap() {
       ctx2d.strokeStyle = `rgba(${pColor},${alpha})`;
       ctx2d.lineWidth = 3 * (1 - t);
       ctx2d.stroke();
-      // Inner glow
-      if (t < 0.5) {
+      // Rings expanding outward
+      for (let ri = 0; ri < 3; ri++) {
+        const rt = Math.max(0, t - ri * 0.15);
+        if (rt <= 0) continue;
+        const rr = S * (1 + rt * 2);
+        const ra = (1 - rt) * 0.3;
         ctx2d.beginPath();
-        ctx2d.arc(anim.x, anim.y, S * 0.8 * (1 + t), 0, Math.PI*2);
-        ctx2d.fillStyle = `rgba(255,213,79,${0.4 * (1 - t*2)})`;
-        ctx2d.fill();
+        ctx2d.arc(anim.x, anim.y, rr, 0, Math.PI*2);
+        ctx2d.strokeStyle = `rgba(255,213,79,${ra})`;
+        ctx2d.lineWidth = 1;
+        ctx2d.stroke();
       }
     }
   }
@@ -1440,6 +1652,7 @@ mapArea.addEventListener('mousedown', e => {
 });
 window.addEventListener('mousemove', e => {
   const rect=canvas.getBoundingClientRect();
+  // Screen-to-world: subtract cam offset, then pixelToHex divides by zoom
   const mx=e.clientX-rect.left-camX, my=e.clientY-rect.top-camY;
   if(isDrag){
     const dx=e.clientX-dragSX,dy=e.clientY-dragSY;
@@ -1462,8 +1675,29 @@ window.addEventListener('mouseup', e => {
   }
   isDrag=false; mapArea.classList.remove('dragging');
 });
+// Wheel: zoom (vertical scroll) or pan (horizontal scroll / shift+scroll)
 mapArea.addEventListener('wheel', e => {
-  camX -= e.deltaX; camY -= e.deltaY; drawMap(); updateMinimapViewport(); e.preventDefault();
+  e.preventDefault();
+  if (e.ctrlKey || Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+    // Zoom centered on mouse pointer
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    // World point under cursor before zoom
+    const wx = (mx - camX) / zoom;
+    const wy = (my - camY) / zoom;
+    // Apply zoom
+    const oldZoom = zoom;
+    if (e.deltaY < 0) zoom = Math.min(ZOOM_MAX, zoom + ZOOM_STEP);
+    else zoom = Math.max(ZOOM_MIN, zoom - ZOOM_STEP);
+    // Adjust cam so world point stays under cursor
+    camX = mx - wx * zoom;
+    camY = my - wy * zoom;
+  } else {
+    // Horizontal scroll → pan
+    camX -= e.deltaX;
+  }
+  drawMap(); updateMinimapViewport(); updateZoomLabel();
 }, {passive:false});
 
 function showTooltip(mx,my,hex) {
@@ -1647,14 +1881,17 @@ let activeAnimations = [];  // {type, startTime, duration, ...params}
 let animFrameId = null;
 
 function startAnimation(anim) {
-  anim.startTime = performance.now();
+  anim.startTime = performance.now() + (anim.delay || 0);
   activeAnimations.push(anim);
   if (!animFrameId) animFrameId = requestAnimationFrame(animLoop);
 }
 
 function animLoop(now) {
-  // Remove completed animations
-  activeAnimations = activeAnimations.filter(a => now - a.startTime < a.duration);
+  // Remove completed animations (accounting for delay)
+  activeAnimations = activeAnimations.filter(a => {
+    if (now < a.startTime) return true; // hasn't started yet
+    return (now - a.startTime) < a.duration;
+  });
   drawMap();
   if (activeAnimations.length > 0) {
     animFrameId = requestAnimationFrame(animLoop);
@@ -1662,6 +1899,17 @@ function animLoop(now) {
     animFrameId = null;
   }
 }
+
+// Get animation progress (0-1), returns -1 if not started yet
+function animT(anim, now) {
+  if (now < anim.startTime) return -1;
+  return Math.min(1, (now - anim.startTime) / anim.duration);
+}
+// Easing functions
+function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+function easeInOutQuad(t) { return t < 0.5 ? 2*t*t : 1-Math.pow(-2*t+2,2)/2; }
+function easeOutBack(t) { const c1=1.70158,c3=c1+1; return 1+c3*Math.pow(t-1,3)+c1*Math.pow(t-1,2); }
+
 
 // ── Optimistic local state update with animations ──
 function applyOptimistic(action) {
@@ -1676,37 +1924,98 @@ function applyOptimistic(action) {
       u.q = action.destQ;
       u.r = action.destR;
       if (u.mp > 0) u.mp -= 1;
-      // Start slide animation
       const [fx, fy] = hexCenter(fromQ, fromR);
       const [tx, ty] = hexCenter(u.q, u.r);
+      // Walk animation — unit slides with bobbing motion
       startAnimation({
-        type: 'unitSlide', duration: 250,
-        player: cp, unitId: u.id,
+        type: 'unitWalk', duration: 350,
+        player: cp, unitId: u.id, unitType: u.unitType,
         fromX: fx, fromY: fy, toX: tx, toY: ty,
       });
+      // Dust particles along path
+      for (let di = 0; di < 3; di++) {
+        startAnimation({
+          type: 'dustParticle', duration: 500,
+          x: fx + (tx - fx) * (di * 0.25 + 0.1) + (Math.random() - 0.5) * 6,
+          y: fy + (ty - fy) * (di * 0.25 + 0.1) + 5,
+          delay: di * 60,
+        });
+      }
     }
-  } else if (action.type === 'AttackUnit' || action.type === 'RangedAttack') {
+  } else if (action.type === 'AttackUnit') {
     const u = p.units.find(x => x.id === action.unitId);
-    if (u && u.mp > 0) u.mp = 0;
-    // Flash animation on target hex
-    startAnimation({
-      type: 'combatFlash', duration: 400,
-      q: action.targetQ, r: action.targetR,
-    });
-    // Floating damage text
-    const [tx, ty] = hexCenter(action.targetQ, action.targetR);
-    startAnimation({
-      type: 'floatingText', duration: 800,
-      text: '\u2694\uFE0F', x: tx, y: ty, color: '#e74c3c',
-    });
-    // Shake the attacker briefly
-    if (action.type === 'AttackUnit' && u) {
+    const enemy = 1 - cp;
+    const defender = G.players[enemy]?.units.find(x => x.hp > 0 && x.q === action.targetQ && x.r === action.targetR);
+    if (u) {
+      u.mp = 0;
       const [ax, ay] = hexCenter(u.q, u.r);
+      const [tx, ty] = hexCenter(action.targetQ, action.targetR);
+      // Phase 1: Attacker charges toward defender
       startAnimation({
-        type: 'unitSlide', duration: 150,
+        type: 'meleeCharge', duration: 600,
+        player: cp, unitId: u.id, unitType: u.unitType,
+        fromX: ax, fromY: ay, toX: tx, toY: ty,
+      });
+      // Phase 2: Clash sparks at the meeting point
+      const clashX = (ax + tx) / 2, clashY = (ay + ty) / 2;
+      startAnimation({
+        type: 'clashSparks', duration: 500,
+        x: clashX, y: clashY, delay: 200,
+      });
+      // Phase 3: Defender shakes
+      if (defender) {
+        startAnimation({
+          type: 'unitShake', duration: 400,
+          player: enemy, unitId: defender.id,
+          baseX: tx, baseY: ty, delay: 250,
+        });
+      }
+      // Damage number floats up from target
+      startAnimation({
+        type: 'floatingText', duration: 1000,
+        text: '\u2694 Hit!', x: tx, y: ty - 15, color: '#ff4444', delay: 250,
+      });
+      // Screen flash
+      startAnimation({ type: 'screenFlash', duration: 200, color: '231,76,60', delay: 200 });
+    }
+  } else if (action.type === 'RangedAttack') {
+    const u = p.units.find(x => x.id === action.unitId);
+    const enemy = 1 - cp;
+    const defender = G.players[enemy]?.units.find(x => x.hp > 0 && x.q === action.targetQ && x.r === action.targetR);
+    if (u) {
+      u.mp = 0;
+      const [ax, ay] = hexCenter(u.q, u.r);
+      const [tx, ty] = hexCenter(action.targetQ, action.targetR);
+      // Archer fires — brief recoil
+      startAnimation({
+        type: 'archerFire', duration: 300,
         player: cp, unitId: u.id,
-        fromX: ax + (action.targetQ > u.q ? 8 : -8), fromY: ay,
-        toX: ax, toY: ay,
+        baseX: ax, baseY: ay,
+        dirX: tx - ax, dirY: ty - ay,
+      });
+      // Projectile arcs from attacker to target
+      startAnimation({
+        type: 'projectile', duration: 500,
+        fromX: ax, fromY: ay - 5, toX: tx, toY: ty - 5,
+        arcHeight: Math.max(20, hexDist(u.q, u.r, action.targetQ, action.targetR) * 12),
+      });
+      // Impact at target
+      startAnimation({
+        type: 'rangedImpact', duration: 400,
+        x: tx, y: ty, delay: 450,
+      });
+      // Defender shakes on impact
+      if (defender) {
+        startAnimation({
+          type: 'unitShake', duration: 400,
+          player: enemy, unitId: defender.id,
+          baseX: tx, baseY: ty, delay: 450,
+        });
+      }
+      // Damage text
+      startAnimation({
+        type: 'floatingText', duration: 1000,
+        text: '\u{1F3F9} Hit!', x: tx, y: ty - 15, color: '#ff8800', delay: 500,
       });
     }
   } else if (action.type === 'FoundCity') {
@@ -2197,10 +2506,11 @@ function updateMinimapViewport() {
   const mapH = ROWS * HH + HH;
   const scaleX = MM_W / mapW;
   const scaleY = MM_H / mapH;
-  const vx = -camX * scaleX;
-  const vy = -camY * scaleY;
-  const vw = canvas.width * scaleX;
-  const vh = canvas.height * scaleY;
+  // cam is in screen coords; visible world region = (-camX/zoom, -camY/zoom) size (canvas/zoom)
+  const vx = (-camX / zoom) * scaleX;
+  const vy = (-camY / zoom) * scaleY;
+  const vw = (canvas.width / zoom) * scaleX;
+  const vh = (canvas.height / zoom) * scaleY;
   vp.style.left = Math.max(0, vx) + 'px';
   vp.style.top = Math.max(0, vy) + 'px';
   vp.style.width = Math.min(MM_W, vw) + 'px';
@@ -2215,8 +2525,8 @@ document.getElementById('minimap-container').addEventListener('click', (e) => {
   const mapH = ROWS * HH + HH;
   const worldX = (mx / MM_W) * mapW;
   const worldY = (my / MM_H) * mapH;
-  camX = -worldX + canvas.width / 2;
-  camY = -worldY + canvas.height / 2;
+  camX = -worldX * zoom + canvas.width / 2;
+  camY = -worldY * zoom + canvas.height / 2;
   drawMap();
   drawMinimap();
 });
@@ -2224,14 +2534,31 @@ document.getElementById('minimap-container').addEventListener('click', (e) => {
 // ═══════════════════════════════════════════════════════════════
 // KEYBOARD SHORTCUTS
 // ═══════════════════════════════════════════════════════════════
+const PAN_SPEED = 60; // pixels per arrow key press
 document.addEventListener('keydown', (e) => {
+  // Arrow keys and zoom work even without game state
+  const key = e.key;
+  const kl = key.toLowerCase();
+
+  // Arrow keys — pan the camera
+  if (key === 'ArrowUp')    { camY += PAN_SPEED; drawMap(); updateMinimapViewport(); e.preventDefault(); return; }
+  if (key === 'ArrowDown')  { camY -= PAN_SPEED; drawMap(); updateMinimapViewport(); e.preventDefault(); return; }
+  if (key === 'ArrowLeft')  { camX += PAN_SPEED; drawMap(); updateMinimapViewport(); e.preventDefault(); return; }
+  if (key === 'ArrowRight') { camX -= PAN_SPEED; drawMap(); updateMinimapViewport(); e.preventDefault(); return; }
+
+  // Zoom with +/- keys (zoom centered on screen center)
+  if (kl === '=' || kl === '+' || key === '+') {
+    zoomAtCenter(ZOOM_STEP); e.preventDefault(); return;
+  }
+  if (kl === '-' || key === '-') {
+    zoomAtCenter(-ZOOM_STEP); e.preventDefault(); return;
+  }
+
   if (!G || loading) return;
   // Don't capture when typing in inputs
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
 
-  const key = e.key.toLowerCase();
-
-  if (key === 'escape') {
+  if (kl === 'escape') {
     if (actionMode) { cancelMode(); e.preventDefault(); }
     else if (document.getElementById('rpanel').classList.contains('open')) { closePanel(); e.preventDefault(); }
     else { selected = null; actionMode = null; setModeBanner(null); updateActionBar(); renderSidebar(); drawMap(); }
@@ -2239,27 +2566,42 @@ document.addEventListener('keydown', (e) => {
   }
 
   // Global shortcuts
-  if (key === 'e') { endTurn(); e.preventDefault(); return; }
-  if (key === 't') { openPanel('tech'); e.preventDefault(); return; }
-  if (key === 'p') { openPanel('prod'); e.preventDefault(); return; }
+  if (kl === 'e') { endTurn(); e.preventDefault(); return; }
+  if (kl === 't') { openPanel('tech'); e.preventDefault(); return; }
+  if (kl === 'p') { openPanel('prod'); e.preventDefault(); return; }
 
   // Unit shortcuts (only when a friendly unit is selected)
   if (selected && selected.type === 'unit' && selected.player === G.currentPlayer && !actionMode) {
-    if (key === 'm') { startMove(); e.preventDefault(); return; }
-    if (key === 'a') { startAttack(); e.preventDefault(); return; }
-    if (key === 'r' && (selected.unitType === 4 || selected.unitType === 5)) { startRanged(); e.preventDefault(); return; }
-    if (key === 'f') { fortifyUnit(); e.preventDefault(); return; }
-    if (key === 's') { skipUnit(); e.preventDefault(); return; }
-    if (key === 'b' && selected.unitType === 0) { foundCity(); e.preventDefault(); return; }
+    if (kl === 'm') { startMove(); e.preventDefault(); return; }
+    if (kl === 'a') { startAttack(); e.preventDefault(); return; }
+    if (kl === 'r' && (selected.unitType === 4 || selected.unitType === 5)) { startRanged(); e.preventDefault(); return; }
+    if (kl === 'f') { fortifyUnit(); e.preventDefault(); return; }
+    if (kl === 's') { skipUnit(); e.preventDefault(); return; }
+    if (kl === 'b' && selected.unitType === 0) { foundCity(); e.preventDefault(); return; }
   }
 
-  // Number keys to cycle units
-  if (key === 'tab') {
+  // Tab to cycle units
+  if (kl === 'tab') {
     e.preventDefault();
     cycleNextUnit();
     return;
   }
 });
+
+// Zoom centered on the middle of the screen
+function zoomAtCenter(delta) {
+  const cx = canvas.width / 2, cy = canvas.height / 2;
+  const wx = (cx - camX) / zoom;
+  const wy = (cy - camY) / zoom;
+  zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoom + delta));
+  camX = cx - wx * zoom;
+  camY = cy - wy * zoom;
+  drawMap(); updateMinimapViewport(); updateZoomLabel();
+}
+function updateZoomLabel() {
+  const lbl = document.getElementById('zoom-lbl');
+  if (lbl) lbl.textContent = Math.round(zoom * 100) + '%';
+}
 
 // Cycle to next alive unit with MP remaining
 function cycleNextUnit() {
@@ -2310,7 +2652,7 @@ refreshState = async function() {
 // ═══════════════════════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════════════════════
-setTimeout(resizeCanvas, 50);
+setTimeout(() => { resizeCanvas(); updateZoomLabel(); }, 50);
 </script>
 </body>
 </html>

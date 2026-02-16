@@ -158,7 +158,7 @@ fn submit_turn(game_id, actions):
     3. assert block_timestamp <= turn_start + 300  (5 min timer)
     4. reset timeout counter for this player
     5. for each action in actions:
-        validate action is legal given current on-chain state:
+        attempt action — if preconditions fail, SILENTLY SKIP (no revert):
         - MoveUnit: verify unit exists, belongs to caller, has movement,
           destination is reachable, movement cost, etc.
         - AttackUnit: verify unit exists, target tile has enemy unit,
@@ -180,7 +180,12 @@ fn submit_turn(game_id, actions):
           (costs 0 builder charges)
         - FortifyUnit: set unit fortify state
         - DeclareWar: update diplo_status
-        apply state changes to on-chain storage
+        if valid, apply state changes to on-chain storage; if invalid, skip
+
+    NOTE: Action handlers use SOFT FAILURE — invalid actions return early
+    without reverting. This is blockchain-appropriate: stale client state
+    or race conditions should not cause entire transactions to fail.
+    Only end-of-turn state validation (step 6) causes hard reverts.
 
     NOTE: Phase 1 combat resolves IMMEDIATELY. No pending combat.
     The contract can see both players' units. Randomness comes from
@@ -188,7 +193,7 @@ fn submit_turn(game_id, actions):
     unpredictable (map_seed set before gameplay), and non-manipulable.
     The 2-TX pending combat protocol is only needed in Phase 2 where
     the contract can't see private unit stats.
-    6. end-of-turn processing:
+    6. end-of-turn processing (HARD FAILURE — reverts if invalid):
         - city yields → update food/production stockpiles
         - population growth check
         - production completion check

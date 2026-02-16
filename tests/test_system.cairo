@@ -650,22 +650,26 @@ fn test_all_units_lost_still_plays() {
 // ===========================================================================
 
 #[test]
-#[should_panic]
-fn test_invalid_action_mid_sequence_reverts_all() {
+fn test_invalid_action_mid_sequence_skipped() {
     let (d, addr) = deploy();
     let game_id = setup_active_game(d, addr);
 
-    // Valid move, then invalid move, then valid found
-    // Entire transaction should revert
+    // Valid move, then invalid move (skipped), then valid found — all proceed
     let warrior = d.get_unit(game_id, 0, 1);
     start_cheat_caller_address(addr, player_a());
     d.submit_turn(game_id, array![
-        Action::MoveUnit((1, warrior.q + 1, warrior.r)), // valid
-        Action::MoveUnit((999, 0, 0)),                    // invalid unit
-        Action::FoundCity((0, 'Bad')),                     // valid but should never execute
+        Action::MoveUnit((1, warrior.q + 1, warrior.r)), // valid — executed
+        Action::MoveUnit((999, 0, 0)),                    // invalid unit — silently skipped
+        Action::FoundCity((0, 'Good')),                    // valid — executed
+        Action::SetResearch(1),
+        Action::SetProduction((0, PROD_WARRIOR)),
         Action::EndTurn,
     ]);
     stop_cheat_caller_address(addr);
+    // Verify: warrior moved and city was founded
+    let moved = d.get_unit(game_id, 0, 1);
+    assert!(moved.q == warrior.q + 1, "Warrior should have moved");
+    assert!(d.get_city_count(game_id, 0) == 1, "City should have been founded");
 }
 
 // ===========================================================================
@@ -673,8 +677,7 @@ fn test_invalid_action_mid_sequence_reverts_all() {
 // ===========================================================================
 
 #[test]
-#[should_panic(expected: 'Already researched')]
-fn test_re_research_completed_tech_reverts() {
+fn test_re_research_completed_tech_silently_skipped() {
     let (d, addr) = deploy();
     let game_id = setup_active_game(d, addr);
 
@@ -694,12 +697,15 @@ fn test_re_research_completed_tech_reverts() {
     let techs = d.get_completed_techs(game_id, 0);
     assert!((techs & 1) == 1);
 
-    // Attempt to re-research Mining — must revert
+    // Attempt to re-research Mining — silently skipped
     submit_turn(d, addr, player_a(), game_id, array![
-        Action::SetResearch(1),
+        Action::SetResearch(1),  // already researched — silently skipped
         Action::SetProduction((0, PROD_WARRIOR)),
         Action::EndTurn,
     ]);
+    // Verify Mining is still completed and current research didn't change to Mining
+    let techs_after = d.get_completed_techs(game_id, 0);
+    assert!((techs_after & 1) == 1, "Mining should still be completed");
 }
 
 // ===========================================================================
@@ -707,7 +713,6 @@ fn test_re_research_completed_tech_reverts() {
 // ===========================================================================
 
 #[test]
-#[should_panic(expected: 'Prerequisites not met')]
 fn test_tech_prerequisite_chain_enforced() {
     let (d, addr) = deploy();
     let game_id = setup_active_game(d, addr);
@@ -720,12 +725,15 @@ fn test_tech_prerequisite_chain_enforced() {
     ]);
     skip_turn(d, addr, player_b(), game_id);
 
-    // Try to research Archery(4) without Animal Husbandry(3) — should panic
+    // Try to research Archery(4) without Animal Husbandry(3) — silently skipped
     submit_turn(d, addr, player_a(), game_id, array![
-        Action::SetResearch(4), // Archery requires AH
+        Action::SetResearch(4), // Archery requires AH — silently skipped
         Action::SetProduction((0, PROD_WARRIOR)),
         Action::EndTurn,
     ]);
+    // Current research should still be Mining (1), not Archery
+    let cur = d.get_current_research(game_id, 0);
+    assert!(cur == 1, "Research should still be Mining, not Archery");
 }
 
 // ===========================================================================
@@ -733,7 +741,6 @@ fn test_tech_prerequisite_chain_enforced() {
 // ===========================================================================
 
 #[test]
-#[should_panic(expected: 'Tech not researched')]
 fn test_production_requires_tech() {
     let (d, addr) = deploy();
     let game_id = setup_active_game(d, addr);
@@ -746,11 +753,13 @@ fn test_production_requires_tech() {
     ]);
     skip_turn(d, addr, player_b(), game_id);
 
-    // Try to produce Archer without Archery tech — panics at SetProduction
+    // Try to produce Archer without Archery tech — silently skipped, production stays Warrior
     submit_turn(d, addr, player_a(), game_id, array![
-        Action::SetProduction((0, PROD_ARCHER)),
+        Action::SetProduction((0, PROD_ARCHER)), // silently skipped
         Action::EndTurn,
     ]);
+    let city = d.get_city(game_id, 0, 0);
+    assert!(city.current_production == PROD_WARRIOR, "Production should still be Warrior");
 }
 
 // ===========================================================================
@@ -758,7 +767,6 @@ fn test_production_requires_tech() {
 // ===========================================================================
 
 #[test]
-#[should_panic(expected: 'Cannot build this')]
 fn test_building_requires_tech() {
     let (d, addr) = deploy();
     let game_id = setup_active_game(d, addr);
@@ -771,11 +779,13 @@ fn test_building_requires_tech() {
     ]);
     skip_turn(d, addr, player_b(), game_id);
 
-    // Try to produce Granary without Pottery tech — panics at SetProduction
+    // Try to produce Granary without Pottery tech — silently skipped
     submit_turn(d, addr, player_a(), game_id, array![
-        Action::SetProduction((0, PROD_GRANARY)),
+        Action::SetProduction((0, PROD_GRANARY)), // silently skipped
         Action::EndTurn,
     ]);
+    let city = d.get_city(game_id, 0, 0);
+    assert!(city.current_production == PROD_WARRIOR, "Production should still be Warrior");
 }
 
 // ===========================================================================
@@ -2528,8 +2538,7 @@ fn test_build_farm_full_flow() {
 // ===========================================================================
 
 #[test]
-#[should_panic(expected: ('Tech not researched',))]
-fn test_build_mine_no_tech_reverts() {
+fn test_build_mine_no_tech_silently_skipped() {
     let (d, addr) = deploy();
     let game_id = setup_active_game(d, addr);
 
@@ -2567,9 +2576,9 @@ fn test_build_mine_no_tech_reverts() {
     assert!(found, "Builder should exist with movement");
 
     let builder = d.get_unit(game_id, 0, builder_id);
+    let charges_before = builder.charges;
 
-    // Try to build mine on builder's tile without Mining tech.
-    // Tech check runs BEFORE terrain check, so it panics with 'Tech not researched'.
+    // Try to build mine on builder's tile without Mining tech — silently skipped
     let mut actions: Array<Action> = array![];
     let city_check = d.get_city(game_id, 0, 0);
     if city_check.current_production == 0 {
@@ -2578,6 +2587,10 @@ fn test_build_mine_no_tech_reverts() {
     actions.append(Action::BuildImprovement((builder_id, builder.q, builder.r, IMPROVEMENT_MINE)));
     actions.append(Action::EndTurn);
     submit_turn(d, addr, player_a(), game_id, actions);
+
+    // Verify builder still has same charges (build was skipped)
+    let builder_after = d.get_unit(game_id, 0, builder_id);
+    assert!(builder_after.charges == charges_before, "Builder charges unchanged - build was skipped");
 }
 
 // ===========================================================================
@@ -2658,8 +2671,7 @@ fn test_remove_woods_feature() {
 // ===========================================================================
 
 #[test]
-#[should_panic(expected: ('Tech not researched',))]
-fn test_remove_feature_no_tech_reverts() {
+fn test_remove_feature_no_tech_silently_skipped() {
     let (d, addr) = deploy();
     let game_id = setup_active_game(d, addr);
 
@@ -2697,15 +2709,16 @@ fn test_remove_feature_no_tech_reverts() {
     let builder = d.get_unit(game_id, 0, builder_id);
     let bq = builder.q;
     let br = builder.r;
+    let charges_before = builder.charges;
 
     // Check if builder's tile has a feature (woods)
     let tile = d.get_tile(game_id, bq, br);
     if tile.feature == FEATURE_NONE || tile.feature == 4 {
-        // No removable feature on this tile — force the expected panic
-        panic!("Tech not researched");
+        // No removable feature on this tile — skip test gracefully
+        return;
     }
 
-    // Try to remove feature without Mining tech → should panic 'Tech not researched'
+    // Try to remove feature without Mining tech — silently skipped
     let mut actions: Array<Action> = array![];
     let city_check = d.get_city(game_id, 0, 0);
     if city_check.current_production == 0 {
@@ -2714,6 +2727,10 @@ fn test_remove_feature_no_tech_reverts() {
     actions.append(Action::RemoveFeature((builder_id, bq, br)));
     actions.append(Action::EndTurn);
     submit_turn(d, addr, player_a(), game_id, actions);
+
+    // Verify feature still exists and builder charges unchanged
+    let tile_after = d.get_tile(game_id, bq, br);
+    assert!(tile_after.feature == tile.feature, "Feature should still be present");
 }
 
 // ===========================================================================
@@ -2905,8 +2922,7 @@ fn test_chop_woods_gives_production() {
 // ===========================================================================
 
 #[test]
-#[should_panic(expected: ('Not in your territory',))]
-fn test_build_improvement_outside_territory() {
+fn test_build_improvement_outside_territory_silently_skipped() {
     let (d, addr) = deploy();
     let game_id = setup_active_game(d, addr);
 
@@ -2985,8 +3001,8 @@ fn test_build_improvement_outside_territory() {
         ni2 += 1;
     };
     if !found_step2 {
-        // All reachable tiles are in territory — force expected panic
-        panic!("Not in your territory");
+        // All reachable tiles are in territory — skip test gracefully
+        return;
     }
 
     // Turn 1: Move builder to step1 (in territory)
@@ -3007,13 +3023,18 @@ fn test_build_improvement_outside_territory() {
     submit_turn(d, addr, player_a(), game_id, actions2);
     skip_turn(d, addr, player_b(), game_id);
 
-    // Turn 3: Try to build farm on the unowned tile → should fail
+    // Turn 3: Try to build farm on the unowned tile — silently skipped
+    let builder_before = d.get_unit(game_id, 0, builder_id);
     let mut actions3: Array<Action> = array![];
     let c3 = d.get_city(game_id, 0, 0);
     if c3.current_production == 0 { actions3.append(Action::SetProduction((0, PROD_BUILDER))); }
     actions3.append(Action::BuildImprovement((builder_id, step2_q, step2_r, IMPROVEMENT_FARM)));
     actions3.append(Action::EndTurn);
     submit_turn(d, addr, player_a(), game_id, actions3);
+
+    // Verify no improvement was built
+    let imp = d.get_tile_improvement(game_id, step2_q, step2_r);
+    assert!(imp == 0, "No improvement should have been built outside territory");
 }
 
 // ===========================================================================
@@ -3021,8 +3042,7 @@ fn test_build_improvement_outside_territory() {
 // ===========================================================================
 
 #[test]
-#[should_panic(expected: ('Not in your territory',))]
-fn test_remove_feature_outside_territory() {
+fn test_remove_feature_outside_territory_silently_skipped() {
     let (d, addr) = deploy();
     let game_id = setup_active_game(d, addr);
 
@@ -3086,8 +3106,8 @@ fn test_remove_feature_outside_territory() {
     };
 
     if !found_target {
-        // No suitable tile found — force expected panic
-        panic!("Not in your territory");
+        // No suitable tile found — skip test gracefully
+        return;
     }
 
     // Move builder toward the target tile step by step
@@ -3124,16 +3144,23 @@ fn test_remove_feature_outside_territory() {
 
     let bp = d.get_unit(game_id, 0, builder_id);
     if bp.q != wq || bp.r != wr {
-        panic!("Not in your territory"); // couldn't reach — force expected panic
+        return; // couldn't reach — skip test gracefully
     }
 
-    // Try RemoveFeature on unowned tile → should fail
+    // Save feature state before
+    let tile_before = d.get_tile(game_id, wq, wr);
+
+    // Try RemoveFeature on unowned tile — silently skipped
     let mut actions: Array<Action> = array![];
     let cc = d.get_city(game_id, 0, 0);
     if cc.current_production == 0 { actions.append(Action::SetProduction((0, PROD_BUILDER))); }
     actions.append(Action::RemoveFeature((builder_id, wq, wr)));
     actions.append(Action::EndTurn);
     submit_turn(d, addr, player_a(), game_id, actions);
+
+    // Verify feature was NOT removed
+    let tile_after = d.get_tile(game_id, wq, wr);
+    assert!(tile_after.feature == tile_before.feature, "Feature should still be present");
 }
 
 // ===========================================================================

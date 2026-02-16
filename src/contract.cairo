@@ -544,33 +544,31 @@ mod CairoCiv {
         // ---- MoveUnit ----
         fn act_move(ref self: ContractState, game_id: u64, player: u8, uid: u32, dq: u8, dr: u8) {
             let uc = self.player_unit_count.read((game_id, player));
-            assert(uid < uc, 'Invalid unit id');
+            if uid >= uc { return; }
             let mut unit = self.units.read((game_id, player, uid));
-            assert(unit.hp > 0, 'Unit is dead');
-            assert(unit.movement_remaining > 0, 'No movement');
-            assert(hex::in_bounds(dq, dr), 'Out of bounds');
+            if unit.hp == 0 { return; }
+            if unit.movement_remaining == 0 { return; }
+            if !hex::in_bounds(dq, dr) { return; }
 
             let dist = hex::hex_distance(unit.q, unit.r, dq, dr);
-            assert(dist > 0, 'Already there');
+            if dist == 0 { return; }
 
             let mover_is_combat = !constants::is_civilian(unit.unit_type);
 
             // --- Destination checks ---
             // Can't move onto a tile with an enemy combat unit (use AttackUnit instead)
-            assert(!Self::has_enemy_combat_at(@self, game_id, player, dq, dr),
-                'Enemy military blocking');
+            if Self::has_enemy_combat_at(@self, game_id, player, dq, dr) { return; }
             // Can't stack two friendly combat units on the same tile
             if mover_is_combat {
-                assert(!Self::has_friendly_combat_at(@self, game_id, player, dq, dr, uid),
-                    'Friendly military blocking');
+                if Self::has_friendly_combat_at(@self, game_id, player, dq, dr, uid) { return; }
             }
 
             if dist == 1 {
                 // Adjacent: simple single-step move
                 let dest_tile = self.tiles.read((game_id, dq, dr));
                 let cost = movement::tile_movement_cost(@dest_tile);
-                assert(cost > 0, 'Impassable');
-                assert(unit.movement_remaining >= cost, 'Insufficient MP');
+                if cost == 0 { return; }
+                if unit.movement_remaining < cost { return; }
                 unit.q = dq;
                 unit.r = dr;
                 unit.movement_remaining -= cost;
@@ -666,7 +664,7 @@ mod CairoCiv {
                     open = new_open;
                 };
 
-                assert(found, 'Cannot reach destination');
+                if !found { return; }
 
                 // Reconstruct path from destination back to start using parents
                 let vspan = visited.span();
@@ -729,16 +727,16 @@ mod CairoCiv {
         // attacker advances onto the tile (like Civ). City capture only via melee.
         fn act_attack(ref self: ContractState, game_id: u64, player: u8, uid: u32, tq: u8, tr: u8) {
             let uc = self.player_unit_count.read((game_id, player));
-            assert(uid < uc, 'Invalid unit id');
+            if uid >= uc { return; }
             let mut attacker = self.units.read((game_id, player, uid));
-            assert(attacker.hp > 0, 'Unit is dead');
-            assert(attacker.movement_remaining > 0, 'No movement');
+            if attacker.hp == 0 { return; }
+            if attacker.movement_remaining == 0 { return; }
             let atk_cs = constants::unit_combat_strength(attacker.unit_type);
-            assert(atk_cs > 0, 'Civilians cannot attack');
+            if atk_cs == 0 { return; }
 
             // Check adjacent
             let dist = hex::hex_distance(attacker.q, attacker.r, tq, tr);
-            assert(dist == 1, 'Not adjacent');
+            if dist != 1 { return; }
 
             // Look for enemy city at target first
             let np = self.game_num_players.read(game_id);
@@ -787,11 +785,11 @@ mod CairoCiv {
             };
 
             // Must have either a city or a combat unit to attack
-            assert(city_found || unit_found, 'No enemy target at tile');
+            if !city_found && !unit_found { return; }
             // Check at war with the target
             let war_target = if unit_found { enemy_player } else { city_owner };
             let diplo = self.diplomacy.read((game_id, player, war_target));
-            assert(diplo == DIPLO_WAR, 'Not at war');
+            if diplo != DIPLO_WAR { return; }
 
             // If there's a combat unit, fight it first (unit has priority as defender)
             if unit_found {
@@ -821,8 +819,7 @@ mod CairoCiv {
                     }
                 }
             } else {
-                // No combat unit — attack the city directly
-                assert(city_found, 'No enemy target at tile');
+                // No combat unit — attack the city directly (city_found guaranteed by check above)
                 let mut city = self.cities.read((game_id, city_owner, city_id));
                 let has_walls = city::has_building(city.buildings, BUILDING_WALLS);
                 let result = combat::resolve_city_melee(@attacker, @city, has_walls);
@@ -861,14 +858,14 @@ mod CairoCiv {
         // are NOT captured — they stay at 1 HP minimum (only melee can capture).
         fn act_ranged(ref self: ContractState, game_id: u64, player: u8, uid: u32, tq: u8, tr: u8) {
             let uc = self.player_unit_count.read((game_id, player));
-            assert(uid < uc, 'Invalid unit id');
+            if uid >= uc { return; }
             let unit = self.units.read((game_id, player, uid));
-            assert(unit.hp > 0, 'Unit is dead');
+            if unit.hp == 0 { return; }
             let rs = constants::unit_ranged_strength(unit.unit_type);
-            assert(rs > 0, 'Not a ranged unit');
+            if rs == 0 { return; }
             let range = constants::unit_range(unit.unit_type);
             let dist = hex::hex_distance(unit.q, unit.r, tq, tr);
-            assert(dist <= range, 'Out of range');
+            if dist > range { return; }
 
             let np = self.game_num_players.read(game_id);
 
@@ -916,9 +913,9 @@ mod CairoCiv {
                 cp += 1;
             };
 
-            assert(unit_found || city_found, 'No enemy target at tile');
+            if !unit_found && !city_found { return; }
             let war_target = if unit_found { eplayer } else { city_owner };
-            assert(self.diplomacy.read((game_id, player, war_target)) == DIPLO_WAR, 'Not at war');
+            if self.diplomacy.read((game_id, player, war_target)) != DIPLO_WAR { return; }
 
             if unit_found {
                 // Ranged attack on unit
@@ -951,10 +948,10 @@ mod CairoCiv {
         // ---- FoundCity ----
         fn act_found_city(ref self: ContractState, game_id: u64, player: u8, sid: u32, name: felt252) {
             let uc = self.player_unit_count.read((game_id, player));
-            assert(sid < uc, 'Invalid unit id');
+            if sid >= uc { return; }
             let mut settler = self.units.read((game_id, player, sid));
-            assert(settler.hp > 0, 'Unit is dead');
-            assert(settler.unit_type == UNIT_SETTLER, 'Not a settler');
+            if settler.hp == 0 { return; }
+            if settler.unit_type != UNIT_SETTLER { return; }
             let tile = self.tiles.read((game_id, settler.q, settler.r));
             // Gather existing city positions for distance check
             let mut existing: Array<(u8, u8)> = array![];
@@ -973,7 +970,7 @@ mod CairoCiv {
             let validation = city::validate_city_founding(settler.q, settler.r, @tile, existing.span());
             match validation {
                 Result::Ok(()) => {},
-                Result::Err(_) => { panic!("City founding failed"); },
+                Result::Err(_) => { return; },
             }
             // Create city
             let cid = self.player_city_count.read((game_id, player));
@@ -1009,24 +1006,24 @@ mod CairoCiv {
         // ---- SetProduction ----
         fn act_set_production(ref self: ContractState, game_id: u64, player: u8, cid: u32, item: u8) {
             let cc = self.player_city_count.read((game_id, player));
-            assert(cid < cc, 'Invalid city id');
+            if cid >= cc { return; }
             let mut c = self.cities.read((game_id, player, cid));
             // Validate item
             let cost = constants::production_cost(item);
-            assert(cost > 0, 'Invalid production item');
+            if cost == 0 { return; }
             let techs = self.player_completed_techs.read((game_id, player));
             // If unit, check required tech
             if item >= 1 && item <= 63 {
                 let unit_type = item - 1;
                 let req = constants::unit_required_tech(unit_type);
                 if req != 0 {
-                    assert(tech::is_researched(req, techs), 'Tech not researched');
+                    if !tech::is_researched(req, techs) { return; }
                 }
             }
             // If building, check can_build (includes tech + already-built checks)
             if item >= 64 && item <= 127 {
                 let bbit = item - 64;
-                assert(city::can_build(@c, bbit, techs), 'Cannot build this');
+                if !city::can_build(@c, bbit, techs) { return; }
             }
             // Reset stockpile when switching production target
             if c.current_production != item {
@@ -1038,40 +1035,40 @@ mod CairoCiv {
 
         // ---- SetResearch ----
         fn act_set_research(ref self: ContractState, game_id: u64, player: u8, tid: u8) {
-            assert(tid >= 1 && tid <= 18, 'Invalid tech id');
+            if tid < 1 || tid > 18 { return; }
             let techs = self.player_completed_techs.read((game_id, player));
-            assert(!tech::is_researched(tid, techs), 'Already researched');
-            assert(tech::can_research(tid, techs), 'Prerequisites not met');
+            if tech::is_researched(tid, techs) { return; }
+            if !tech::can_research(tid, techs) { return; }
             self.player_current_research.write((game_id, player), tid);
         }
 
         // ---- BuildImprovement ----
         fn act_build_improvement(ref self: ContractState, game_id: u64, player: u8, bid: u32, q: u8, r: u8, imp: u8) {
             let uc = self.player_unit_count.read((game_id, player));
-            assert(bid < uc, 'Invalid unit id');
+            if bid >= uc { return; }
             let mut builder = self.units.read((game_id, player, bid));
-            assert(builder.hp > 0, 'Unit is dead');
-            assert(builder.unit_type == UNIT_BUILDER, 'Not a builder');
-            assert(builder.charges > 0, 'No charges');
-            assert(builder.movement_remaining > 0, 'No movement');
-            assert(builder.q == q && builder.r == r, 'Not on tile');
+            if builder.hp == 0 { return; }
+            if builder.unit_type != UNIT_BUILDER { return; }
+            if builder.charges == 0 { return; }
+            if builder.movement_remaining == 0 { return; }
+            if builder.q != q || builder.r != r { return; }
             // Tile must be in one of the player's city territories
             let packed_own = self.tile_ownership.read((game_id, q, r));
             let owner_city: u32 = (packed_own & 0xFFFFFFFF).try_into().unwrap();
             let owner_player: u8 = ((packed_own / 0x100000000) & 0xFF).try_into().unwrap();
-            assert(city::is_friendly_territory(player, owner_player, owner_city), 'Not in your territory');
+            if !city::is_friendly_territory(player, owner_player, owner_city) { return; }
             // Check no existing improvement
             let existing = self.tile_improvement.read((game_id, q, r));
-            assert(existing == IMPROVEMENT_NONE, 'Already improved');
+            if existing != IMPROVEMENT_NONE { return; }
             // Check tech requirement for this improvement
             let req_tech = constants::improvement_required_tech(imp);
             if req_tech > 0 {
                 let techs = self.player_completed_techs.read((game_id, player));
-                assert(tech::is_researched(req_tech, techs), 'Tech not researched');
+                if !tech::is_researched(req_tech, techs) { return; }
             }
             // Validate improvement for terrain/feature
             let tile = self.tiles.read((game_id, q, r));
-            assert(city::is_valid_improvement_for_tile(imp, tile.terrain, tile.feature), 'Invalid for terrain');
+            if !city::is_valid_improvement_for_tile(imp, tile.terrain, tile.feature) { return; }
             // Build
             self.tile_improvement.write((game_id, q, r), imp);
             builder.charges -= 1;
@@ -1082,19 +1079,19 @@ mod CairoCiv {
         // ---- RemoveImprovement ----
         fn act_remove_improvement(ref self: ContractState, game_id: u64, player: u8, bid: u32, q: u8, r: u8) {
             let uc = self.player_unit_count.read((game_id, player));
-            assert(bid < uc, 'Invalid unit id');
+            if bid >= uc { return; }
             let mut builder = self.units.read((game_id, player, bid));
-            assert(builder.hp > 0, 'Unit is dead');
-            assert(builder.unit_type == UNIT_BUILDER, 'Not a builder');
-            assert(builder.movement_remaining > 0, 'No movement');
-            assert(builder.q == q && builder.r == r, 'Not on tile');
+            if builder.hp == 0 { return; }
+            if builder.unit_type != UNIT_BUILDER { return; }
+            if builder.movement_remaining == 0 { return; }
+            if builder.q != q || builder.r != r { return; }
             // Tile must be in one of the player's city territories
             let packed_own = self.tile_ownership.read((game_id, q, r));
             let owner_city: u32 = (packed_own & 0xFFFFFFFF).try_into().unwrap();
             let owner_player: u8 = ((packed_own / 0x100000000) & 0xFF).try_into().unwrap();
-            assert(city::is_friendly_territory(player, owner_player, owner_city), 'Not in your territory');
+            if !city::is_friendly_territory(player, owner_player, owner_city) { return; }
             let existing = self.tile_improvement.read((game_id, q, r));
-            assert(existing != IMPROVEMENT_NONE, 'No improvement');
+            if existing == IMPROVEMENT_NONE { return; }
             self.tile_improvement.write((game_id, q, r), IMPROVEMENT_NONE);
             builder.movement_remaining = 0;
             self.units.write((game_id, player, bid), builder);
@@ -1105,28 +1102,28 @@ mod CairoCiv {
         // Grants one-time yield bonus to the owning city.
         fn act_remove_feature(ref self: ContractState, game_id: u64, player: u8, bid: u32, q: u8, r: u8) {
             let uc = self.player_unit_count.read((game_id, player));
-            assert(bid < uc, 'Invalid unit id');
+            if bid >= uc { return; }
             let mut builder = self.units.read((game_id, player, bid));
-            assert(builder.hp > 0, 'Unit is dead');
-            assert(builder.unit_type == UNIT_BUILDER, 'Not a builder');
-            assert(builder.charges > 0, 'No charges');
-            assert(builder.movement_remaining > 0, 'No movement');
-            assert(builder.q == q && builder.r == r, 'Not on tile');
+            if builder.hp == 0 { return; }
+            if builder.unit_type != UNIT_BUILDER { return; }
+            if builder.charges == 0 { return; }
+            if builder.movement_remaining == 0 { return; }
+            if builder.q != q || builder.r != r { return; }
             // Tile must be in one of the player's city territories
             let packed_own = self.tile_ownership.read((game_id, q, r));
             let owner_city: u32 = (packed_own & 0xFFFFFFFF).try_into().unwrap();
             let owner_player: u8 = ((packed_own / 0x100000000) & 0xFF).try_into().unwrap();
-            assert(city::is_friendly_territory(player, owner_player, owner_city), 'Not in your territory');
+            if !city::is_friendly_territory(player, owner_player, owner_city) { return; }
             // Check tile has a removable feature
             let mut tile = self.tiles.read((game_id, q, r));
             let removed_feature = tile.feature;
-            assert(removed_feature != 0, 'No feature to remove');
+            if removed_feature == 0 { return; }
             // Check tech requirement for removing this feature
             let req_tech = constants::feature_remove_tech(removed_feature);
-            assert(req_tech != 255, 'Cannot remove this feature');
+            if req_tech == 255 { return; }
             if req_tech > 0 {
                 let techs = self.player_completed_techs.read((game_id, player));
-                assert(tech::is_researched(req_tech, techs), 'Tech not researched');
+                if !tech::is_researched(req_tech, techs) { return; }
             }
             // Remove the feature
             tile.feature = 0;
@@ -1147,10 +1144,10 @@ mod CairoCiv {
         // ---- FortifyUnit ----
         fn act_fortify(ref self: ContractState, game_id: u64, player: u8, uid: u32) {
             let uc = self.player_unit_count.read((game_id, player));
-            assert(uid < uc, 'Invalid unit id');
+            if uid >= uc { return; }
             let mut unit = self.units.read((game_id, player, uid));
-            assert(unit.hp > 0, 'Unit is dead');
-            assert(!constants::is_civilian(unit.unit_type), 'Civilians cant fortify');
+            if unit.hp == 0 { return; }
+            if constants::is_civilian(unit.unit_type) { return; }
             unit.fortify_turns = 1;
             unit.movement_remaining = 0;
             self.units.write((game_id, player, uid), unit);
@@ -1158,9 +1155,9 @@ mod CairoCiv {
 
         // ---- DeclareWar ----
         fn act_declare_war(ref self: ContractState, game_id: u64, player: u8, target: u8) {
-            assert(target != player, 'Cannot war yourself');
+            if target == player { return; }
             let np = self.game_num_players.read(game_id);
-            assert(target < np, 'Invalid player');
+            if target >= np { return; }
             self.diplomacy.write((game_id, player, target), DIPLO_WAR);
             self.diplomacy.write((game_id, target, player), DIPLO_WAR);
         }
@@ -1168,24 +1165,24 @@ mod CairoCiv {
         // ---- PurchaseWithGold ----
         fn act_purchase(ref self: ContractState, game_id: u64, player: u8, cid: u32, item: u8) {
             let cc = self.player_city_count.read((game_id, player));
-            assert(cid < cc, 'Invalid city id');
+            if cid >= cc { return; }
             let gold = self.player_treasury.read((game_id, player));
             let cost = constants::purchase_cost(item);
-            assert(cost > 0, 'Invalid item');
-            assert(gold >= cost, 'Not enough gold');
+            if cost == 0 { return; }
+            if gold < cost { return; }
             let techs = self.player_completed_techs.read((game_id, player));
             // Tech checks
             if item >= 1 && item <= 63 {
                 let ut = item - 1;
                 let req = constants::unit_required_tech(ut);
                 if req != 0 {
-                    assert(tech::is_researched(req, techs), 'Tech not researched');
+                    if !tech::is_researched(req, techs) { return; }
                 }
             }
             if item >= 64 && item <= 127 {
                 let bbit = item - 64;
                 let c = self.cities.read((game_id, player, cid));
-                assert(city::can_build(@c, bbit, techs), 'Cannot build this');
+                if !city::can_build(@c, bbit, techs) { return; }
             }
             self.player_treasury.write((game_id, player), gold - cost);
             // Create unit or building
@@ -1210,16 +1207,16 @@ mod CairoCiv {
         // ---- UpgradeUnit ----
         fn act_upgrade(ref self: ContractState, game_id: u64, player: u8, uid: u32) {
             let uc = self.player_unit_count.read((game_id, player));
-            assert(uid < uc, 'Invalid unit id');
+            if uid >= uc { return; }
             let mut unit = self.units.read((game_id, player, uid));
-            assert(unit.hp > 0, 'Unit is dead');
+            if unit.hp == 0 { return; }
             let (to_type, req_tech) = constants::unit_upgrade_path(unit.unit_type);
-            assert(to_type > 0, 'No upgrade path');
+            if to_type == 0 { return; }
             let techs = self.player_completed_techs.read((game_id, player));
-            assert(tech::is_researched(req_tech, techs), 'Tech not researched');
+            if !tech::is_researched(req_tech, techs) { return; }
             let cost = constants::unit_upgrade_cost(unit.unit_type);
             let gold = self.player_treasury.read((game_id, player));
-            assert(gold >= cost, 'Not enough gold');
+            if gold < cost { return; }
             self.player_treasury.write((game_id, player), gold - cost);
             unit.unit_type = to_type;
             self.units.write((game_id, player, uid), unit);
@@ -1228,29 +1225,34 @@ mod CairoCiv {
         // ---- AssignCitizen: lock a citizen to work a specific tile ----
         fn act_assign_citizen(ref self: ContractState, game_id: u64, player: u8, cid: u32, tq: u8, tr: u8) {
             let cc = self.player_city_count.read((game_id, player));
-            assert(cid < cc, 'Invalid city id');
+            if cid >= cc { return; }
             let c = self.cities.read((game_id, player, cid));
             // Tile must be in city territory
             let packed_own = self.tile_ownership.read((game_id, tq, tr));
             let owner_city: u32 = (packed_own & 0xFFFFFFFF).try_into().unwrap();
             let owner_player: u8 = ((packed_own / 0x100000000) & 0xFF).try_into().unwrap();
-            assert(owner_city == cid + 1 && owner_player == player, 'Tile not in city territory');
+            if owner_city != cid + 1 || owner_player != player { return; }
             // Can't lock city center (it's always worked for free)
-            assert(tq != c.q || tr != c.r, 'Cannot lock city center');
+            if tq == c.q && tr == c.r { return; }
             // Tile must be workable (not mountain/ocean)
             let td = self.tiles.read((game_id, tq, tr));
-            assert(td.terrain != 0 && td.terrain != 12, 'Tile not workable');
+            if td.terrain == 0 || td.terrain == 12 { return; }
             // Can't exceed population count (center doesn't use a slot)
             let mut count = self.city_locked_count.read((game_id, player, cid));
-            assert(count < c.population, 'All citizens assigned');
+            if count >= c.population { return; }
             // Check not already locked
             let packed_new: u16 = tq.into() | (Into::<u8, u16>::into(tr) * 0x100);
+            let mut already_locked = false;
             let mut si: u8 = 0;
             while si < count {
                 let locked = self.city_locked_tile.read((game_id, player, cid, si));
-                assert(locked != packed_new, 'Tile already assigned');
+                if locked == packed_new {
+                    already_locked = true;
+                    break;
+                }
                 si += 1;
             };
+            if already_locked { return; }
             // Add to locked list
             self.city_locked_tile.write((game_id, player, cid, count), packed_new);
             self.city_locked_count.write((game_id, player, cid), count + 1);
@@ -1259,8 +1261,9 @@ mod CairoCiv {
         // ---- UnassignCitizen: remove lock from a tile ----
         fn act_unassign_citizen(ref self: ContractState, game_id: u64, player: u8, cid: u32, tq: u8, tr: u8) {
             let cc = self.player_city_count.read((game_id, player));
-            assert(cid < cc, 'Invalid city id');
+            if cid >= cc { return; }
             let count = self.city_locked_count.read((game_id, player, cid));
+            if count == 0 { return; }
             let target: u16 = tq.into() | (Into::<u8, u16>::into(tr) * 0x100);
             // Find the tile in the locked list
             let mut found_slot: u8 = 255;
@@ -1273,7 +1276,7 @@ mod CairoCiv {
                 }
                 si += 1;
             };
-            assert(found_slot != 255, 'Tile not assigned');
+            if found_slot == 255 { return; }
             // Swap with last and decrement count
             let last = count - 1;
             if found_slot != last {
