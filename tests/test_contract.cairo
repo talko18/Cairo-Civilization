@@ -144,15 +144,16 @@ fn test_creator_cant_join_own_game() {
 // 2.2 Turn Submission — Access Control (I9–I13)
 // ===========================================================================
 
-// I9: Player B submitting on Player A's turn reverts
+// I9: Player submitting twice in the same turn reverts
 #[test]
-#[should_panic]
-fn test_wrong_player_reverts() {
+#[should_panic(expected: 'Already submitted')]
+fn test_double_submit_reverts() {
     let (d, addr) = deploy();
     let game_id = setup_active_game(d, addr);
-    // Player A goes first (player 0), so player B submitting should fail
-    start_cheat_caller_address(addr, player_b());
-    d.submit_turn(game_id, array![Action::EndTurn]);
+    start_cheat_caller_address(addr, player_a());
+    d.submit_turn(game_id, array![]);
+    // Second submission should panic
+    d.submit_turn(game_id, array![]);
     stop_cheat_caller_address(addr);
 }
 
@@ -182,7 +183,9 @@ fn test_turn_increments() {
     let game_id = setup_active_game(d, addr);
     let t0 = d.get_current_turn(game_id);
     submit_empty_turn(d, addr, player_a(), game_id);
-    assert!(d.get_current_turn(game_id) == t0 + 1);
+    assert!(d.get_current_turn(game_id) == t0, "Turn unchanged until all submit");
+    submit_empty_turn(d, addr, player_b(), game_id);
+    assert!(d.get_current_turn(game_id) == t0 + 1, "Turn increments after all submit");
 }
 
 // I13: current_player flips after each turn
@@ -669,7 +672,7 @@ fn test_two_combat_units_same_tile_reverts() {
 
     // Found city and start producing warrior
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::FoundCity((0, 'Stack')),
         Action::SetResearch(1),
         Action::SetProduction((0, PROD_WARRIOR)),
@@ -677,7 +680,7 @@ fn test_two_combat_units_same_tile_reverts() {
     ]);
     stop_cheat_caller_address(addr);
     start_cheat_caller_address(addr, player_b());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::FoundCity((0, 'B')),
         Action::SetResearch(1),
         Action::SetProduction((0, PROD_BUILDER)),
@@ -689,13 +692,13 @@ fn test_two_combat_units_same_tile_reverts() {
     let nq = warrior.q + 1;
     let nr = warrior.r;
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::MoveUnit((1, nq, nr)),
         Action::EndTurn,
     ]);
     stop_cheat_caller_address(addr);
     start_cheat_caller_address(addr, player_b());
-    d.submit_actions(game_id, array![Action::EndTurn]);
+    d.submit_turn(game_id, array![]);
     stop_cheat_caller_address(addr);
 
     // Skip rounds until warrior is produced (warrior costs 40 prod)
@@ -716,8 +719,7 @@ fn test_two_combat_units_same_tile_reverts() {
                 tid += 1;
             };
         }
-        aa.append(Action::EndTurn);
-        d.submit_actions(game_id, aa);
+        d.submit_turn(game_id, aa);
         stop_cheat_caller_address(addr);
         // Player B
         start_cheat_caller_address(addr, player_b());
@@ -734,8 +736,7 @@ fn test_two_combat_units_same_tile_reverts() {
                 tid += 1;
             };
         }
-        ab.append(Action::EndTurn);
-        d.submit_actions(game_id, ab);
+        d.submit_turn(game_id, ab);
         stop_cheat_caller_address(addr);
         i += 1;
     };
@@ -751,7 +752,7 @@ fn test_two_combat_units_same_tile_reverts() {
     // where the new warrior (uid 2) is. Move should be silently skipped.
     let warrior_before = d.get_unit(game_id, 0, 1);
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::MoveUnit((1, city.q, city.r)),
         Action::EndTurn,
     ]);
@@ -777,18 +778,18 @@ fn test_combat_onto_friendly_civilian_ok() {
     // Move warrior 1 tile away
     let nq = warrior.q + 1;
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::MoveUnit((1, nq, warrior.r)),
         Action::EndTurn,
     ]);
     stop_cheat_caller_address(addr);
     start_cheat_caller_address(addr, player_b());
-    d.submit_actions(game_id, array![Action::EndTurn]);
+    d.submit_turn(game_id, array![]);
     stop_cheat_caller_address(addr);
 
     // Move warrior back onto settler's tile — should succeed
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::MoveUnit((1, settler.q, settler.r)),
         Action::EndTurn,
     ]);
@@ -815,7 +816,7 @@ fn test_capture_enemy_civilian() {
 
     // Turn 1: Player A declares war, ends turn. Player B moves settler away from warrior.
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::DeclareWar(1),
         Action::EndTurn,
     ]);
@@ -842,7 +843,7 @@ fn test_capture_enemy_civilian() {
     assert!(found_dest, "Must find passable neighbor for settler");
 
     start_cheat_caller_address(addr, player_b());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::MoveUnit((0, settler_dest_q, settler_dest_r)),
         Action::EndTurn,
     ]);
@@ -890,14 +891,14 @@ fn test_capture_enemy_civilian() {
 
         // Player A moves warrior
         start_cheat_caller_address(addr, player_a());
-        d.submit_actions(game_id, array![
+        d.submit_turn(game_id, array![
             Action::MoveUnit((1, best_nq, best_nr)),
             Action::EndTurn,
         ]);
         stop_cheat_caller_address(addr);
         // Player B: just end turn (no city = no research needed)
         start_cheat_caller_address(addr, player_b());
-        d.submit_actions(game_id, array![Action::EndTurn]);
+        d.submit_turn(game_id, array![]);
         stop_cheat_caller_address(addr);
         turn += 1;
     };
@@ -944,7 +945,7 @@ fn test_production_stacking_allowed() {
 
     // Found city (warrior uid 1 stays at city tile)
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::FoundCity((0, 'Prod')),
         Action::SetResearch(1),
         Action::SetProduction((0, PROD_WARRIOR)),
@@ -952,7 +953,7 @@ fn test_production_stacking_allowed() {
     ]);
     stop_cheat_caller_address(addr);
     start_cheat_caller_address(addr, player_b());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::FoundCity((0, 'ProdB')),
         Action::SetResearch(1),
         Action::SetProduction((0, PROD_BUILDER)),
@@ -978,8 +979,7 @@ fn test_production_stacking_allowed() {
                 tid += 1;
             };
         }
-        aa.append(Action::EndTurn);
-        d.submit_actions(game_id, aa);
+        d.submit_turn(game_id, aa);
         stop_cheat_caller_address(addr);
         start_cheat_caller_address(addr, player_b());
         let mut ab: Array<Action> = array![Action::SetProduction((0, PROD_BUILDER))];
@@ -995,8 +995,7 @@ fn test_production_stacking_allowed() {
                 tid += 1;
             };
         }
-        ab.append(Action::EndTurn);
-        d.submit_actions(game_id, ab);
+        d.submit_turn(game_id, ab);
         stop_cheat_caller_address(addr);
         i += 1;
     };
@@ -1238,8 +1237,12 @@ fn test_eot_city_yields() {
         Action::EndTurn,
     ]);
     stop_cheat_caller_address(addr);
+    // Player B must also submit to trigger end-of-turn
+    start_cheat_caller_address(addr, player_b());
+    d.submit_turn(game_id, array![]);
+    stop_cheat_caller_address(addr);
     let city = d.get_city(game_id, 0, 0);
-    // After turn end, stockpiles should have increased
+    // After round resolves, stockpiles should have increased
     assert!(city.food_stockpile > 0 || city.production_stockpile > 0);
 }
 
@@ -1251,7 +1254,7 @@ fn test_eot_population_growth() {
 
     // Found city, produce builders (no maintenance cost)
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::FoundCity((0, 'GrowCity')),
         Action::SetResearch(1),
         Action::SetProduction((0, PROD_BUILDER)),
@@ -1261,7 +1264,7 @@ fn test_eot_population_growth() {
 
     // Player B skips
     start_cheat_caller_address(addr, player_b());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::FoundCity((0, 'CityB')),
         Action::SetResearch(1),
         Action::SetProduction((0, PROD_BUILDER)),
@@ -1299,8 +1302,7 @@ fn test_eot_population_growth() {
                 tid += 1;
             };
         }
-        actions_a.append(Action::EndTurn);
-        d.submit_actions(game_id, actions_a);
+        d.submit_turn(game_id, actions_a);
         stop_cheat_caller_address(addr);
 
         // Player B turn: same pattern
@@ -1319,8 +1321,7 @@ fn test_eot_population_growth() {
                 tid += 1;
             };
         }
-        actions_b.append(Action::EndTurn);
-        d.submit_actions(game_id, actions_b);
+        d.submit_turn(game_id, actions_b);
         stop_cheat_caller_address(addr);
 
         let city = d.get_city(game_id, 0, 0);
@@ -1559,19 +1560,21 @@ fn test_get_science_per_turn_computed() {
 // A) Zero predicted actions — pure unpredicted via submit_actions
 // ---------------------------------------------------------------------------
 
-// I61: submit_actions with only EndTurn ends the turn
+// I61: submit_turn marks player as submitted, but turn only advances when all submit
 #[test]
-fn test_batch_zero_predicted_end_turn_only() {
+fn test_batch_submit_turn_marks_submitted() {
     let (d, addr) = deploy();
     let game_id = setup_active_game(d, addr);
     let turn_before = d.get_current_turn(game_id);
 
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![Action::EndTurn]);
+    d.submit_turn(game_id, array![]);
     stop_cheat_caller_address(addr);
 
-    assert!(d.get_current_turn(game_id) == turn_before + 1);
-    assert!(d.get_current_player(game_id) == 1);
+    assert!(d.get_current_turn(game_id) == turn_before, "Turn unchanged until all submit");
+    assert!(d.get_current_player(game_id) == 1, "Next unsubmitted player");
+    assert!(d.get_player_submitted(game_id, 0) == true, "Player A submitted");
+    assert!(d.get_player_submitted(game_id, 1) == false, "Player B not submitted");
 }
 
 // I62: submit_actions with only FoundCity — no turn end
@@ -1583,7 +1586,6 @@ fn test_batch_zero_predicted_found_city() {
 
     start_cheat_caller_address(addr, player_a());
     d.submit_actions(game_id, array![Action::FoundCity((0, 'Solo'))]);
-    stop_cheat_caller_address(addr);
 
     // Turn should NOT advance
     assert!(d.get_current_turn(game_id) == turn_before);
@@ -1603,7 +1605,6 @@ fn test_batch_zero_predicted_move_unit() {
 
     start_cheat_caller_address(addr, player_a());
     d.submit_actions(game_id, array![Action::MoveUnit((1, dest_q, dest_r))]);
-    stop_cheat_caller_address(addr);
 
     let moved = d.get_unit(game_id, 0, 1);
     assert!(moved.q == dest_q);
@@ -1618,7 +1619,7 @@ fn test_batch_zero_predicted_found_city_then_end() {
     let game_id = setup_active_game(d, addr);
 
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::FoundCity((0, 'TwoUnpred')),
         Action::SetResearch(1),
         Action::SetProduction((0, PROD_WARRIOR)),
@@ -1643,7 +1644,6 @@ fn test_batch_one_predicted_research_only() {
 
     start_cheat_caller_address(addr, player_a());
     d.submit_actions(game_id, array![Action::SetResearch(1)]);
-    stop_cheat_caller_address(addr);
 
     assert!(d.get_current_turn(game_id) == turn_before);
     assert!(d.get_current_player(game_id) == 0);
@@ -1657,7 +1657,7 @@ fn test_batch_one_predicted_research_then_end() {
     let game_id = setup_active_game(d, addr);
 
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::SetResearch(1),
         Action::EndTurn,
     ]);
@@ -1697,11 +1697,10 @@ fn test_batch_one_predicted_production_then_end() {
     // Found city first
     start_cheat_caller_address(addr, player_a());
     d.submit_actions(game_id, array![Action::FoundCity((0, 'Prod'))]);
-    stop_cheat_caller_address(addr);
 
     // Now batch: SetResearch + SetProduction + EndTurn
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::SetResearch(1),
         Action::SetProduction((0, PROD_WARRIOR)),
         Action::EndTurn,
@@ -1720,7 +1719,7 @@ fn test_batch_one_predicted_skip_then_end() {
     let game_id = setup_active_game(d, addr);
 
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::SkipUnit(0),
         Action::EndTurn,
     ]);
@@ -1737,7 +1736,7 @@ fn test_batch_one_predicted_declare_war_then_end() {
     let game_id = setup_active_game(d, addr);
 
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::DeclareWar(1),
         Action::EndTurn,
     ]);
@@ -1760,10 +1759,9 @@ fn test_batch_few_predicted_research_prod_end() {
     // Found city first
     start_cheat_caller_address(addr, player_a());
     d.submit_actions(game_id, array![Action::FoundCity((0, 'Few'))]);
-    stop_cheat_caller_address(addr);
 
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::SetResearch(1),               // predicted
         Action::SetProduction((0, PROD_WARRIOR)), // predicted
         Action::EndTurn,                       // unpredicted
@@ -1830,7 +1828,7 @@ fn test_batch_few_predicted_war_research_end() {
     let game_id = setup_active_game(d, addr);
 
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::DeclareWar(1),   // predicted
         Action::SetResearch(1),  // predicted
         Action::EndTurn,         // unpredicted
@@ -1853,7 +1851,7 @@ fn test_batch_many_predicted_full_turn() {
     let game_id = setup_active_game(d, addr);
 
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::FoundCity((0, 'ManyP')),          // unpredicted
         Action::SetResearch(1),                    // predicted
         Action::SetProduction((0, PROD_MONUMENT)), // predicted
@@ -1912,7 +1910,7 @@ fn test_batch_order_last_research_wins() {
     let game_id = setup_active_game(d, addr);
 
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::SetResearch(1),  // Mining
         Action::SetResearch(2),  // Pottery — should overwrite
         Action::EndTurn,
@@ -1929,7 +1927,7 @@ fn test_batch_order_last_production_wins() {
     let game_id = setup_active_game(d, addr);
 
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::FoundCity((0, 'Ord')),
         Action::SetResearch(1),
         Action::SetProduction((0, PROD_WARRIOR)),
@@ -1949,7 +1947,7 @@ fn test_batch_order_found_then_produce() {
     let game_id = setup_active_game(d, addr);
 
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::FoundCity((0, 'First')),
         Action::SetResearch(1),
         Action::SetProduction((0, PROD_SETTLER)),
@@ -1975,7 +1973,6 @@ fn test_batch_multi_call_research_found_end() {
     // First mid-turn batch: just set research
     start_cheat_caller_address(addr, player_a());
     d.submit_actions(game_id, array![Action::SetResearch(1)]);
-    stop_cheat_caller_address(addr);
 
     assert!(d.get_current_research(game_id, 0) == 1);
     assert!(d.get_current_player(game_id) == 0); // still our turn
@@ -1983,7 +1980,6 @@ fn test_batch_multi_call_research_found_end() {
     // Second mid-turn batch: found city
     start_cheat_caller_address(addr, player_a());
     d.submit_actions(game_id, array![Action::FoundCity((0, 'Multi'))]);
-    stop_cheat_caller_address(addr);
 
     assert!(d.get_city_count(game_id, 0) == 1);
     assert!(d.get_current_player(game_id) == 0); // still our turn
@@ -2008,12 +2004,10 @@ fn test_batch_multi_call_three_then_end() {
     // Batch 1: set research
     start_cheat_caller_address(addr, player_a());
     d.submit_actions(game_id, array![Action::SetResearch(2)]); // Pottery
-    stop_cheat_caller_address(addr);
 
     // Batch 2: fortify warrior
     start_cheat_caller_address(addr, player_a());
     d.submit_actions(game_id, array![Action::FortifyUnit(1)]);
-    stop_cheat_caller_address(addr);
 
     // Batch 3: found city + set production
     start_cheat_caller_address(addr, player_a());
@@ -2035,7 +2029,7 @@ fn test_batch_multi_call_three_then_end() {
 
     // End turn
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![Action::EndTurn]);
+    d.submit_turn(game_id, array![]);
     stop_cheat_caller_address(addr);
 
     assert!(d.get_current_player(game_id) == 1);
@@ -2050,7 +2044,6 @@ fn test_batch_multi_call_actions_then_turn_with_bundle() {
     // Mid-turn: found city
     start_cheat_caller_address(addr, player_a());
     d.submit_actions(game_id, array![Action::FoundCity((0, 'Mix'))]);
-    stop_cheat_caller_address(addr);
 
     // End turn via submit_turn with bundled predicted actions
     start_cheat_caller_address(addr, player_a());
@@ -2103,7 +2096,7 @@ fn test_batch_via_submit_actions_identical() {
     let game_id = setup_active_game(d, addr);
 
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::FoundCity((0, 'ActB')),
         Action::SetResearch(1),
         Action::SetProduction((0, PROD_WARRIOR)),
@@ -2133,7 +2126,7 @@ fn test_batch_two_player_alternation() {
 
     // Player A: research + end turn
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::SetResearch(1),
         Action::EndTurn,
     ]);
@@ -2144,7 +2137,7 @@ fn test_batch_two_player_alternation() {
 
     // Player B: research + found city + production + end turn
     start_cheat_caller_address(addr, player_b());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::SetResearch(2),
         Action::FoundCity((0, 'BCity')),
         Action::SetProduction((0, PROD_WARRIOR)),
@@ -2165,7 +2158,7 @@ fn test_batch_multi_turn_both_players() {
 
     // Turn 1: A founds city + sets research
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::FoundCity((0, 'A1')),
         Action::SetResearch(1),
         Action::SetProduction((0, PROD_MONUMENT)),
@@ -2175,7 +2168,7 @@ fn test_batch_multi_turn_both_players() {
 
     // Turn 1: B founds city + sets research
     start_cheat_caller_address(addr, player_b());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::FoundCity((0, 'B1')),
         Action::SetResearch(2),
         Action::SetProduction((0, PROD_WARRIOR)),
@@ -2185,7 +2178,7 @@ fn test_batch_multi_turn_both_players() {
 
     // Turn 2: A changes research
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::SetResearch(2), // switch to Pottery
         Action::EndTurn,
     ]);
@@ -2206,17 +2199,17 @@ fn test_batch_multi_turn_both_players() {
 // I) Edge cases and error handling
 // ---------------------------------------------------------------------------
 
-// I87: submit_actions by wrong player reverts
+// I87: submit_actions after already submitted reverts
 #[test]
-#[should_panic]
-fn test_batch_wrong_player_reverts() {
+#[should_panic(expected: 'Already submitted')]
+fn test_batch_already_submitted_reverts() {
     let (d, addr) = deploy();
     let game_id = setup_active_game(d, addr);
 
-    // Player B tries to submit during Player A's turn
-    start_cheat_caller_address(addr, player_b());
+    // Player A submits turn, then tries submit_actions
+    start_cheat_caller_address(addr, player_a());
+    d.submit_turn(game_id, array![]);
     d.submit_actions(game_id, array![Action::SetResearch(1)]);
-    stop_cheat_caller_address(addr);
 }
 
 // I88: submit_actions on non-active game reverts
@@ -2228,7 +2221,6 @@ fn test_batch_not_active_game_reverts() {
     start_cheat_caller_address(addr, player_a());
     let game_id = d.create_game(2);
     d.submit_actions(game_id, array![Action::SetResearch(1)]);
-    stop_cheat_caller_address(addr);
 }
 
 // I89: submit_actions with invalid action in batch — invalid action silently skipped, valid ones apply
@@ -2239,7 +2231,7 @@ fn test_batch_invalid_action_skipped() {
 
     // SetResearch(99) is invalid — silently skipped, SetResearch(1) applies
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::SetResearch(1),   // valid — applied
         Action::SetResearch(99),  // INVALID — silently skipped
         Action::EndTurn,
@@ -2258,7 +2250,6 @@ fn test_batch_revert_preserves_state() {
     // Set research successfully first
     start_cheat_caller_address(addr, player_a());
     d.submit_actions(game_id, array![Action::SetResearch(1)]);
-    stop_cheat_caller_address(addr);
 
     assert!(d.get_current_research(game_id, 0) == 1);
 
@@ -2271,7 +2262,6 @@ fn test_batch_revert_preserves_state() {
     // state even after multiple calls
     start_cheat_caller_address(addr, player_a());
     d.submit_actions(game_id, array![Action::SetResearch(2)]); // switch to Pottery
-    stop_cheat_caller_address(addr);
 
     assert!(d.get_current_research(game_id, 0) == 2); // successfully changed
     assert!(d.get_current_player(game_id) == 0); // still our turn
@@ -2313,7 +2303,7 @@ fn test_batch_movement_reset_on_end_turn() {
 
     // Move warrior, then end turn in one batch
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::MoveUnit((1, dest_q, dest_r)),
         Action::EndTurn,
     ]);
@@ -2351,7 +2341,6 @@ fn test_end_turn_no_research_reverts() {
     // Found city mid-turn (no EndTurn)
     start_cheat_caller_address(addr, player_a());
     d.submit_actions(game_id, array![Action::FoundCity((0, 'NoRes'))]);
-    stop_cheat_caller_address(addr);
 
     // End turn without setting research — must revert
     start_cheat_caller_address(addr, player_a());
@@ -2410,7 +2399,7 @@ fn test_end_turn_research_set_earlier_batch() {
 
     // Batch 2: set production + end turn
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::SetProduction((0, PROD_WARRIOR)),
         Action::EndTurn,
     ]);
@@ -2456,7 +2445,7 @@ fn test_submit_actions_end_turn_no_research() {
     let game_id = setup_active_game(d, addr);
 
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::FoundCity((0, 'ActNoR')),
         Action::SetProduction((0, PROD_WARRIOR)),
         Action::EndTurn,
@@ -2528,7 +2517,7 @@ fn test_submit_actions_end_turn_no_production() {
     let game_id = setup_active_game(d, addr);
 
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::FoundCity((0, 'ActNoP')),
         Action::SetResearch(1),
         Action::EndTurn,
@@ -2553,7 +2542,7 @@ fn test_end_turn_production_set_earlier_batch() {
 
     // Batch 2: end turn
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![Action::EndTurn]);
+    d.submit_turn(game_id, array![]);
     stop_cheat_caller_address(addr);
 
     assert!(d.get_current_player(game_id) == 1);
@@ -2572,7 +2561,6 @@ fn test_end_turn_no_research_no_production_reverts() {
 
     start_cheat_caller_address(addr, player_a());
     d.submit_actions(game_id, array![Action::FoundCity((0, 'Nothing'))]);
-    stop_cheat_caller_address(addr);
 
     start_cheat_caller_address(addr, player_a());
     d.submit_turn(game_id, array![Action::EndTurn]);
@@ -2640,7 +2628,7 @@ fn test_end_turn_both_set_across_batches() {
 
     // Batch 3: end turn
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![Action::EndTurn]);
+    d.submit_turn(game_id, array![]);
     stop_cheat_caller_address(addr);
 
     assert!(d.get_current_player(game_id) == 1);
@@ -2924,13 +2912,13 @@ fn test_melee_kill_advances_attacker() {
 
     // Declare war
     start_cheat_caller_address(addr, player_a());
-    d.submit_actions(game_id, array![
+    d.submit_turn(game_id, array![
         Action::DeclareWar(1),
         Action::EndTurn,
     ]);
     stop_cheat_caller_address(addr);
     start_cheat_caller_address(addr, player_b());
-    d.submit_actions(game_id, array![Action::EndTurn]);
+    d.submit_turn(game_id, array![]);
     stop_cheat_caller_address(addr);
 
     // March warrior A toward warrior B
@@ -2945,13 +2933,13 @@ fn test_melee_kill_advances_attacker() {
         if dist == 1 {
             // Adjacent — attack
             start_cheat_caller_address(addr, player_a());
-            d.submit_actions(game_id, array![
+            d.submit_turn(game_id, array![
                 Action::AttackUnit((1, e.q, e.r)),
                 Action::EndTurn,
             ]);
             stop_cheat_caller_address(addr);
             start_cheat_caller_address(addr, player_b());
-            d.submit_actions(game_id, array![Action::EndTurn]);
+            d.submit_turn(game_id, array![]);
             stop_cheat_caller_address(addr);
             attacked = true;
         } else {
@@ -2976,13 +2964,13 @@ fn test_melee_kill_advances_attacker() {
             };
             if best_nq == w.q && best_nr == w.r { break; }
             start_cheat_caller_address(addr, player_a());
-            d.submit_actions(game_id, array![
+            d.submit_turn(game_id, array![
                 Action::MoveUnit((1, best_nq, best_nr)),
                 Action::EndTurn,
             ]);
             stop_cheat_caller_address(addr);
             start_cheat_caller_address(addr, player_b());
-            d.submit_actions(game_id, array![Action::EndTurn]);
+            d.submit_turn(game_id, array![]);
             stop_cheat_caller_address(addr);
         }
         turn += 1;

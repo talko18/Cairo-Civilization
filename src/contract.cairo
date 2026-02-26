@@ -31,6 +31,7 @@ pub trait ICairoCiv<TContractState> {
     fn get_current_research(self: @TContractState, game_id: u64, player_idx: u8) -> u8;
     fn get_accumulated_science(self: @TContractState, game_id: u64, player_idx: u8, tech_id: u8) -> u32;
     fn get_winner(self: @TContractState, game_id: u64) -> u8;
+    fn get_victory_type(self: @TContractState, game_id: u64) -> u8;
     fn get_score(self: @TContractState, game_id: u64, player_idx: u8) -> u32;
     fn get_diplomacy_status(self: @TContractState, game_id: u64, p1: u8, p2: u8) -> u8;
     fn get_city_locked_count(self: @TContractState, game_id: u64, player_idx: u8, city_id: u32) -> u8;
@@ -42,8 +43,10 @@ pub trait ICairoCiv<TContractState> {
     fn get_all_units(self: @TContractState, game_id: u64, player_idx: u8) -> Array<felt252>;
     /// Returns all cities for a player as serialized data.
     fn get_all_cities(self: @TContractState, game_id: u64, player_idx: u8) -> Array<felt252>;
-    /// Returns player-level scalar data in one call: (unit_count, city_count, treasury, completed_techs, current_research, acc_science_for_current_research, diplomacy_vs_other)
+    /// Returns player-level scalar data in one call: (unit_count, city_count, treasury, completed_techs, current_research, acc_science_for_current_research, diplomacy_vs_other, submitted)
     fn get_player_summary(self: @TContractState, game_id: u64, player_idx: u8) -> Array<felt252>;
+    fn get_player_submitted(self: @TContractState, game_id: u64, player_idx: u8) -> bool;
+    fn get_turn_seed(self: @TContractState, game_id: u64, turn: u32) -> felt252;
 }
 
 // Events
@@ -75,7 +78,7 @@ mod CairoCiv {
         ICairoCiv, GameCreated, PlayerJoined, GameStarted, TurnSubmitted,
         UnitKilled, CityFounded, CityCaptured, TechCompleted, BuildingCompleted, GameEnded,
     };
-    use starknet::{ContractAddress, get_caller_address, get_block_timestamp};
+    use starknet::{ContractAddress, get_caller_address, get_block_timestamp, get_tx_info};
     use starknet::storage::{
         StoragePointerReadAccess, StoragePointerWriteAccess,
         StorageMapReadAccess, StorageMapWriteAccess,
@@ -89,10 +92,10 @@ mod CairoCiv {
         VICTORY_FORFEIT,
         UNIT_SETTLER, UNIT_WARRIOR, UNIT_BUILDER,
         BUILDING_WALLS,
-        DIPLO_WAR, VICTORY_DOMINATION,
+        DIPLO_WAR, VICTORY_DOMINATION, VICTORY_SCORE,
         IMPROVEMENT_NONE,
     };
-    use cairo_civ::{hex, map_gen, movement, combat, city, tech, economy, turn, constants};
+    use cairo_civ::{hex, map_gen, movement, combat, city, tech, economy, turn, constants, victory};
 
     // ----- Storage ---------------------------------------------------------
     #[storage]
@@ -128,6 +131,12 @@ mod CairoCiv {
         city_locked_count: Map<(u64, u8, u32), u8>,
         // Packed (q, r) per locked slot: low 8 bits = q, high 8 bits = r
         city_locked_tile: Map<(u64, u8, u32, u8), u16>,
+        // Simultaneous turns: has player submitted this turn?
+        player_turn_submitted: Map<(u64, u8), bool>,
+        // Tx hash stored per player per turn (for combined seed)
+        player_turn_hash: Map<(u64, u8), felt252>,
+        // Combined turn seed: hash of all players' tx hashes
+        turn_seed: Map<(u64, u32), felt252>,
     }
 
     // ----- Events ----------------------------------------------------------
@@ -190,64 +199,64 @@ mod CairoCiv {
             let status = self.game_status.read(game_id);
             assert(status == STATUS_ACTIVE, 'Game not active');
             let caller = get_caller_address();
-            let cur_p = self.game_current_player.read(game_id);
-            let p_addr = self.player_address.read((game_id, cur_p));
-            assert(caller == p_addr, 'Not your turn');
-            // Process actions
+            let player = InternalImpl::find_player(@self, game_id, caller);
+            assert(!self.player_turn_submitted.read((game_id, player)), 'Already submitted');
+
+            // Process all non-EndTurn actions
             let span = actions.span();
             let mut i: u32 = 0;
             let len = span.len();
-            let mut turn_ended = false;
-            while i < len && !turn_ended {
+            while i < len {
                 let action = *span.at(i);
                 match action {
-                    Action::EndTurn => {
-                        InternalImpl::process_end_of_turn(ref self, game_id, cur_p);
-                        let np = self.game_num_players.read(game_id);
-                        let next_p = turn::next_player(cur_p, np);
-                        self.game_current_player.write(game_id, next_p);
-                        let new_t = self.game_current_turn.read(game_id) + 1;
-                        self.game_current_turn.write(game_id, new_t);
-                        InternalImpl::reset_movement_for(ref self, game_id, next_p);
-                        self.emit(TurnSubmitted { game_id, player_idx: cur_p, turn_number: new_t });
-                        turn_ended = true;
-                    },
-                    _ => InternalImpl::handle_action(ref self, game_id, cur_p, action),
+                    Action::EndTurn => {},
+                    _ => InternalImpl::handle_action(ref self, game_id, player, action),
                 }
                 i += 1;
             };
+
+            // Validate this player's state (production/research must be set)
+            InternalImpl::validate_turn_submission(@self, game_id, player);
+
+            // Mark submitted and store tx hash for turn seed
+            self.player_turn_submitted.write((game_id, player), true);
+            let tx_hash = get_tx_info().unbox().transaction_hash;
+            self.player_turn_hash.write((game_id, player), tx_hash);
+            let turn = self.game_current_turn.read(game_id);
+            self.emit(TurnSubmitted { game_id, player_idx: player, turn_number: turn });
+
+            // Check if all players have submitted
+            let np = self.game_num_players.read(game_id);
+            let mut all_submitted = true;
+            let mut p: u8 = 0;
+            while p < np {
+                if !self.player_turn_submitted.read((game_id, p)) {
+                    all_submitted = false;
+                }
+                p += 1;
+            };
+
+            if all_submitted {
+                InternalImpl::resolve_round(ref self, game_id);
+            }
         }
 
-        /// Process actions mid-turn without ending the turn.
-        /// Used for batching predicted actions with unpredicted ones.
+        /// Process actions mid-turn without committing the turn.
+        /// Player must not have submitted yet.
         fn submit_actions(ref self: ContractState, game_id: u64, actions: Array<Action>) {
             let status = self.game_status.read(game_id);
             assert(status == STATUS_ACTIVE, 'Game not active');
             let caller = get_caller_address();
-            let cur_p = self.game_current_player.read(game_id);
-            let p_addr = self.player_address.read((game_id, cur_p));
-            assert(caller == p_addr, 'Not your turn');
-            // Process actions (no end-of-turn, no player switch)
+            let player = InternalImpl::find_player(@self, game_id, caller);
+            assert(!self.player_turn_submitted.read((game_id, player)), 'Already submitted');
             let span = actions.span();
             let mut i: u32 = 0;
             let len = span.len();
-            let mut turn_ended = false;
-            while i < len && !turn_ended {
+            while i < len {
                 let action = *span.at(i);
                 match action {
-                    Action::EndTurn => {
-                        // EndTurn in submit_actions triggers full end-of-turn
-                        InternalImpl::process_end_of_turn(ref self, game_id, cur_p);
-                        let np = self.game_num_players.read(game_id);
-                        let next_p = turn::next_player(cur_p, np);
-                        self.game_current_player.write(game_id, next_p);
-                        let new_t = self.game_current_turn.read(game_id) + 1;
-                        self.game_current_turn.write(game_id, new_t);
-                        InternalImpl::reset_movement_for(ref self, game_id, next_p);
-                        self.emit(TurnSubmitted { game_id, player_idx: cur_p, turn_number: new_t });
-                        turn_ended = true;
-                    },
-                    _ => InternalImpl::handle_action(ref self, game_id, cur_p, action),
+                    Action::EndTurn => {},
+                    _ => InternalImpl::handle_action(ref self, game_id, player, action),
                 }
                 i += 1;
             };
@@ -264,7 +273,17 @@ mod CairoCiv {
         // ---- View functions ----
         fn get_game_status(self: @ContractState, game_id: u64) -> u8 { self.game_status.read(game_id) }
         fn get_current_turn(self: @ContractState, game_id: u64) -> u32 { self.game_current_turn.read(game_id) }
-        fn get_current_player(self: @ContractState, game_id: u64) -> u8 { self.game_current_player.read(game_id) }
+        fn get_current_player(self: @ContractState, game_id: u64) -> u8 {
+            let np = self.game_num_players.read(game_id);
+            let mut p: u8 = 0;
+            while p < np {
+                if !self.player_turn_submitted.read((game_id, p)) {
+                    return p;
+                }
+                p += 1;
+            };
+            0
+        }
         fn get_player_address(self: @ContractState, game_id: u64, player_idx: u8) -> ContractAddress { self.player_address.read((game_id, player_idx)) }
         fn get_unit(self: @ContractState, game_id: u64, player_idx: u8, unit_id: u32) -> Unit { self.units.read((game_id, player_idx, unit_id)) }
         fn get_unit_count(self: @ContractState, game_id: u64, player_idx: u8) -> u32 { self.player_unit_count.read((game_id, player_idx)) }
@@ -283,7 +302,26 @@ mod CairoCiv {
         fn get_current_research(self: @ContractState, game_id: u64, player_idx: u8) -> u8 { self.player_current_research.read((game_id, player_idx)) }
         fn get_accumulated_science(self: @ContractState, game_id: u64, player_idx: u8, tech_id: u8) -> u32 { self.tech_accumulated_half_science.read((game_id, player_idx, tech_id)) }
         fn get_winner(self: @ContractState, game_id: u64) -> u8 { self.game_winner.read(game_id) }
-        fn get_score(self: @ContractState, game_id: u64, player_idx: u8) -> u32 { 0 }
+        fn get_victory_type(self: @ContractState, game_id: u64) -> u8 { self.game_victory_type.read(game_id) }
+        fn get_score(self: @ContractState, game_id: u64, player_idx: u8) -> u32 {
+            let cc = self.player_city_count.read((game_id, player_idx));
+            let mut total_pop: u32 = 0;
+            let mut building_count: u32 = 0;
+            let mut ci: u32 = 0;
+            while ci < cc {
+                let c = self.cities.read((game_id, player_idx, ci));
+                total_pop += c.population.into();
+                building_count += victory::count_bits_u32(c.buildings);
+                ci += 1;
+            };
+            let techs = self.player_completed_techs.read((game_id, player_idx));
+            let tech_count = victory::count_bits(techs);
+            let kills = self.player_kills.read((game_id, player_idx));
+            let captured = self.player_captured_cities.read((game_id, player_idx));
+            victory::calculate_score(
+                total_pop, cc, tech_count, 0, kills, captured, building_count,
+            )
+        }
         fn get_diplomacy_status(self: @ContractState, game_id: u64, p1: u8, p2: u8) -> u8 { self.diplomacy.read((game_id, p1, p2)) }
         fn get_city_locked_count(self: @ContractState, game_id: u64, player_idx: u8, city_id: u32) -> u8 {
             self.city_locked_count.read((game_id, player_idx, city_id))
@@ -291,6 +329,12 @@ mod CairoCiv {
         fn get_city_locked_tile(self: @ContractState, game_id: u64, player_idx: u8, city_id: u32, slot: u8) -> (u8, u8) {
             let packed = self.city_locked_tile.read((game_id, player_idx, city_id, slot));
             ((packed & 0xFF).try_into().unwrap(), ((packed / 0x100) & 0xFF).try_into().unwrap())
+        }
+        fn get_player_submitted(self: @ContractState, game_id: u64, player_idx: u8) -> bool {
+            self.player_turn_submitted.read((game_id, player_idx))
+        }
+        fn get_turn_seed(self: @ContractState, game_id: u64, turn: u32) -> felt252 {
+            self.turn_seed.read((game_id, turn))
         }
 
         // ---- Batch view functions ----
@@ -429,6 +473,7 @@ mod CairoCiv {
             } else { 0 };
             let other: u8 = if player_idx == 0 { 1 } else { 0 };
             let diplo: u8 = self.diplomacy.read((game_id, player_idx, other));
+            let submitted: u8 = if self.player_turn_submitted.read((game_id, player_idx)) { 1 } else { 0 };
             let mut result: Array<felt252> = array![];
             result.append(uc.into());
             result.append(cc.into());
@@ -437,6 +482,7 @@ mod CairoCiv {
             result.append(research.into());
             result.append(acc_sci.into());
             result.append(diplo.into());
+            result.append(submitted.into());
             result
         }
     }
@@ -723,8 +769,10 @@ mod CairoCiv {
         }
 
         // ---- AttackUnit ----
-        // Melee attack on enemy combat unit or city. If attacker kills the defender/city,
-        // attacker advances onto the tile (like Civ). City capture only via melee.
+        // Melee attack on enemy city or combat unit. City takes priority: units
+        // garrisoned on a city tile cannot be targeted directly — you must attack
+        // the city itself. When a city is captured, all garrisoned units are killed.
+        // If no city is present, the combat unit is fought directly.
         fn act_attack(ref self: ContractState, game_id: u64, player: u8, uid: u32, tq: u8, tr: u8) {
             let uc = self.player_unit_count.read((game_id, player));
             if uid >= uc { return; }
@@ -738,7 +786,7 @@ mod CairoCiv {
             let dist = hex::hex_distance(attacker.q, attacker.r, tq, tr);
             if dist != 1 { return; }
 
-            // Look for enemy city at target first
+            // Look for enemy city at target
             let np = self.game_num_players.read(game_id);
             let mut city_owner: u8 = 255;
             let mut city_id: u32 = 0;
@@ -761,78 +809,21 @@ mod CairoCiv {
                 cp += 1;
             };
 
-            // Look for enemy combat unit at target
-            let mut enemy_player: u8 = 255;
-            let mut enemy_uid: u32 = 0;
-            let mut unit_found = false;
-            let mut ep: u8 = 0;
-            while ep < np && !unit_found {
-                if ep != player {
-                    let euc = self.player_unit_count.read((game_id, ep));
-                    let mut eu: u32 = 0;
-                    while eu < euc && !unit_found {
-                        let eunit = self.units.read((game_id, ep, eu));
-                        if eunit.hp > 0 && eunit.q == tq && eunit.r == tr
-                            && !constants::is_civilian(eunit.unit_type) {
-                            enemy_player = ep;
-                            enemy_uid = eu;
-                            unit_found = true;
-                        }
-                        eu += 1;
-                    };
-                }
-                ep += 1;
-            };
+            if city_found {
+                // City at target — attack the city (garrison is protected by the city)
+                let diplo = self.diplomacy.read((game_id, player, city_owner));
+                if diplo != DIPLO_WAR { return; }
 
-            // Must have either a city or a combat unit to attack
-            if !city_found && !unit_found { return; }
-            // Check at war with the target
-            let war_target = if unit_found { enemy_player } else { city_owner };
-            let diplo = self.diplomacy.read((game_id, player, war_target));
-            if diplo != DIPLO_WAR { return; }
-
-            // If there's a combat unit, fight it first (unit has priority as defender)
-            if unit_found {
-                let mut defender = self.units.read((game_id, enemy_player, enemy_uid));
-                let def_tile = self.tiles.read((game_id, tq, tr));
-                let result = combat::resolve_melee(
-                    @attacker, @defender, @def_tile, defender.fortify_turns, false,
-                );
-                // Apply damage to defender
-                if result.defender_killed {
-                    defender.hp = 0;
-                } else {
-                    defender.hp = defender.hp - result.damage_to_defender;
-                }
-                self.units.write((game_id, enemy_player, enemy_uid), defender);
-                // Apply damage to attacker
-                if result.attacker_killed {
-                    attacker.hp = 0;
-                } else {
-                    attacker.hp = attacker.hp - result.damage_to_attacker;
-                    // Attacker survives and defender killed → advance onto tile
-                    if result.defender_killed {
-                        attacker.q = tq;
-                        attacker.r = tr;
-                        // Capture civilians on that tile
-                        Self::try_capture_civilian_at(ref self, game_id, player, tq, tr);
-                    }
-                }
-            } else {
-                // No combat unit — attack the city directly (city_found guaranteed by check above)
                 let mut city = self.cities.read((game_id, city_owner, city_id));
                 let has_walls = city::has_building(city.buildings, BUILDING_WALLS);
                 let result = combat::resolve_city_melee(@attacker, @city, has_walls);
-                // Apply damage to city
                 if result.defender_killed {
-                    // City captured by melee — transfer ownership
+                    // City captured — garrison killed via capture_city
                     Self::capture_city(ref self, game_id, player, city_owner, city_id);
-                    // Attacker advances onto the city tile
                     if !result.attacker_killed {
                         attacker.hp = attacker.hp - result.damage_to_attacker;
                         attacker.q = tq;
                         attacker.r = tr;
-                        // Capture civilians on the tile
                         Self::try_capture_civilian_at(ref self, game_id, player, tq, tr);
                     } else {
                         attacker.hp = 0;
@@ -846,6 +837,59 @@ mod CairoCiv {
                         attacker.hp = attacker.hp - result.damage_to_attacker;
                     }
                 }
+            } else {
+                // No city — look for enemy combat unit at target
+                let mut enemy_player: u8 = 255;
+                let mut enemy_uid: u32 = 0;
+                let mut unit_found = false;
+                let mut ep: u8 = 0;
+                while ep < np && !unit_found {
+                    if ep != player {
+                        let euc = self.player_unit_count.read((game_id, ep));
+                        let mut eu: u32 = 0;
+                        while eu < euc && !unit_found {
+                            let eunit = self.units.read((game_id, ep, eu));
+                            if eunit.hp > 0 && eunit.q == tq && eunit.r == tr
+                                && !constants::is_civilian(eunit.unit_type) {
+                                enemy_player = ep;
+                                enemy_uid = eu;
+                                unit_found = true;
+                            }
+                            eu += 1;
+                        };
+                    }
+                    ep += 1;
+                };
+
+                if !unit_found { return; }
+                let diplo = self.diplomacy.read((game_id, player, enemy_player));
+                if diplo != DIPLO_WAR { return; }
+
+                let mut defender = self.units.read((game_id, enemy_player, enemy_uid));
+                let def_tile = self.tiles.read((game_id, tq, tr));
+                let result = combat::resolve_melee(
+                    @attacker, @defender, @def_tile, defender.fortify_turns, false,
+                );
+                if result.defender_killed {
+                    defender.hp = 0;
+                    let kills = self.player_kills.read((game_id, player));
+                    self.player_kills.write((game_id, player), kills + 1);
+                } else {
+                    defender.hp = defender.hp - result.damage_to_defender;
+                }
+                self.units.write((game_id, enemy_player, enemy_uid), defender);
+                if result.attacker_killed {
+                    attacker.hp = 0;
+                    let kills = self.player_kills.read((game_id, enemy_player));
+                    self.player_kills.write((game_id, enemy_player), kills + 1);
+                } else {
+                    attacker.hp = attacker.hp - result.damage_to_attacker;
+                    if result.defender_killed {
+                        attacker.q = tq;
+                        attacker.r = tr;
+                        Self::try_capture_civilian_at(ref self, game_id, player, tq, tr);
+                    }
+                }
             }
 
             attacker.movement_remaining = 0;
@@ -854,8 +898,9 @@ mod CairoCiv {
         }
 
         // ---- RangedAttack ----
-        // Ranged attacks can target units or cities. Cities at 0 HP from ranged fire
-        // are NOT captured — they stay at 1 HP minimum (only melee can capture).
+        // Ranged attacks target cities or units. City takes priority: units
+        // garrisoned on a city tile cannot be targeted — the city absorbs the
+        // damage. City HP cannot go below 1 from ranged (only melee can capture).
         fn act_ranged(ref self: ContractState, game_id: u64, player: u8, uid: u32, tq: u8, tr: u8) {
             let uc = self.player_unit_count.read((game_id, player));
             if uid >= uc { return; }
@@ -869,29 +914,7 @@ mod CairoCiv {
 
             let np = self.game_num_players.read(game_id);
 
-            // Try to find enemy unit at target
-            let mut unit_found = false;
-            let mut ep: u8 = 0;
-            let mut euid: u32 = 0;
-            let mut eplayer: u8 = 0;
-            while ep < np && !unit_found {
-                if ep != player {
-                    let euc = self.player_unit_count.read((game_id, ep));
-                    let mut eu: u32 = 0;
-                    while eu < euc && !unit_found {
-                        let eunit = self.units.read((game_id, ep, eu));
-                        if eunit.hp > 0 && eunit.q == tq && eunit.r == tr {
-                            eplayer = ep;
-                            euid = eu;
-                            unit_found = true;
-                        }
-                        eu += 1;
-                    };
-                }
-                ep += 1;
-            };
-
-            // Try to find enemy city at target
+            // Look for enemy city at target first
             let mut city_found = false;
             let mut city_owner: u8 = 255;
             let mut city_cid: u32 = 0;
@@ -913,12 +936,44 @@ mod CairoCiv {
                 cp += 1;
             };
 
-            if !unit_found && !city_found { return; }
-            let war_target = if unit_found { eplayer } else { city_owner };
-            if self.diplomacy.read((game_id, player, war_target)) != DIPLO_WAR { return; }
+            if city_found {
+                // Ranged attack on city — garrison is protected, only city takes damage
+                if self.diplomacy.read((game_id, player, city_owner)) != DIPLO_WAR { return; }
+                let mut city = self.cities.read((game_id, city_owner, city_cid));
+                let has_walls = city::has_building(city.buildings, BUILDING_WALLS);
+                let result = combat::resolve_city_ranged(@unit, @city, has_walls);
+                if result.damage_to_defender >= city.hp {
+                    city.hp = 1;
+                } else {
+                    city.hp = city.hp - result.damage_to_defender;
+                }
+                self.cities.write((game_id, city_owner, city_cid), city);
+            } else {
+                // No city — look for enemy unit at target
+                let mut unit_found = false;
+                let mut ep: u8 = 0;
+                let mut euid: u32 = 0;
+                let mut eplayer: u8 = 0;
+                while ep < np && !unit_found {
+                    if ep != player {
+                        let euc = self.player_unit_count.read((game_id, ep));
+                        let mut eu: u32 = 0;
+                        while eu < euc && !unit_found {
+                            let eunit = self.units.read((game_id, ep, eu));
+                            if eunit.hp > 0 && eunit.q == tq && eunit.r == tr {
+                                eplayer = ep;
+                                euid = eu;
+                                unit_found = true;
+                            }
+                            eu += 1;
+                        };
+                    }
+                    ep += 1;
+                };
 
-            if unit_found {
-                // Ranged attack on unit
+                if !unit_found { return; }
+                if self.diplomacy.read((game_id, player, eplayer)) != DIPLO_WAR { return; }
+
                 let mut defender = self.units.read((game_id, eplayer, euid));
                 let def_tile = self.tiles.read((game_id, tq, tr));
                 let result = combat::resolve_ranged(
@@ -926,22 +981,12 @@ mod CairoCiv {
                 );
                 if result.defender_killed {
                     defender.hp = 0;
+                    let kills = self.player_kills.read((game_id, player));
+                    self.player_kills.write((game_id, player), kills + 1);
                 } else {
                     defender.hp = defender.hp - result.damage_to_defender;
                 }
                 self.units.write((game_id, eplayer, euid), defender);
-            } else {
-                // Ranged attack on city — can damage but NEVER capture
-                let mut city = self.cities.read((game_id, city_owner, city_cid));
-                let has_walls = city::has_building(city.buildings, BUILDING_WALLS);
-                let result = combat::resolve_city_ranged(@unit, @city, has_walls);
-                // City HP cannot go below 1 from ranged attacks (only melee can capture)
-                if result.damage_to_defender >= city.hp {
-                    city.hp = 1;
-                } else {
-                    city.hp = city.hp - result.damage_to_defender;
-                }
-                self.cities.write((game_id, city_owner, city_cid), city);
             }
         }
 
@@ -1426,16 +1471,52 @@ mod CairoCiv {
         }
 
         // ---- End of turn processing ----
-        fn process_end_of_turn(ref self: ContractState, game_id: u64, player: u8) {
+        /// Resolve a complete round: process end-of-turn effects for all players,
+        /// reset movement, increment turn, compute combined seed.
+        fn resolve_round(ref self: ContractState, game_id: u64) {
+            let np = self.game_num_players.read(game_id);
+            let turn = self.game_current_turn.read(game_id);
+
+            // Compute combined turn seed from all players' tx hashes
+            let mut hasher = PoseidonTrait::new();
+            let mut p: u8 = 0;
+            while p < np {
+                hasher = hasher.update(self.player_turn_hash.read((game_id, p)));
+                p += 1;
+            };
+            self.turn_seed.write((game_id, turn), hasher.finalize());
+
+            // Process end-of-turn effects for each player
+            let mut p2: u8 = 0;
+            while p2 < np {
+                if self.game_status.read(game_id) == STATUS_ACTIVE {
+                    Self::process_end_of_turn(ref self, game_id, p2);
+                }
+                p2 += 1;
+            };
+
+            // Increment turn and reset for next round
+            let new_turn = turn + 1;
+            self.game_current_turn.write(game_id, new_turn);
+            let mut p3: u8 = 0;
+            while p3 < np {
+                self.player_turn_submitted.write((game_id, p3), false);
+                Self::reset_movement_for(ref self, game_id, p3);
+                p3 += 1;
+            };
+
+            // Check score victory
+            Self::check_score_victory(ref self, game_id, new_turn);
+        }
+
+        /// Validate that a player's state is ready for turn submission.
+        fn validate_turn_submission(self: @ContractState, game_id: u64, player: u8) {
             let cc = self.player_city_count.read((game_id, player));
 
-            // If the player has at least one city, research must be set
             if cc > 0 {
                 let cur_research = self.player_current_research.read((game_id, player));
-                // research 0 = none; also allow if all techs already done
                 if cur_research == 0 {
                     let techs = self.player_completed_techs.read((game_id, player));
-                    // Check if there's any tech left to research (IDs 1..18)
                     let mut has_available: bool = false;
                     let mut tid: u8 = 1;
                     while tid <= 18 && !has_available {
@@ -1448,13 +1529,18 @@ mod CairoCiv {
                 }
             }
 
-            // Every city must have a production target
             let mut pi: u32 = 0;
             while pi < cc {
                 let c = self.cities.read((game_id, player, pi));
                 assert(c.current_production != 0, 'City has no production');
                 pi += 1;
             };
+        }
+
+        /// Apply end-of-turn economic effects for one player (growth, production,
+        /// research, gold, healing).
+        fn process_end_of_turn(ref self: ContractState, game_id: u64, player: u8) {
+            let cc = self.player_city_count.read((game_id, player));
 
             let mut total_gold_income: u32 = 0;
             let mut total_half_science: u32 = 0;
@@ -1631,8 +1717,24 @@ mod CairoCiv {
             // Gold accounting
             let net_gold = economy::compute_net_gold(total_gold_income, military_count);
             let treasury = self.player_treasury.read((game_id, player));
-            let (new_treasury, _disband) = economy::update_treasury(treasury, net_gold);
+            let (new_treasury, disband) = economy::update_treasury(treasury, net_gold);
             self.player_treasury.write((game_id, player), new_treasury);
+
+            // Disband units if bankrupt (kill maintenance-costing units from the end)
+            if disband > 0 {
+                let mut disbanded: u32 = 0;
+                let mut di: u32 = uc;
+                while di > 0 && disbanded < disband {
+                    di -= 1;
+                    let du = self.units.read((game_id, player, di));
+                    if du.hp > 0 && constants::costs_maintenance(du.unit_type) {
+                        let mut dead = du;
+                        dead.hp = 0;
+                        self.units.write((game_id, player, di), dead);
+                        disbanded += 1;
+                    }
+                };
+            }
 
             // Tech research — per-tech accumulated science
             let cur_tech = self.player_current_research.read((game_id, player));
@@ -1817,6 +1919,10 @@ mod CairoCiv {
                 vu += 1;
             };
 
+            // Increment captured cities counter
+            let caps = self.player_captured_cities.read((game_id, capturer));
+            self.player_captured_cities.write((game_id, capturer), caps + 1);
+
             // Check domination victory: if victim has 0 cities left, capturer wins
             if victim_cc - 1 == 0 {
                 Self::end_game(ref self, game_id, capturer, VICTORY_DOMINATION);
@@ -1866,6 +1972,39 @@ mod CairoCiv {
             self.game_winner.write(game_id, winner);
             self.game_victory_type.write(game_id, vtype);
             self.emit(GameEnded { game_id, winner, victory_type: vtype });
+        }
+
+        fn check_score_victory(ref self: ContractState, game_id: u64, current_turn: u32) {
+            if current_turn < constants::TURN_LIMIT { return; }
+            if self.game_status.read(game_id) != STATUS_ACTIVE { return; }
+            let np = self.game_num_players.read(game_id);
+            let mut scores: Array<u32> = array![];
+            let mut city_counts: Array<u32> = array![];
+            let mut p: u8 = 0;
+            while p < np {
+                let cc = self.player_city_count.read((game_id, p));
+                let mut total_pop: u32 = 0;
+                let mut building_count: u32 = 0;
+                let mut ci: u32 = 0;
+                while ci < cc {
+                    let c = self.cities.read((game_id, p, ci));
+                    total_pop += c.population.into();
+                    building_count += victory::count_bits_u32(c.buildings);
+                    ci += 1;
+                };
+                let techs = self.player_completed_techs.read((game_id, p));
+                let tech_count = victory::count_bits(techs);
+                let kills = self.player_kills.read((game_id, p));
+                let captured = self.player_captured_cities.read((game_id, p));
+                let score = victory::calculate_score(
+                    total_pop, cc, tech_count, 0, kills, captured, building_count,
+                );
+                scores.append(score);
+                city_counts.append(cc);
+                p += 1;
+            };
+            let winner = victory::determine_winner(scores.span(), city_counts.span());
+            Self::end_game(ref self, game_id, winner, VICTORY_SCORE);
         }
 
         fn find_player(self: @ContractState, game_id: u64, addr: ContractAddress) -> u8 {

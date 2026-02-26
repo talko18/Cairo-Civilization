@@ -241,12 +241,11 @@ app.use(express.json());
 app.use(express.static(__dirname));                       // serves index.html
 app.use('/artifacts', express.static(ARTIFACTS));          // serves contract json
 
-// ---- Setup: deploy contract + create & join game ----
-app.post('/api/setup', async (_req, res) => {
+// ---- Deploy: connect to Katana, declare & deploy contract ----
+app.post('/api/deploy', async (_req, res) => {
   try {
     provider = new RpcProvider({ nodeUrl: KATANA_URL, baseFetch: katanaFetch });
 
-    // Detect predeployed accounts
     const predeployed = await fetchKatanaAccounts();
     if (!predeployed || predeployed.length < 2) {
       return res.status(500).json({
@@ -259,18 +258,15 @@ app.post('/api/setup', async (_req, res) => {
     const pk0 = acct0.private_key || acct0.privateKey;
     const pk1 = acct1.private_key || acct1.privateKey;
 
-    // Create accounts with V3 transaction version (required by Katana 1.7.x)
     accounts = [
       new Account(provider, acct0.address, pk0, '1', constants.TRANSACTION_VERSION.V3),
       new Account(provider, acct1.address, pk1, '1', constants.TRANSACTION_VERSION.V3),
     ];
 
-    // Load artifacts
     const sierra = JSON.parse(fs.readFileSync(SIERRA, 'utf-8'));
     const casm   = JSON.parse(fs.readFileSync(CASM,   'utf-8'));
     sierraAbi    = sierra.abi;
 
-    // Declare contract (skip fee estimation with explicit zero resource bounds)
     console.log('Declaring contract...');
     let classHash;
     try {
@@ -281,7 +277,6 @@ app.post('/api/setup', async (_req, res) => {
       await provider.waitForTransaction(declareRes.transaction_hash);
       classHash = declareRes.class_hash;
     } catch (e) {
-      // If class is already declared (code 51), compute class hash and continue
       if (e.baseError?.code === 51) {
         console.log('  Class already declared, reusing...');
         const { hash } = require('starknet');
@@ -292,7 +287,6 @@ app.post('/api/setup', async (_req, res) => {
     }
     console.log('Class hash:', classHash);
 
-    // Deploy contract
     console.log('Deploying contract...');
     const deployRes = await accounts[0].deployContract(
       { classHash, constructorCalldata: [] },
@@ -302,40 +296,114 @@ app.post('/api/setup', async (_req, res) => {
     contractAddr = deployRes.contract_address;
     console.log('Contract deployed at:', contractAddr);
 
-    // Build a read-only Contract for view calls
     contract = new Contract(sierraAbi, contractAddr, provider);
-
-    // Create game (player A = account 0)
-    console.log('Creating game...');
-    const createTx = await accounts[0].execute(
-      { contractAddress: contractAddr, entrypoint: 'create_game', calldata: ['2'] },
-      { resourceBounds: RESOURCE_BOUNDS }
-    );
-    await provider.waitForTransaction(createTx.transaction_hash);
-
-    // Read game ID (first game created is ID 1)
-    gameId = 1;
-
-    // Join game (player B = account 1)
-    console.log('Joining game...');
-    const joinTx = await accounts[1].execute(
-      { contractAddress: contractAddr, entrypoint: 'join_game', calldata: [String(gameId)] },
-      { resourceBounds: RESOURCE_BOUNDS }
-    );
-    await provider.waitForTransaction(joinTx.transaction_hash);
-    console.log('Game started! ID:', gameId);
 
     res.json({
       contractAddress: contractAddr,
-      gameId,
-      players: [acct0.address, acct1.address],
+      accounts: [acct0.address, acct1.address],
     });
   } catch (e) {
-    console.error('Setup error:', e.baseError || e.message || e);
-    const msg = e.baseError
-      ? JSON.stringify(e.baseError)
-      : (e.message || String(e));
+    console.error('Deploy error:', e.baseError || e.message || e);
+    const msg = e.baseError ? JSON.stringify(e.baseError) : (e.message || String(e));
     res.status(500).json({ error: msg });
+  }
+});
+
+// ---- Create game: player A creates a new game lobby ----
+app.post('/api/create-game', async (req, res) => {
+  if (!contract) return res.status(400).json({ error: 'Contract not deployed yet' });
+  const { numPlayers } = req.body;
+  const np = numPlayers || 2;
+  try {
+    console.log(`Creating ${np}-player game...`);
+    const createTx = await accounts[0].execute(
+      { contractAddress: contractAddr, entrypoint: 'create_game', calldata: [String(np)] },
+      { resourceBounds: RESOURCE_BOUNDS }
+    );
+    await provider.waitForTransaction(createTx.transaction_hash);
+    gameId = (gameId || 0) + 1;
+    console.log('Game created! ID:', gameId);
+    res.json({ gameId, creator: accounts[0].address });
+  } catch (e) {
+    console.error('Create game error:', e.baseError || e.message || e);
+    res.status(500).json({ error: extractRevertReason(e) });
+  }
+});
+
+// ---- Join game: player B joins an existing game ----
+app.post('/api/join-game', async (req, res) => {
+  if (!contract) return res.status(400).json({ error: 'Contract not deployed yet' });
+  const { player } = req.body;
+  const pid = (player === 0 || player === 1) ? player : 1;
+  const gid = req.body.gameId || gameId;
+  if (!gid) return res.status(400).json({ error: 'No game ID' });
+  try {
+    console.log(`Player ${pid} joining game ${gid}...`);
+    const joinTx = await accounts[pid].execute(
+      { contractAddress: contractAddr, entrypoint: 'join_game', calldata: [String(gid)] },
+      { resourceBounds: RESOURCE_BOUNDS }
+    );
+    await provider.waitForTransaction(joinTx.transaction_hash);
+    gameId = gid;
+    console.log(`Player ${pid} joined game ${gid}!`);
+    res.json({ ok: true, gameId: gid });
+  } catch (e) {
+    console.error('Join game error:', e.baseError || e.message || e);
+    res.status(500).json({ error: extractRevertReason(e) });
+  }
+});
+
+// ---- Game status: check if game is in lobby, active, or finished ----
+app.get('/api/game-status', async (_req, res) => {
+  if (!contract || !gameId) return res.json({ status: 'no_game' });
+  try {
+    const rc = new Contract(sierraAbi, contractAddr, provider);
+    const status = await rc.call('get_game_status', [gameId]);
+    res.json({ gameId, status: n(status) });
+  } catch (e) {
+    res.status(500).json({ error: e.message || String(e) });
+  }
+});
+
+// ---- Legacy setup: deploy + create + join in one step (for scenario replays) ----
+app.post('/api/setup', async (_req, res) => {
+  try {
+    provider = new RpcProvider({ nodeUrl: KATANA_URL, baseFetch: katanaFetch });
+    const predeployed = await fetchKatanaAccounts();
+    if (!predeployed || predeployed.length < 2) {
+      return res.status(500).json({ error: 'Cannot detect Katana accounts' });
+    }
+    const pk0 = predeployed[0].private_key || predeployed[0].privateKey;
+    const pk1 = predeployed[1].private_key || predeployed[1].privateKey;
+    accounts = [
+      new Account(provider, predeployed[0].address, pk0, '1', constants.TRANSACTION_VERSION.V3),
+      new Account(provider, predeployed[1].address, pk1, '1', constants.TRANSACTION_VERSION.V3),
+    ];
+    const sierra = JSON.parse(fs.readFileSync(SIERRA, 'utf-8'));
+    const casm   = JSON.parse(fs.readFileSync(CASM,   'utf-8'));
+    sierraAbi    = sierra.abi;
+    let classHash;
+    try {
+      const declareRes = await accounts[0].declare({ contract: sierra, casm }, { resourceBounds: RESOURCE_BOUNDS, skipValidate: true });
+      await provider.waitForTransaction(declareRes.transaction_hash);
+      classHash = declareRes.class_hash;
+    } catch (e) {
+      if (e.baseError?.code === 51) { const { hash } = require('starknet'); classHash = hash.computeContractClassHash(sierra); }
+      else throw e;
+    }
+    const deployRes = await accounts[0].deployContract({ classHash, constructorCalldata: [] }, { resourceBounds: RESOURCE_BOUNDS, skipValidate: true });
+    await provider.waitForTransaction(deployRes.transaction_hash);
+    contractAddr = deployRes.contract_address;
+    contract = new Contract(sierraAbi, contractAddr, provider);
+    const createTx = await accounts[0].execute({ contractAddress: contractAddr, entrypoint: 'create_game', calldata: ['2'] }, { resourceBounds: RESOURCE_BOUNDS });
+    await provider.waitForTransaction(createTx.transaction_hash);
+    gameId = 1;
+    const joinTx = await accounts[1].execute({ contractAddress: contractAddr, entrypoint: 'join_game', calldata: [String(gameId)] }, { resourceBounds: RESOURCE_BOUNDS });
+    await provider.waitForTransaction(joinTx.transaction_hash);
+    res.json({ contractAddress: contractAddr, gameId, players: [predeployed[0].address, predeployed[1].address] });
+  } catch (e) {
+    console.error('Setup error:', e.baseError || e.message || e);
+    res.status(500).json({ error: e.baseError ? JSON.stringify(e.baseError) : (e.message || String(e)) });
   }
 });
 
@@ -347,11 +415,15 @@ app.get('/api/state', async (_req, res) => {
     const rc = new Contract(sierraAbi, contractAddr, provider);
     const t0 = Date.now();
 
-    // ── 1. Fire ALL batch calls in parallel (5 RPC calls total) ──
-    const [status, turn, currentPlayer, mapBatch, p0summary, p1summary, p0units, p1units, p0cities, p1cities] = await Promise.all([
+    // ── 1. Fire ALL batch calls in parallel ──
+    const [status, turn, currentPlayer, winner, victoryType, p0score, p1score, mapBatch, p0summary, p1summary, p0units, p1units, p0cities, p1cities] = await Promise.all([
       rc.call('get_game_status',   [gid]),
       rc.call('get_current_turn',  [gid]),
       rc.call('get_current_player',[gid]),
+      rc.call('get_winner',        [gid]),
+      rc.call('get_victory_type',  [gid]),
+      rc.call('get_score',         [gid, 0]),
+      rc.call('get_score',         [gid, 1]),
       rc.call('get_map_batch',     [gid]),
       rc.call('get_player_summary',[gid, 0]),
       rc.call('get_player_summary',[gid, 1]),
@@ -391,7 +463,7 @@ app.get('/api/state', async (_req, res) => {
     const cityBatches = [p0cities, p1cities];
 
     for (let p = 0; p < 2; p++) {
-      // Decode player summary: [uc, cc, treasury, techs, research, accSci, diplo]
+      // Decode player summary: [uc, cc, treasury, techs, research, accSci, diplo, submitted]
       const sm = Array.isArray(summaries[p]) ? summaries[p] : [];
       const uc       = n(sm[0]);
       const cc       = n(sm[1]);
@@ -400,6 +472,7 @@ app.get('/api/state', async (_req, res) => {
       const curResearch = n(sm[4]);
       const accSci   = n(sm[5]);
       const diplo    = n(sm[6]);
+      const submitted = n(sm[7]) !== 0;
 
       // Decode units
       const uArr = Array.isArray(unitBatches[p]) ? unitBatches[p] : [];
@@ -475,12 +548,15 @@ app.get('/api/state', async (_req, res) => {
         accumulatedHalfScience: accSci,
         halfSciencePerTurn: halfSciPerTurn,
         diplomacy: diplo,
+        submitted,
       });
     }
 
     console.log(`State fetched in ${Date.now() - t0}ms (batch mode)`);
     res.json({
       status: n(status), turn: n(turn), currentPlayer: n(currentPlayer),
+      winner: n(winner), victoryType: n(victoryType),
+      scores: [n(p0score), n(p1score)],
       tiles, players, gameId: gid,
     });
   } catch (e) {
@@ -492,12 +568,11 @@ app.get('/api/state', async (_req, res) => {
 // ---- Submit turn ----
 app.post('/api/turn', async (req, res) => {
   if (!contract || !gameId) return res.status(400).json({ error: 'Game not set up yet' });
-  const { player, actions } = req.body;  // player: 0 or 1, actions: array of action objects
+  const { player, actions: rawActions } = req.body;
   if (player !== 0 && player !== 1) return res.status(400).json({ error: 'Invalid player' });
-  if (!Array.isArray(actions) || actions.length === 0) return res.status(400).json({ error: 'No actions' });
+  const actions = Array.isArray(rawActions) ? rawActions : [];
 
   try {
-    // Build raw calldata: game_id, array_len, ...action_felts
     const actionFelts = [];
     for (const a of actions) {
       actionFelts.push(...encodeAction(a).map(String));

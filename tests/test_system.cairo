@@ -15,8 +15,11 @@ use cairo_civ::types::{
     UNIT_SETTLER, UNIT_WARRIOR, UNIT_BUILDER, UNIT_SCOUT, UNIT_SLINGER, UNIT_ARCHER,
     TERRAIN_OCEAN, TERRAIN_COAST, TERRAIN_MOUNTAIN, TERRAIN_GRASSLAND,
     MAP_WIDTH, MAP_HEIGHT,
-    IMPROVEMENT_NONE, IMPROVEMENT_FARM, IMPROVEMENT_MINE, IMPROVEMENT_LUMBER_MILL,
-    FEATURE_NONE, FEATURE_WOODS,
+    IMPROVEMENT_NONE, IMPROVEMENT_FARM, IMPROVEMENT_MINE, IMPROVEMENT_QUARRY,
+    IMPROVEMENT_PASTURE, IMPROVEMENT_LUMBER_MILL,
+    FEATURE_NONE, FEATURE_WOODS, FEATURE_RAINFOREST,
+    TERRAIN_GRASSLAND_HILLS, TERRAIN_PLAINS, TERRAIN_PLAINS_HILLS,
+    TERRAIN_DESERT, TERRAIN_DESERT_HILLS,
     BUILDING_MONUMENT, BUILDING_GRANARY, BUILDING_WALLS, BUILDING_BARRACKS, BUILDING_ARENA,
     DIPLO_PEACE, DIPLO_WAR,
     PROD_WARRIOR, PROD_SETTLER, PROD_BUILDER, PROD_SCOUT, PROD_SLINGER, PROD_ARCHER,
@@ -57,6 +60,7 @@ fn submit_turn(d: ICairoCivDispatcher, addr: ContractAddress, player: ContractAd
 }
 
 fn skip_turn(d: ICairoCivDispatcher, addr: ContractAddress, player: ContractAddress, game_id: u64) {
+    if d.get_game_status(game_id) != 1 { return; }
     let pidx: u8 = if player == player_a() { 0 } else { 1 };
     let cc = d.get_city_count(game_id, pidx);
     let mut actions: Array<Action> = array![];
@@ -157,9 +161,8 @@ fn test_full_game_score_victory() {
         Action::EndTurn,
     ]);
 
-    // Play to turn limit (would need 148 more turns)
-    // For test brevity, just verify the mechanism
-    assert!(d.get_current_turn(game_id) == 2);
+    // Both submitted: turn 0→1 (one round = one turn increment)
+    assert!(d.get_current_turn(game_id) == 1);
 }
 
 // ===========================================================================
@@ -1315,7 +1318,7 @@ fn test_purchase_unit_with_gold() {
 // ===========================================================================
 
 #[test]
-fn test_two_players_alternate_turns() {
+fn test_two_players_simultaneous_turns() {
     let (d, addr) = deploy();
     let game_id = setup_active_game(d, addr);
 
@@ -1323,15 +1326,15 @@ fn test_two_players_alternate_turns() {
     assert!(d.get_current_player(game_id) == 0);
 
     skip_turn(d, addr, player_a(), game_id);
-    assert!(d.get_current_player(game_id) == 1);
+    assert!(d.get_current_player(game_id) == 1); // A submitted, B hasn't
 
     skip_turn(d, addr, player_b(), game_id);
-    assert!(d.get_current_player(game_id) == 0);
-    assert!(d.get_current_turn(game_id) == 2);
+    assert!(d.get_current_player(game_id) == 0); // Round resolved, both reset
+    assert!(d.get_current_turn(game_id) == 1); // One round = one turn
 
-    // Play 3 full rounds = 6 more turns
+    // 3 more rounds = 3 more turns
     skip_rounds(d, addr, game_id, 3);
-    assert!(d.get_current_turn(game_id) == 8);
+    assert!(d.get_current_turn(game_id) == 4);
 }
 
 // ===========================================================================
@@ -1346,7 +1349,7 @@ fn test_game_still_active_after_many_turns() {
     skip_rounds(d, addr, game_id, 25);
 
     assert!(d.get_game_status(game_id) == STATUS_ACTIVE);
-    assert!(d.get_current_turn(game_id) == 50);
+    assert!(d.get_current_turn(game_id) == 25);
 }
 
 // ===========================================================================
@@ -1865,7 +1868,9 @@ fn grow_city(
     while i < max_rounds {
         let c = d.get_city(game_id, player, city_id);
         if c.population >= target_pop { break; }
+        if d.get_game_status(game_id) != 1 { break; }
         skip_turn(d, addr, player_a(), game_id);
+        if d.get_game_status(game_id) != 1 { break; }
         skip_turn(d, addr, player_b(), game_id);
         i += 1;
     };
@@ -3269,6 +3274,261 @@ fn test_amenity_ecstatic_bonus() {
     assert!(city::apply_amenity_modifier(50, prod_mod) == 55);
 }
 
+// S44: City garrison protection — melee attack on a garrisoned city hits the
+// city, not the garrison unit. When the city is captured, garrison is killed.
+#[test]
+fn test_city_garrison_protection() {
+    let (d, addr) = deploy();
+    let game_id = setup_active_game(d, addr);
+
+    // Both found cities, produce warriors
+    submit_turn(d, addr, player_a(), game_id, array![
+        Action::FoundCity((0, 'Athens')),
+        Action::SetResearch(1),
+        Action::SetProduction((0, PROD_WARRIOR)),
+        Action::EndTurn,
+    ]);
+    submit_turn(d, addr, player_b(), game_id, array![
+        Action::FoundCity((0, 'Rome')),
+        Action::SetResearch(1),
+        Action::SetProduction((0, PROD_WARRIOR)),
+        Action::EndTurn,
+    ]);
+
+    // Skip rounds so warriors are produced (they spawn on city tile)
+    skip_rounds(d, addr, game_id, 20);
+
+    // Locate B's city and find a garrison warrior on it
+    let city_b = d.get_city(game_id, 1, 0);
+    let city_q = city_b.q;
+    let city_r = city_b.r;
+
+    let uc_b = d.get_unit_count(game_id, 1);
+    let mut garrison_uid: u32 = 0;
+    let mut garrison_found = false;
+    let mut gi: u32 = 0;
+    while gi < uc_b && !garrison_found {
+        let u = d.get_unit(game_id, 1, gi);
+        if u.hp > 0 && u.unit_type == UNIT_WARRIOR && u.q == city_q && u.r == city_r {
+            garrison_uid = gi;
+            garrison_found = true;
+        }
+        gi += 1;
+    };
+    if !garrison_found { return; }
+
+    // Declare war (use submit_actions for the action, skip_turn to end safely)
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::DeclareWar(1)]);
+    stop_cheat_caller_address(addr);
+    skip_turn(d, addr, player_a(), game_id);
+    skip_turn(d, addr, player_b(), game_id);
+
+    // Find A's warrior
+    let uc_a = d.get_unit_count(game_id, 0);
+    let mut atk_uid: u32 = 0;
+    let mut atk_found = false;
+    let mut ai: u32 = 0;
+    while ai < uc_a && !atk_found {
+        let u = d.get_unit(game_id, 0, ai);
+        if u.hp > 0 && u.unit_type == UNIT_WARRIOR {
+            atk_uid = ai;
+            atk_found = true;
+        }
+        ai += 1;
+    };
+    if !atk_found { return; }
+
+    // March A's warrior toward B's city until adjacent
+    let mut turn: u32 = 0;
+    while turn < 30 {
+        if d.get_game_status(game_id) != STATUS_ACTIVE { break; }
+        let w = d.get_unit(game_id, 0, atk_uid);
+        if w.hp == 0 { break; }
+        let dist = hex::hex_distance(w.q, w.r, city_q, city_r);
+        if dist <= 1 { break; }
+
+        let neighbors = hex::hex_neighbors(w.q, w.r);
+        let nspan = neighbors.span();
+        let mut best_nq = w.q;
+        let mut best_nr = w.r;
+        let mut best_dist = dist;
+        let mut ni: u32 = 0;
+        while ni < nspan.len() {
+            let (nq, nr) = *nspan.at(ni);
+            let tile = d.get_tile(game_id, nq, nr);
+            let cost = constants::terrain_movement_cost(tile.terrain, tile.feature);
+            let nd = hex::hex_distance(nq, nr, city_q, city_r);
+            if cost > 0 && nd < best_dist {
+                best_nq = nq;
+                best_nr = nr;
+                best_dist = nd;
+            }
+            ni += 1;
+        };
+        if best_nq == w.q && best_nr == w.r { break; }
+        start_cheat_caller_address(addr, player_a());
+        d.submit_actions(game_id, array![Action::MoveUnit((atk_uid, best_nq, best_nr))]);
+        stop_cheat_caller_address(addr);
+        skip_turn(d, addr, player_a(), game_id);
+        skip_turn(d, addr, player_b(), game_id);
+        turn += 1;
+    };
+
+    // Confirm we are adjacent and ready to attack
+    let w = d.get_unit(game_id, 0, atk_uid);
+    if w.hp == 0 || hex::hex_distance(w.q, w.r, city_q, city_r) != 1 { return; }
+
+    // Record state before attack
+    let city_before = d.get_city(game_id, 1, 0);
+    let garrison_before = d.get_unit(game_id, 1, garrison_uid);
+    assert!(garrison_before.hp > 0, "Garrison should be alive");
+    assert!(garrison_before.q == city_q && garrison_before.r == city_r, "Garrison on city");
+
+    // Attack the garrisoned city tile (submit_actions so we can inspect before EndTurn)
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::AttackUnit((atk_uid, city_q, city_r))]);
+    stop_cheat_caller_address(addr);
+
+    let city_count_b = d.get_city_count(game_id, 1);
+    if city_count_b > 0 {
+        let city_after = d.get_city(game_id, 1, 0);
+        let garrison_after = d.get_unit(game_id, 1, garrison_uid);
+        assert!(city_after.hp < city_before.hp, "City should take damage from melee attack");
+        assert!(garrison_after.hp == garrison_before.hp,
+            "Garrison should NOT take damage - city absorbs the attack");
+    } else {
+        let garrison_after = d.get_unit(game_id, 1, garrison_uid);
+        assert!(garrison_after.hp == 0, "Garrison should die when city is captured");
+    }
+}
+
+// S45: City garrison protection — repeated siege until city captured kills all garrison units
+#[test]
+fn test_city_garrison_capture_kills_defenders() {
+    let (d, addr) = deploy();
+    let game_id = setup_active_game(d, addr);
+
+    // Both found cities, A produces warriors continuously
+    submit_turn(d, addr, player_a(), game_id, array![
+        Action::FoundCity((0, 'Sparta')),
+        Action::SetResearch(1),
+        Action::SetProduction((0, PROD_WARRIOR)),
+        Action::EndTurn,
+    ]);
+    submit_turn(d, addr, player_b(), game_id, array![
+        Action::FoundCity((0, 'Troy')),
+        Action::SetResearch(1),
+        Action::SetProduction((0, PROD_WARRIOR)),
+        Action::EndTurn,
+    ]);
+
+    // Skip rounds to build up A's army (B also gets warriors on city tile)
+    skip_rounds(d, addr, game_id, 20);
+
+    let city_b = d.get_city(game_id, 1, 0);
+    let city_q = city_b.q;
+    let city_r = city_b.r;
+
+    // Count garrison units on B's city tile
+    let uc_b = d.get_unit_count(game_id, 1);
+    let mut garrison_count: u32 = 0;
+    let mut gci: u32 = 0;
+    while gci < uc_b {
+        let u = d.get_unit(game_id, 1, gci);
+        if u.hp > 0 && u.q == city_q && u.r == city_r {
+            garrison_count += 1;
+        }
+        gci += 1;
+    };
+    if garrison_count == 0 { return; }
+
+    // Declare war
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::DeclareWar(1)]);
+    stop_cheat_caller_address(addr);
+    skip_turn(d, addr, player_a(), game_id);
+    skip_turn(d, addr, player_b(), game_id);
+
+    // Repeatedly march A's warriors toward B's city and attack until captured
+    let mut siege_turn: u32 = 0;
+    while siege_turn < 60 {
+        if d.get_game_status(game_id) != STATUS_ACTIVE { break; }
+        if d.get_city_count(game_id, 1) == 0 { break; }
+
+        // Find an alive A warrior with movement
+        let uc_a = d.get_unit_count(game_id, 0);
+        let mut atk_uid: u32 = 0;
+        let mut atk_found = false;
+        let mut si: u32 = 0;
+        while si < uc_a && !atk_found {
+            let u = d.get_unit(game_id, 0, si);
+            if u.hp > 0 && u.unit_type == UNIT_WARRIOR && u.movement_remaining > 0 {
+                atk_uid = si;
+                atk_found = true;
+            }
+            si += 1;
+        };
+
+        if !atk_found {
+            skip_turn(d, addr, player_a(), game_id);
+            skip_turn(d, addr, player_b(), game_id);
+            siege_turn += 1;
+            continue;
+        }
+
+        let w = d.get_unit(game_id, 0, atk_uid);
+        let dist = hex::hex_distance(w.q, w.r, city_q, city_r);
+
+        if dist == 1 {
+            start_cheat_caller_address(addr, player_a());
+            d.submit_actions(game_id, array![Action::AttackUnit((atk_uid, city_q, city_r))]);
+            stop_cheat_caller_address(addr);
+            skip_turn(d, addr, player_a(), game_id);
+            skip_turn(d, addr, player_b(), game_id);
+        } else {
+            let neighbors = hex::hex_neighbors(w.q, w.r);
+            let nspan = neighbors.span();
+            let mut best_nq = w.q;
+            let mut best_nr = w.r;
+            let mut best_dist = dist;
+            let mut ni: u32 = 0;
+            while ni < nspan.len() {
+                let (nq, nr) = *nspan.at(ni);
+                let tile = d.get_tile(game_id, nq, nr);
+                let cost = constants::terrain_movement_cost(tile.terrain, tile.feature);
+                let nd = hex::hex_distance(nq, nr, city_q, city_r);
+                if cost > 0 && nd < best_dist {
+                    best_nq = nq;
+                    best_nr = nr;
+                    best_dist = nd;
+                }
+                ni += 1;
+            };
+            if best_nq != w.q || best_nr != w.r {
+                start_cheat_caller_address(addr, player_a());
+                d.submit_actions(game_id, array![Action::MoveUnit((atk_uid, best_nq, best_nr))]);
+                stop_cheat_caller_address(addr);
+            }
+            skip_turn(d, addr, player_a(), game_id);
+            skip_turn(d, addr, player_b(), game_id);
+        }
+        siege_turn += 1;
+    };
+
+    // If city was captured, verify ALL garrison units are dead
+    if d.get_city_count(game_id, 1) == 0 {
+        let mut dci: u32 = 0;
+        while dci < uc_b {
+            let u = d.get_unit(game_id, 1, dci);
+            if u.q == city_q && u.r == city_r {
+                assert!(u.hp == 0, "All units on captured city tile should be dead");
+            }
+            dci += 1;
+        };
+    }
+}
+
 // S43: Batch view functions return correct data
 #[test]
 fn test_batch_view_functions() {
@@ -3308,7 +3568,7 @@ fn test_batch_view_functions() {
 
     // ── Test get_player_summary ──
     let summary = d.get_player_summary(gid, 0);
-    assert!(summary.len() == 7, "Summary should have 7 elements");
+    assert!(summary.len() == 8, "Summary should have 8 elements");
     let uc_felt: u32 = (*summary.at(0)).try_into().unwrap();
     assert!(uc_felt == p0count, "Summary unit count mismatch");
 
@@ -3317,7 +3577,9 @@ fn test_batch_view_functions() {
     assert!(p0cities.len() == 0, "No cities at start");
 
     // Found a city, then check batch
-    submit_turn(d, addr, player_a(), gid, array![Action::FoundCity((0, 'TestCity'))]);
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(gid, array![Action::FoundCity((0, 'TestCity'))]);
+    stop_cheat_caller_address(addr);
 
     let p0cities2 = d.get_all_cities(gid, 0);
     assert!(p0cities2.len() == 3, "Should have 3 words for 1 city");
@@ -3343,4 +3605,623 @@ fn test_batch_view_functions() {
     assert!(chp == c0.hp, "City hp mismatch");
     assert!(cbldg == c0.buildings, "City buildings mismatch");
     assert!(is_cap == 1, "City should be capital");
+}
+
+// ===========================================================================
+// Improvement test helpers
+// ===========================================================================
+
+/// Find a territory tile (radius 2) matching the given improvement type.
+fn find_tile_for_imp(
+    d: ICairoCivDispatcher, game_id: u64, player: u8, city_id: u32, imp: u8,
+) -> (u8, u8, bool) {
+    let c = d.get_city(game_id, player, city_id);
+    let tiles = hex::hexes_in_range(c.q, c.r, 2);
+    let span = tiles.span();
+    let mut i: u32 = 0;
+    while i < span.len() {
+        let (tq, tr) = *span.at(i);
+        if tq != c.q || tr != c.r {
+            let td = d.get_tile(game_id, tq, tr);
+            let existing = d.get_tile_improvement(game_id, tq, tr);
+            let (op, oc) = d.get_tile_owner(game_id, tq, tr);
+            if existing == IMPROVEMENT_NONE
+                && op == player && oc >= 1
+                && city::is_valid_improvement_for_tile(imp, td.terrain, td.feature) {
+                return (tq, tr, true);
+            }
+        }
+        i += 1;
+    };
+    (0, 0, false)
+}
+
+/// Setup: found city, produce builder, research a tech, skip rounds.
+/// Returns (game_id, builder_id) or panics if no builder.
+fn setup_builder(
+    d: ICairoCivDispatcher, addr: ContractAddress, tech_id: u8, rounds: u32,
+) -> (u64, u32) {
+    let game_id = setup_active_game(d, addr);
+    submit_turn(d, addr, player_a(), game_id, array![
+        Action::FoundCity((0, 'ImpTest')),
+        Action::SetResearch(tech_id),
+        Action::SetProduction((0, PROD_BUILDER)),
+        Action::EndTurn,
+    ]);
+    skip_turn(d, addr, player_b(), game_id);
+    skip_rounds(d, addr, game_id, rounds);
+
+    let uc = d.get_unit_count(game_id, 0);
+    let mut builder_id: u32 = 0;
+    let mut found = false;
+    let mut i: u32 = 0;
+    while i < uc {
+        let u = d.get_unit(game_id, 0, i);
+        if u.unit_type == UNIT_BUILDER && u.hp > 0 && u.charges > 0 {
+            builder_id = i;
+            found = true;
+            break;
+        }
+        i += 1;
+    };
+    assert!(found, "Builder should exist");
+    (game_id, builder_id)
+}
+
+/// Move builder toward target tile. Skips turns as needed to reset movement.
+/// Returns true if builder is on the target tile with movement available.
+fn move_builder_to_tile(
+    d: ICairoCivDispatcher, addr: ContractAddress, game_id: u64,
+    builder_id: u32, tq: u8, tr: u8,
+) -> bool {
+    let mut steps: u32 = 0;
+    while steps < 10 {
+        let b = d.get_unit(game_id, 0, builder_id);
+        if b.hp == 0 { return false; }
+        if b.q == tq && b.r == tr {
+            if b.movement_remaining > 0 { return true; }
+            skip_turn(d, addr, player_a(), game_id);
+            skip_turn(d, addr, player_b(), game_id);
+            steps += 1;
+            continue;
+        }
+        if b.movement_remaining == 0 {
+            skip_turn(d, addr, player_a(), game_id);
+            skip_turn(d, addr, player_b(), game_id);
+            steps += 1;
+            continue;
+        }
+        let neighbors = hex::hex_neighbors(b.q, b.r);
+        let nspan = neighbors.span();
+        let dist = hex::hex_distance(b.q, b.r, tq, tr);
+        let mut best_nq = b.q;
+        let mut best_nr = b.r;
+        let mut best_dist = dist;
+        let mut ni: u32 = 0;
+        while ni < nspan.len() {
+            let (nq, nr) = *nspan.at(ni);
+            let tile = d.get_tile(game_id, nq, nr);
+            let cost = constants::terrain_movement_cost(tile.terrain, tile.feature);
+            let nd = hex::hex_distance(nq, nr, tq, tr);
+            if cost > 0 && nd < best_dist {
+                best_nq = nq;
+                best_nr = nr;
+                best_dist = nd;
+            }
+            ni += 1;
+        };
+        if best_nq == b.q && best_nr == b.r { return false; }
+        start_cheat_caller_address(addr, player_a());
+        d.submit_actions(game_id, array![Action::MoveUnit((builder_id, best_nq, best_nr))]);
+        stop_cheat_caller_address(addr);
+        // After moving, skip turn to reset movement for next step/action
+        skip_turn(d, addr, player_a(), game_id);
+        skip_turn(d, addr, player_b(), game_id);
+        steps += 1;
+    };
+    let b = d.get_unit(game_id, 0, builder_id);
+    b.q == tq && b.r == tr && b.movement_remaining > 0
+}
+
+// ===========================================================================
+// S46: Build Farm — flat grassland/plains/desert, no tech needed
+// ===========================================================================
+#[test]
+fn test_improvement_build_farm() {
+    let (d, addr) = deploy();
+    let (game_id, builder_id) = setup_builder(d, addr, 1, 22);
+    let (tq, tr, found) = find_tile_for_imp(d, game_id, 0, 0, IMPROVEMENT_FARM);
+    if !found { return; }
+
+    let reached = move_builder_to_tile(d, addr, game_id, builder_id, tq, tr);
+    if !reached { return; }
+
+    let charges_before = d.get_unit(game_id, 0, builder_id).charges;
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::BuildImprovement((builder_id, tq, tr, IMPROVEMENT_FARM))]);
+    stop_cheat_caller_address(addr);
+
+    assert!(d.get_tile_improvement(game_id, tq, tr) == IMPROVEMENT_FARM, "Farm should be built");
+    assert!(d.get_unit(game_id, 0, builder_id).charges == charges_before - 1, "Charge consumed");
+}
+
+// ===========================================================================
+// S47: Build Mine — hills terrain, requires Mining tech
+// ===========================================================================
+#[test]
+fn test_improvement_build_mine() {
+    let (d, addr) = deploy();
+    let (game_id, builder_id) = setup_builder(d, addr, 1, 22);
+    if !tech::is_researched(1, d.get_completed_techs(game_id, 0)) { return; }
+    let (tq, tr, found) = find_tile_for_imp(d, game_id, 0, 0, IMPROVEMENT_MINE);
+    if !found { return; }
+
+    let reached = move_builder_to_tile(d, addr, game_id, builder_id, tq, tr);
+    if !reached { return; }
+
+    let charges_before = d.get_unit(game_id, 0, builder_id).charges;
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::BuildImprovement((builder_id, tq, tr, IMPROVEMENT_MINE))]);
+    stop_cheat_caller_address(addr);
+
+    assert!(d.get_tile_improvement(game_id, tq, tr) == IMPROVEMENT_MINE, "Mine should be built");
+    assert!(d.get_unit(game_id, 0, builder_id).charges == charges_before - 1, "Charge consumed");
+}
+
+// ===========================================================================
+// S48: Build Quarry — hills terrain, requires Mining tech
+// ===========================================================================
+#[test]
+fn test_improvement_build_quarry() {
+    let (d, addr) = deploy();
+    let (game_id, builder_id) = setup_builder(d, addr, 1, 22);
+    if !tech::is_researched(1, d.get_completed_techs(game_id, 0)) { return; }
+    let (tq, tr, found) = find_tile_for_imp(d, game_id, 0, 0, IMPROVEMENT_QUARRY);
+    if !found { return; }
+
+    let reached = move_builder_to_tile(d, addr, game_id, builder_id, tq, tr);
+    if !reached { return; }
+
+    let charges_before = d.get_unit(game_id, 0, builder_id).charges;
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::BuildImprovement((builder_id, tq, tr, IMPROVEMENT_QUARRY))]);
+    stop_cheat_caller_address(addr);
+
+    assert!(d.get_tile_improvement(game_id, tq, tr) == IMPROVEMENT_QUARRY, "Quarry should be built");
+    assert!(d.get_unit(game_id, 0, builder_id).charges == charges_before - 1, "Charge consumed");
+}
+
+// ===========================================================================
+// S49: Build Pasture — flat grassland/plains, requires Animal Husbandry
+// ===========================================================================
+#[test]
+fn test_improvement_build_pasture() {
+    let (d, addr) = deploy();
+    let (game_id, builder_id) = setup_builder(d, addr, 3, 25);
+    if !tech::is_researched(3, d.get_completed_techs(game_id, 0)) { return; }
+    let (tq, tr, found) = find_tile_for_imp(d, game_id, 0, 0, IMPROVEMENT_PASTURE);
+    if !found { return; }
+
+    let reached = move_builder_to_tile(d, addr, game_id, builder_id, tq, tr);
+    if !reached { return; }
+
+    let charges_before = d.get_unit(game_id, 0, builder_id).charges;
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::BuildImprovement((builder_id, tq, tr, IMPROVEMENT_PASTURE))]);
+    stop_cheat_caller_address(addr);
+
+    assert!(d.get_tile_improvement(game_id, tq, tr) == IMPROVEMENT_PASTURE, "Pasture should be built");
+    assert!(d.get_unit(game_id, 0, builder_id).charges == charges_before - 1, "Charge consumed");
+}
+
+// ===========================================================================
+// S50: Build Lumber Mill — requires woods feature + Mining tech
+// ===========================================================================
+#[test]
+fn test_improvement_build_lumber_mill() {
+    let (d, addr) = deploy();
+    let (game_id, builder_id) = setup_builder(d, addr, 1, 22);
+    if !tech::is_researched(1, d.get_completed_techs(game_id, 0)) { return; }
+    let (tq, tr, found) = find_tile_for_imp(d, game_id, 0, 0, IMPROVEMENT_LUMBER_MILL);
+    if !found { return; }
+
+    let reached = move_builder_to_tile(d, addr, game_id, builder_id, tq, tr);
+    if !reached { return; }
+
+    let charges_before = d.get_unit(game_id, 0, builder_id).charges;
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::BuildImprovement((builder_id, tq, tr, IMPROVEMENT_LUMBER_MILL))]);
+    stop_cheat_caller_address(addr);
+
+    assert!(d.get_tile_improvement(game_id, tq, tr) == IMPROVEMENT_LUMBER_MILL, "Lumber Mill should be built");
+    assert!(d.get_unit(game_id, 0, builder_id).charges == charges_before - 1, "Charge consumed");
+}
+
+// ===========================================================================
+// S51: Building on tile with existing improvement is silently skipped
+// ===========================================================================
+#[test]
+fn test_improvement_on_existing_skipped() {
+    let (d, addr) = deploy();
+    let (game_id, builder_id) = setup_builder(d, addr, 1, 22);
+    let (tq, tr, found) = find_tile_for_imp(d, game_id, 0, 0, IMPROVEMENT_FARM);
+    if !found { return; }
+
+    let reached = move_builder_to_tile(d, addr, game_id, builder_id, tq, tr);
+    if !reached { return; }
+    let b = d.get_unit(game_id, 0, builder_id);
+    if b.charges < 2 { return; }
+
+    // Build the farm
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::BuildImprovement((builder_id, tq, tr, IMPROVEMENT_FARM))]);
+    stop_cheat_caller_address(addr);
+    assert!(d.get_tile_improvement(game_id, tq, tr) == IMPROVEMENT_FARM, "Farm should be built");
+    let charges_after = d.get_unit(game_id, 0, builder_id).charges;
+
+    // Skip turn to get movement back
+    skip_turn(d, addr, player_a(), game_id);
+    skip_turn(d, addr, player_b(), game_id);
+
+    // Try to build again on the same tile (should be silently skipped)
+    let b2 = d.get_unit(game_id, 0, builder_id);
+    if b2.movement_remaining == 0 || b2.charges == 0 { return; }
+
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::BuildImprovement((builder_id, tq, tr, IMPROVEMENT_FARM))]);
+    stop_cheat_caller_address(addr);
+
+    assert!(d.get_tile_improvement(game_id, tq, tr) == IMPROVEMENT_FARM, "Still a farm");
+    assert!(d.get_unit(game_id, 0, builder_id).charges == charges_after,
+        "Charges unchanged - build was skipped");
+}
+
+// ===========================================================================
+// S52: Remove improvement then rebuild on the same tile
+// ===========================================================================
+#[test]
+fn test_remove_then_rebuild() {
+    let (d, addr) = deploy();
+    let (game_id, builder_id) = setup_builder(d, addr, 1, 22);
+    let (tq, tr, found) = find_tile_for_imp(d, game_id, 0, 0, IMPROVEMENT_FARM);
+    if !found { return; }
+
+    let reached = move_builder_to_tile(d, addr, game_id, builder_id, tq, tr);
+    if !reached { return; }
+    let b = d.get_unit(game_id, 0, builder_id);
+    if b.charges < 2 { return; }
+
+    // Build
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::BuildImprovement((builder_id, tq, tr, IMPROVEMENT_FARM))]);
+    stop_cheat_caller_address(addr);
+    assert!(d.get_tile_improvement(game_id, tq, tr) == IMPROVEMENT_FARM, "Farm built");
+
+    // Skip turn for movement
+    skip_turn(d, addr, player_a(), game_id);
+    skip_turn(d, addr, player_b(), game_id);
+
+    // Remove
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::RemoveImprovement((builder_id, tq, tr))]);
+    stop_cheat_caller_address(addr);
+    assert!(d.get_tile_improvement(game_id, tq, tr) == IMPROVEMENT_NONE, "Improvement removed");
+
+    // Skip turn for movement
+    skip_turn(d, addr, player_a(), game_id);
+    skip_turn(d, addr, player_b(), game_id);
+
+    // Rebuild
+    let b3 = d.get_unit(game_id, 0, builder_id);
+    if b3.movement_remaining == 0 || b3.charges == 0 { return; }
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::BuildImprovement((builder_id, tq, tr, IMPROVEMENT_FARM))]);
+    stop_cheat_caller_address(addr);
+    assert!(d.get_tile_improvement(game_id, tq, tr) == IMPROVEMENT_FARM, "Farm rebuilt successfully");
+}
+
+// ===========================================================================
+// S53: Remove improvement then build a DIFFERENT type on the same tile
+// ===========================================================================
+#[test]
+fn test_remove_then_build_different() {
+    let (d, addr) = deploy();
+    let (game_id, builder_id) = setup_builder(d, addr, 3, 25);
+    if !tech::is_researched(3, d.get_completed_techs(game_id, 0)) { return; }
+
+    // Find tile valid for both Farm AND Pasture
+    let c = d.get_city(game_id, 0, 0);
+    let tiles = hex::hexes_in_range(c.q, c.r, 2);
+    let span = tiles.span();
+    let mut tq: u8 = 0;
+    let mut tr: u8 = 0;
+    let mut found = false;
+    let mut i: u32 = 0;
+    while i < span.len() && !found {
+        let (q, r) = *span.at(i);
+        if q != c.q || r != c.r {
+            let td = d.get_tile(game_id, q, r);
+            let existing = d.get_tile_improvement(game_id, q, r);
+            let (op, oc) = d.get_tile_owner(game_id, q, r);
+            if existing == IMPROVEMENT_NONE && op == 0 && oc >= 1
+                && city::is_valid_improvement_for_tile(IMPROVEMENT_FARM, td.terrain, td.feature)
+                && city::is_valid_improvement_for_tile(IMPROVEMENT_PASTURE, td.terrain, td.feature) {
+                tq = q; tr = r; found = true;
+            }
+        }
+        i += 1;
+    };
+    if !found { return; }
+
+    let reached = move_builder_to_tile(d, addr, game_id, builder_id, tq, tr);
+    if !reached { return; }
+    let b = d.get_unit(game_id, 0, builder_id);
+    if b.charges < 2 { return; }
+
+    // Build Farm
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::BuildImprovement((builder_id, tq, tr, IMPROVEMENT_FARM))]);
+    stop_cheat_caller_address(addr);
+    assert!(d.get_tile_improvement(game_id, tq, tr) == IMPROVEMENT_FARM, "Farm built");
+
+    skip_turn(d, addr, player_a(), game_id);
+    skip_turn(d, addr, player_b(), game_id);
+
+    // Remove Farm
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::RemoveImprovement((builder_id, tq, tr))]);
+    stop_cheat_caller_address(addr);
+    assert!(d.get_tile_improvement(game_id, tq, tr) == IMPROVEMENT_NONE, "Removed");
+
+    skip_turn(d, addr, player_a(), game_id);
+    skip_turn(d, addr, player_b(), game_id);
+
+    // Build Pasture on the same tile
+    let b3 = d.get_unit(game_id, 0, builder_id);
+    if b3.movement_remaining == 0 || b3.charges == 0 { return; }
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::BuildImprovement((builder_id, tq, tr, IMPROVEMENT_PASTURE))]);
+    stop_cheat_caller_address(addr);
+    assert!(d.get_tile_improvement(game_id, tq, tr) == IMPROVEMENT_PASTURE,
+        "Pasture built where farm was");
+}
+
+// ===========================================================================
+// S54: Farm on hills terrain is silently skipped (wrong terrain)
+// ===========================================================================
+#[test]
+fn test_farm_on_hills_skipped() {
+    let (d, addr) = deploy();
+    let (game_id, builder_id) = setup_builder(d, addr, 1, 22);
+    // Find a hills tile in territory
+    let (tq, tr, found) = find_tile_for_imp(d, game_id, 0, 0, IMPROVEMENT_MINE);
+    if !found { return; }
+
+    let reached = move_builder_to_tile(d, addr, game_id, builder_id, tq, tr);
+    if !reached { return; }
+
+    let charges_before = d.get_unit(game_id, 0, builder_id).charges;
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::BuildImprovement((builder_id, tq, tr, IMPROVEMENT_FARM))]);
+    stop_cheat_caller_address(addr);
+
+    assert!(d.get_tile_improvement(game_id, tq, tr) == IMPROVEMENT_NONE, "Farm should not be built on hills");
+    assert!(d.get_unit(game_id, 0, builder_id).charges == charges_before, "Charges unchanged");
+}
+
+// ===========================================================================
+// S55: Mine on flat terrain is silently skipped (wrong terrain)
+// ===========================================================================
+#[test]
+fn test_mine_on_flat_skipped() {
+    let (d, addr) = deploy();
+    let (game_id, builder_id) = setup_builder(d, addr, 1, 22);
+    if !tech::is_researched(1, d.get_completed_techs(game_id, 0)) { return; }
+    // Find a flat tile (valid for farm = flat + no forest)
+    let (tq, tr, found) = find_tile_for_imp(d, game_id, 0, 0, IMPROVEMENT_FARM);
+    if !found { return; }
+
+    let reached = move_builder_to_tile(d, addr, game_id, builder_id, tq, tr);
+    if !reached { return; }
+
+    let charges_before = d.get_unit(game_id, 0, builder_id).charges;
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::BuildImprovement((builder_id, tq, tr, IMPROVEMENT_MINE))]);
+    stop_cheat_caller_address(addr);
+
+    assert!(d.get_tile_improvement(game_id, tq, tr) == IMPROVEMENT_NONE, "Mine should not be built on flat");
+    assert!(d.get_unit(game_id, 0, builder_id).charges == charges_before, "Charges unchanged");
+}
+
+// ===========================================================================
+// S56: Quarry on flat terrain is silently skipped (wrong terrain)
+// ===========================================================================
+#[test]
+fn test_quarry_on_flat_skipped() {
+    let (d, addr) = deploy();
+    let (game_id, builder_id) = setup_builder(d, addr, 1, 22);
+    if !tech::is_researched(1, d.get_completed_techs(game_id, 0)) { return; }
+    let (tq, tr, found) = find_tile_for_imp(d, game_id, 0, 0, IMPROVEMENT_FARM);
+    if !found { return; }
+
+    let reached = move_builder_to_tile(d, addr, game_id, builder_id, tq, tr);
+    if !reached { return; }
+
+    let charges_before = d.get_unit(game_id, 0, builder_id).charges;
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::BuildImprovement((builder_id, tq, tr, IMPROVEMENT_QUARRY))]);
+    stop_cheat_caller_address(addr);
+
+    assert!(d.get_tile_improvement(game_id, tq, tr) == IMPROVEMENT_NONE, "Quarry should not be built on flat");
+    assert!(d.get_unit(game_id, 0, builder_id).charges == charges_before, "Charges unchanged");
+}
+
+// ===========================================================================
+// S57: Pasture on hills is silently skipped (wrong terrain)
+// ===========================================================================
+#[test]
+fn test_pasture_on_hills_skipped() {
+    let (d, addr) = deploy();
+    let (game_id, builder_id) = setup_builder(d, addr, 3, 25);
+    if !tech::is_researched(3, d.get_completed_techs(game_id, 0)) { return; }
+    let (tq, tr, found) = find_tile_for_imp(d, game_id, 0, 0, IMPROVEMENT_MINE);
+    if !found { return; }
+
+    let reached = move_builder_to_tile(d, addr, game_id, builder_id, tq, tr);
+    if !reached { return; }
+
+    let charges_before = d.get_unit(game_id, 0, builder_id).charges;
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::BuildImprovement((builder_id, tq, tr, IMPROVEMENT_PASTURE))]);
+    stop_cheat_caller_address(addr);
+
+    assert!(d.get_tile_improvement(game_id, tq, tr) == IMPROVEMENT_NONE, "Pasture should not be built on hills");
+    assert!(d.get_unit(game_id, 0, builder_id).charges == charges_before, "Charges unchanged");
+}
+
+// ===========================================================================
+// S58: Lumber Mill on tile without woods is silently skipped
+// ===========================================================================
+#[test]
+fn test_lumber_mill_no_woods_skipped() {
+    let (d, addr) = deploy();
+    let (game_id, builder_id) = setup_builder(d, addr, 1, 22);
+    if !tech::is_researched(1, d.get_completed_techs(game_id, 0)) { return; }
+    // Farm-valid tile = flat, no woods/rainforest -> definitely no woods
+    let (tq, tr, found) = find_tile_for_imp(d, game_id, 0, 0, IMPROVEMENT_FARM);
+    if !found { return; }
+
+    let reached = move_builder_to_tile(d, addr, game_id, builder_id, tq, tr);
+    if !reached { return; }
+
+    let charges_before = d.get_unit(game_id, 0, builder_id).charges;
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::BuildImprovement((builder_id, tq, tr, IMPROVEMENT_LUMBER_MILL))]);
+    stop_cheat_caller_address(addr);
+
+    assert!(d.get_tile_improvement(game_id, tq, tr) == IMPROVEMENT_NONE, "Lumber Mill needs woods");
+    assert!(d.get_unit(game_id, 0, builder_id).charges == charges_before, "Charges unchanged");
+}
+
+// ===========================================================================
+// S59: Builder not on target tile — build is silently skipped
+// ===========================================================================
+#[test]
+fn test_build_wrong_location_skipped() {
+    let (d, addr) = deploy();
+    let (game_id, builder_id) = setup_builder(d, addr, 1, 22);
+    let (tq, tr, found) = find_tile_for_imp(d, game_id, 0, 0, IMPROVEMENT_FARM);
+    if !found { return; }
+
+    // DON'T move builder to the tile — builder is still at city tile
+    let b = d.get_unit(game_id, 0, builder_id);
+    if b.q == tq && b.r == tr { return; } // builder already there, skip test
+
+    let charges_before = b.charges;
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::BuildImprovement((builder_id, tq, tr, IMPROVEMENT_FARM))]);
+    stop_cheat_caller_address(addr);
+
+    assert!(d.get_tile_improvement(game_id, tq, tr) == IMPROVEMENT_NONE, "Build should fail - wrong location");
+    assert!(d.get_unit(game_id, 0, builder_id).charges == charges_before, "Charges unchanged");
+}
+
+// ===========================================================================
+// S60: Builder with zero charges — build is silently skipped
+// ===========================================================================
+#[test]
+fn test_build_zero_charges_skipped() {
+    let (d, addr) = deploy();
+    let (game_id, builder_id) = setup_builder(d, addr, 1, 22);
+
+    // Find 3 farm-valid tiles and use all 3 charges
+    let c = d.get_city(game_id, 0, 0);
+    let tiles = hex::hexes_in_range(c.q, c.r, 2);
+    let span = tiles.span();
+    let mut farm_tiles: Array<(u8, u8)> = array![];
+    let mut i: u32 = 0;
+    while i < span.len() {
+        let (tq, tr) = *span.at(i);
+        if tq != c.q || tr != c.r {
+            let td = d.get_tile(game_id, tq, tr);
+            let existing = d.get_tile_improvement(game_id, tq, tr);
+            let (op, oc) = d.get_tile_owner(game_id, tq, tr);
+            if existing == IMPROVEMENT_NONE && op == 0 && oc >= 1
+                && city::is_valid_improvement_for_tile(IMPROVEMENT_FARM, td.terrain, td.feature) {
+                farm_tiles.append((tq, tr));
+            }
+        }
+        i += 1;
+    };
+    if farm_tiles.len() < 4 { return; } // need 3 to spend + 1 to test
+
+    // Build on first 3 tiles to exhaust charges
+    let mut fi: u32 = 0;
+    while fi < 3 {
+        let (fq, fr) = *farm_tiles.at(fi);
+        let reached = move_builder_to_tile(d, addr, game_id, builder_id, fq, fr);
+        if !reached { return; }
+        start_cheat_caller_address(addr, player_a());
+        d.submit_actions(game_id, array![Action::BuildImprovement((builder_id, fq, fr, IMPROVEMENT_FARM))]);
+        stop_cheat_caller_address(addr);
+        fi += 1;
+    };
+
+    let b = d.get_unit(game_id, 0, builder_id);
+    assert!(b.charges == 0, "Builder should have 0 charges");
+
+    // Move to a 4th tile and try to build
+    let (last_q, last_r) = *farm_tiles.at(3);
+    let reached = move_builder_to_tile(d, addr, game_id, builder_id, last_q, last_r);
+    if !reached { return; }
+
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![Action::BuildImprovement((builder_id, last_q, last_r, IMPROVEMENT_FARM))]);
+    stop_cheat_caller_address(addr);
+
+    assert!(d.get_tile_improvement(game_id, last_q, last_r) == IMPROVEMENT_NONE,
+        "Build should fail with 0 charges");
+}
+
+// ===========================================================================
+// S61: Non-builder unit (warrior) trying to build — silently skipped
+// ===========================================================================
+#[test]
+fn test_warrior_cannot_build() {
+    let (d, addr) = deploy();
+    let game_id = setup_active_game(d, addr);
+    submit_turn(d, addr, player_a(), game_id, array![
+        Action::FoundCity((0, 'NoBuild')),
+        Action::SetResearch(1),
+        Action::SetProduction((0, PROD_WARRIOR)),
+        Action::EndTurn,
+    ]);
+    skip_turn(d, addr, player_b(), game_id);
+    skip_rounds(d, addr, game_id, 15);
+
+    // Find a warrior
+    let uc = d.get_unit_count(game_id, 0);
+    let mut warrior_id: u32 = 0;
+    let mut found = false;
+    let mut i: u32 = 0;
+    while i < uc {
+        let u = d.get_unit(game_id, 0, i);
+        if u.unit_type == UNIT_WARRIOR && u.hp > 0 && u.movement_remaining > 0 {
+            warrior_id = i;
+            found = true;
+            break;
+        }
+        i += 1;
+    };
+    if !found { return; }
+
+    let w = d.get_unit(game_id, 0, warrior_id);
+    start_cheat_caller_address(addr, player_a());
+    d.submit_actions(game_id, array![
+        Action::BuildImprovement((warrior_id, w.q, w.r, IMPROVEMENT_FARM)),
+    ]);
+    stop_cheat_caller_address(addr);
+
+    assert!(d.get_tile_improvement(game_id, w.q, w.r) == IMPROVEMENT_NONE,
+        "Warrior should not be able to build");
 }

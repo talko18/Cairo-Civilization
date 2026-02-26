@@ -15,15 +15,63 @@ html,body{height:100%;overflow:hidden}
 body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);display:flex;flex-direction:column}
 button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);transition:background .15s}
 
-/* ── Setup overlay ── */
-#setup{position:fixed;inset:0;background:var(--bg);z-index:100;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px}
-#setup h1{font-size:2.4rem;color:var(--gold);letter-spacing:2px}
-#setup p{color:var(--dim);max-width:500px;text-align:center;line-height:1.5}
-#setup-btn{padding:14px 40px;font-size:1.1rem;font-weight:700;background:var(--accent);color:#fff;border-radius:8px}
-#setup-btn:hover{background:var(--accent2)}
-#setup-btn:disabled{opacity:.5;cursor:wait}
-#setup-log{color:var(--dim);font-size:.82rem;min-height:1.2em}
-#setup-error{color:#e74c3c;font-size:.82rem;max-width:600px;word-break:break-all}
+/* ── Lobby overlay ── */
+#setup{position:fixed;inset:0;background:var(--bg);z-index:100;display:flex;flex-direction:column;align-items:center;
+  justify-content:flex-start;gap:0;overflow-y:auto;padding:40px 16px}
+#setup h1{font-size:2.6rem;color:var(--gold);letter-spacing:3px;margin-bottom:6px}
+#setup .subtitle{color:var(--dim);font-size:.92rem;margin-bottom:28px}
+#setup-log{color:var(--dim);font-size:.82rem;min-height:1.2em;margin-top:8px}
+#setup-error{color:#e74c3c;font-size:.82rem;max-width:600px;word-break:break-all;margin-top:4px}
+
+.lobby-card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:32px 40px;
+  max-width:520px;width:90vw;text-align:center}
+.lobby-card h2{font-size:1.15rem;color:var(--text);margin-bottom:16px;letter-spacing:1px}
+.lobby-steps{display:flex;gap:0;align-items:center;justify-content:center;margin-bottom:24px}
+.lobby-step{display:flex;flex-direction:column;align-items:center;gap:4px;min-width:80px;position:relative}
+.lobby-step .step-num{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-weight:700;font-size:.85rem;border:2px solid var(--border);color:var(--dim);background:var(--bg);transition:all .3s}
+.lobby-step.active .step-num{border-color:var(--gold);color:var(--gold);background:rgba(245,197,66,.1)}
+.lobby-step.done .step-num{border-color:#27ae60;color:#fff;background:#27ae60}
+.lobby-step .step-label{font-size:.68rem;color:var(--dim);letter-spacing:.5px;text-transform:uppercase}
+.lobby-step.active .step-label{color:var(--gold)}
+.lobby-step.done .step-label{color:#27ae60}
+.step-line{width:40px;height:2px;background:var(--border);margin:0 4px;margin-bottom:18px;transition:background .3s}
+.step-line.done{background:#27ae60}
+
+.lobby-body{min-height:100px;display:flex;flex-direction:column;align-items:center;gap:14px}
+.lobby-body p{color:var(--dim);font-size:.85rem;line-height:1.5;max-width:400px}
+.lobby-body .info-row{display:flex;align-items:center;gap:10px;padding:10px 16px;background:rgba(255,255,255,.04);
+  border-radius:8px;font-size:.82rem;width:100%;justify-content:space-between}
+.lobby-body .info-row .label{color:var(--dim);text-transform:uppercase;font-size:.7rem;letter-spacing:.5px}
+.lobby-body .info-row .value{color:var(--text);font-family:'Courier New',monospace;font-size:.82rem}
+.lobby-body .addr{color:var(--p0txt);font-family:'Courier New',monospace;font-size:.78rem}
+.lobby-body .addr.p1{color:var(--p1txt)}
+
+.lobby-btn{padding:12px 36px;font-size:1rem;font-weight:700;border-radius:8px;min-width:180px;transition:all .2s}
+.lobby-btn:disabled{opacity:.5;cursor:wait}
+.lobby-btn.primary{background:var(--accent);color:#fff}
+.lobby-btn.primary:hover:not(:disabled){background:var(--accent2)}
+.lobby-btn.success{background:linear-gradient(135deg,#27ae60,#2ecc71);color:#fff}
+.lobby-btn.success:hover:not(:disabled){background:linear-gradient(135deg,#219653,#27ae60)}
+.lobby-btn.gold{background:linear-gradient(135deg,#d4a017,var(--gold));color:#1a1a2e}
+.lobby-btn.gold:hover:not(:disabled){background:linear-gradient(135deg,#c49a15,#d4a017)}
+
+.player-slots{width:100%;display:flex;flex-direction:column;gap:8px;margin:8px 0}
+.player-slot{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:8px;
+  border:1px solid var(--border);background:rgba(255,255,255,.02);transition:all .3s}
+.player-slot.filled{border-color:rgba(39,174,96,.4);background:rgba(39,174,96,.06)}
+.player-slot.waiting{border-color:rgba(255,255,255,.1);border-style:dashed}
+.player-slot .slot-icon{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-size:1rem;font-weight:700;flex-shrink:0}
+.player-slot .slot-info{text-align:left;flex:1;min-width:0}
+.player-slot .slot-name{font-size:.88rem;font-weight:600}
+.player-slot .slot-addr{font-size:.7rem;color:var(--dim);font-family:'Courier New',monospace;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.player-slot .slot-status{font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+
+.spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,.2);
+  border-top-color:var(--gold);border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle;margin-right:6px}
+@keyframes spin{to{transform:rotate(360deg)}}
 
 /* ── Top bar ── */
 #top-bar{display:flex;align-items:center;gap:10px;background:linear-gradient(180deg,#0d1b2a,var(--bg2));
@@ -40,6 +88,26 @@ button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);t
   font-size:.85rem;font-weight:700;border-radius:6px;box-shadow:0 2px 8px rgba(231,76,60,.3)}
 #end-btn:hover{background:linear-gradient(135deg,#a93226,#c0392b)}
 #end-btn:disabled{opacity:.5;cursor:wait}
+#forfeit-btn{padding:6px 14px;background:linear-gradient(135deg,#555,#777);color:#ccc;
+  font-size:.78rem;font-weight:600;border-radius:6px;margin-right:6px}
+#forfeit-btn:hover{background:linear-gradient(135deg,#c0392b,#e74c3c);color:#fff}
+
+/* ── Victory overlay ── */
+#victory-overlay{position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:200;display:none;
+  flex-direction:column;align-items:center;justify-content:center;gap:16px;backdrop-filter:blur(4px)}
+#victory-overlay.show{display:flex}
+#victory-overlay h1{font-size:2.6rem;letter-spacing:3px;text-shadow:0 0 30px currentColor}
+#victory-overlay .v-winner{font-size:1.3rem;font-weight:700;margin-top:4px}
+#victory-overlay .v-type{font-size:.95rem;color:var(--dim);text-transform:uppercase;letter-spacing:2px}
+#victory-overlay .v-scores{display:flex;gap:32px;margin-top:12px}
+#victory-overlay .v-score-box{text-align:center;padding:16px 28px;border-radius:10px;
+  background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1)}
+#victory-overlay .v-score-box .v-player{font-size:.8rem;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}
+#victory-overlay .v-score-box .v-pts{font-size:1.8rem;font-weight:700;color:var(--gold)}
+#victory-overlay .v-score-box.loser .v-pts{color:var(--dim)}
+#victory-overlay .v-newgame{margin-top:20px;padding:12px 36px;font-size:1rem;font-weight:700;
+  background:var(--accent);color:#fff;border-radius:8px}
+#victory-overlay .v-newgame:hover{background:var(--accent2)}
 
 /* ── Toast notifications ── */
 #toast-container{position:fixed;top:60px;right:20px;z-index:9999;display:flex;flex-direction:column;gap:8px;pointer-events:none;max-width:420px}
@@ -201,6 +269,37 @@ button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);t
 @keyframes turn-pop{0%{opacity:0;transform:translate(-50%,-50%) scale(.8)}100%{opacity:1;transform:translate(-50%,-50%) scale(1)}}
 
 ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+
+/* ── Replay control bar ── */
+#replay-bar{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:25;display:none;
+  align-items:center;gap:10px;background:rgba(15,52,96,.95);border:2px solid var(--gold);
+  border-radius:10px;padding:8px 18px;box-shadow:0 4px 24px rgba(0,0,0,.6);font-size:.82rem;
+  white-space:nowrap;backdrop-filter:blur(4px)}
+#replay-bar .rp-name{color:var(--gold);font-weight:700;font-size:.85rem}
+#replay-bar .rp-info{color:var(--text);min-width:180px;max-width:320px;overflow:hidden;text-overflow:ellipsis}
+#replay-bar button{padding:4px 10px;font-size:.75rem;font-weight:600;
+  background:rgba(255,255,255,.1);color:var(--text);border:1px solid rgba(255,255,255,.15);
+  border-radius:4px;cursor:pointer;font-family:inherit}
+#replay-bar button:hover{background:rgba(255,255,255,.2)}
+#replay-bar button:disabled{opacity:.4;cursor:default}
+#replay-bar button.rp-stop{background:rgba(231,76,60,.25);color:#ec7063;border-color:rgba(231,76,60,.3)}
+#replay-bar button.rp-stop:hover{background:rgba(231,76,60,.4)}
+#replay-bar select{padding:3px 6px;font-size:.75rem;background:rgba(255,255,255,.1);
+  color:var(--text);border:1px solid rgba(255,255,255,.15);border-radius:4px;font-family:inherit}
+
+/* ── Scenario picker in setup screen ── */
+#scenario-section{margin-top:24px;padding-top:20px;border-top:1px solid rgba(255,255,255,.1);
+  max-width:420px;text-align:center}
+#scenario-section .sc-divider{font-size:.75rem;color:var(--dim);margin-bottom:12px;letter-spacing:1px}
+#scenario-section select{padding:10px 14px;font-size:.88rem;background:var(--bg2);
+  color:var(--text);border:1px solid var(--border);border-radius:6px;width:100%;margin-bottom:8px;
+  font-family:inherit;cursor:pointer}
+#scenario-section select:focus{border-color:var(--gold);outline:none}
+#scenario-section .sc-desc{font-size:.75rem;color:var(--dim);margin-bottom:12px;min-height:1.4em;line-height:1.5}
+#scenario-btn{padding:12px 36px;font-size:1rem;font-weight:700;
+  background:linear-gradient(135deg,#27ae60,#2ecc71);color:#fff;border-radius:8px}
+#scenario-btn:hover{background:linear-gradient(135deg,#219653,#27ae60)}
+#scenario-btn:disabled{opacity:.5;cursor:wait}
 </style>
 </head>
 <body>
@@ -208,14 +307,44 @@ button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);t
 <!-- ═══ TOAST CONTAINER ═══ -->
 <div id="toast-container"></div>
 
-<!-- ═══ SETUP SCREEN ═══ -->
+<!-- ═══ LOBBY SCREEN ═══ -->
 <div id="setup">
+  <div style="flex:1;max-height:60px"></div>
   <h1>CAIRO CIV</h1>
-  <p style="font-size:.95rem">A fully on-chain Civilization game built with Cairo &amp; StarkNet.</p>
-  <p style="font-size:.8rem;color:var(--dim)">Make sure <code style="background:rgba(255,255,255,.08);padding:2px 6px;border-radius:4px">katana --dev --dev.no-fee --dev.no-account-validation</code> is running.</p>
-  <button id="setup-btn" onclick="doSetup()">Deploy &amp; Start Game</button>
-  <div id="setup-log"></div>
-  <div id="setup-error"></div>
+  <div class="subtitle">A fully on-chain Civilization game built with Cairo &amp; StarkNet</div>
+
+  <div class="lobby-card">
+    <!-- Step indicators -->
+    <div class="lobby-steps">
+      <div class="lobby-step active" id="lstep-1"><div class="step-num">1</div><div class="step-label">Deploy</div></div>
+      <div class="step-line" id="lline-1"></div>
+      <div class="lobby-step" id="lstep-2"><div class="step-num">2</div><div class="step-label">Create</div></div>
+      <div class="step-line" id="lline-2"></div>
+      <div class="lobby-step" id="lstep-3"><div class="step-num">3</div><div class="step-label">Join</div></div>
+    </div>
+
+    <!-- Step content -->
+    <div class="lobby-body" id="lobby-body">
+      <h2>Deploy Contract</h2>
+      <p>Connect to Katana devnet and deploy the Cairo Civ smart contract. Make sure Katana is running:</p>
+      <p style="font-size:.78rem"><code style="background:rgba(255,255,255,.08);padding:3px 8px;border-radius:4px">katana --dev --dev.no-fee --dev.no-account-validation</code></p>
+      <button class="lobby-btn primary" id="lobby-action-btn" onclick="lobbyAction()">Deploy Contract</button>
+    </div>
+
+    <div id="setup-log"></div>
+    <div id="setup-error"></div>
+  </div>
+
+  <!-- Scenario replay section -->
+  <div id="scenario-section">
+    <div class="sc-divider">&mdash;&mdash; or replay a test scenario &mdash;&mdash;</div>
+    <select id="scenario-select" onchange="updateScenarioDesc()">
+      <option value="">Select a scenario&hellip;</option>
+    </select>
+    <div class="sc-desc" id="scenario-desc"></div>
+    <button id="scenario-btn" onclick="runScenario()" disabled>Run Scenario</button>
+  </div>
+
   <div style="margin-top:20px;font-size:.72rem;color:var(--dim);max-width:500px;text-align:center;line-height:1.6">
     <b style="color:var(--gold)">Keyboard Shortcuts:</b>
     <span class="kb-hint">M</span> Move
@@ -226,7 +355,7 @@ button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);t
     <span class="kb-hint">B</span> Found City
     <span class="kb-hint">T</span> Tech Tree
     <span class="kb-hint">P</span> Production
-    <span class="kb-hint">E</span> End Turn
+    <span class="kb-hint">E</span> Submit Turn
     <span class="kb-hint">Tab</span> Next Unit
     <span class="kb-hint">Esc</span> Cancel
     <br>
@@ -234,6 +363,7 @@ button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);t
     <span class="kb-hint">+/-</span> Zoom
     <span class="kb-hint">Scroll</span> Zoom
   </div>
+  <div style="flex:1;max-height:40px"></div>
 </div>
 
 <!-- ═══ GAME SCREEN ═══ -->
@@ -247,7 +377,20 @@ button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);t
   <div id="spacer"></div>
   <button class="ab" onclick="openPanel('tech')">Research <span class="kb-hint">T</span></button>
   <button class="ab" onclick="openPanel('prod')">Production <span class="kb-hint">P</span></button>
-  <button id="end-btn" onclick="endTurn()">END TURN <span class="kb-hint">E</span></button>
+  <button id="forfeit-btn" onclick="forfeitGame()">Forfeit</button>
+  <button id="end-btn" onclick="endTurn()">SUBMIT TURN <span class="kb-hint">E</span></button>
+</div>
+
+<!-- ═══ VICTORY OVERLAY ═══ -->
+<div id="victory-overlay">
+  <h1 id="v-title">VICTORY</h1>
+  <div class="v-winner" id="v-winner-lbl"></div>
+  <div class="v-type" id="v-type-lbl"></div>
+  <div class="v-scores">
+    <div class="v-score-box" id="v-box-0"><div class="v-player">Player A</div><div class="v-pts" id="v-score-0">0</div></div>
+    <div class="v-score-box" id="v-box-1"><div class="v-player">Player B</div><div class="v-pts" id="v-score-1">0</div></div>
+  </div>
+  <button class="v-newgame" onclick="location.reload()">New Game</button>
 </div>
 
 <div id="main" style="display:none">
@@ -265,6 +408,20 @@ button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);t
     <canvas id="map-canvas"></canvas>
     <div id="tile-tip"></div>
     <div id="mode-banner"></div>
+    <div id="replay-bar">
+      <span class="rp-name" id="replay-name">Scenario</span>
+      <span class="rp-info" id="replay-info">Starting&hellip;</span>
+      <button id="replay-pause-btn" onclick="replayPause()">&#x23F8; Pause</button>
+      <button id="replay-step-btn" onclick="replayStep()">&#x23ED; Step</button>
+      <select id="replay-speed" onchange="setReplaySpeed()">
+        <option value="0.5">0.5x</option>
+        <option value="1" selected>1x</option>
+        <option value="2">2x</option>
+        <option value="4">4x</option>
+        <option value="8">8x</option>
+      </select>
+      <button class="rp-stop" onclick="replayStop()">&#x25A0; Stop</button>
+    </div>
     <div id="turn-notify"><h2 id="turn-notify-title">Your Turn</h2><p id="turn-notify-sub">Player A - Turn 1</p></div>
     <div id="zoom-controls">
       <button onclick="zoomAtCenter(ZOOM_STEP)" title="Zoom in (+)">+</button>
@@ -289,6 +446,7 @@ button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);t
   <span class="label">No selection</span>
 </div>
 
+<script src="scenarios.js"></script>
 <script>
 // ═══════════════════════════════════════════════════════════════
 // STATE
@@ -516,29 +674,162 @@ const canvas = document.getElementById('map-canvas');
 const ctx2d = canvas.getContext('2d');
 
 // ═══════════════════════════════════════════════════════════════
-// SETUP
+// LOBBY — multi-step game creation flow
 // ═══════════════════════════════════════════════════════════════
-async function doSetup() {
-  const btn = document.getElementById('setup-btn');
+let lobbyStep = 1;
+let lobbyData = { contractAddr: null, accounts: [], gameId: null };
+
+function setLobbyStep(step) {
+  lobbyStep = step;
+  for (let i = 1; i <= 3; i++) {
+    const el = document.getElementById('lstep-' + i);
+    el.className = 'lobby-step' + (i < step ? ' done' : i === step ? ' active' : '');
+  }
+  document.getElementById('lline-1').className = 'step-line' + (step > 1 ? ' done' : '');
+  document.getElementById('lline-2').className = 'step-line' + (step > 2 ? ' done' : '');
+}
+
+function renderLobbyBody() {
+  const body = document.getElementById('lobby-body');
+  const btn = document.getElementById('lobby-action-btn');
   const log = document.getElementById('setup-log');
   const err = document.getElementById('setup-error');
-  btn.disabled = true; err.textContent = '';
-  log.textContent = 'Connecting to Katana & deploying contract...';
+  log.textContent = ''; err.textContent = '';
+
+  if (lobbyStep === 1) {
+    body.innerHTML = `
+      <h2>Deploy Contract</h2>
+      <p>Connect to Katana devnet and deploy the Cairo Civ smart contract on-chain.</p>
+      <p style="font-size:.78rem">Make sure Katana is running: <code style="background:rgba(255,255,255,.08);padding:3px 8px;border-radius:4px">katana --dev --dev.no-fee --dev.no-account-validation</code></p>
+      <button class="lobby-btn primary" id="lobby-action-btn" onclick="lobbyAction()">Deploy Contract</button>`;
+  } else if (lobbyStep === 2) {
+    const a0 = lobbyData.accounts[0] || '';
+    const a0Short = a0.slice(0, 10) + '...' + a0.slice(-6);
+    body.innerHTML = `
+      <h2>Create Game</h2>
+      <p>Contract deployed. Now create a new game lobby.</p>
+      <div class="info-row">
+        <span class="label">Contract</span>
+        <span class="value">${(lobbyData.contractAddr||'').slice(0,10)}...${(lobbyData.contractAddr||'').slice(-6)}</span>
+      </div>
+      <div class="info-row">
+        <span class="label">Your Wallet</span>
+        <span class="value" style="color:var(--p0txt)">${a0Short}</span>
+      </div>
+      <button class="lobby-btn gold" id="lobby-action-btn" onclick="lobbyAction()">Create Game</button>`;
+  } else if (lobbyStep === 3) {
+    const a0 = lobbyData.accounts[0] || '';
+    const a1 = lobbyData.accounts[1] || '';
+    const a0Short = a0.slice(0, 10) + '...' + a0.slice(-6);
+    const a1Short = a1.slice(0, 10) + '...' + a1.slice(-6);
+    body.innerHTML = `
+      <h2>Game Lobby</h2>
+      <div class="info-row" style="margin-bottom:4px">
+        <span class="label">Game ID</span>
+        <span class="value" style="color:var(--gold)">#${lobbyData.gameId}</span>
+      </div>
+      <div class="player-slots">
+        <div class="player-slot filled">
+          <div class="slot-icon" style="background:var(--p0bg);color:var(--p0txt)">A</div>
+          <div class="slot-info">
+            <div class="slot-name" style="color:var(--p0txt)">Player A</div>
+            <div class="slot-addr">${a0Short}</div>
+          </div>
+          <div class="slot-status" style="color:#27ae60">Ready</div>
+        </div>
+        <div class="player-slot waiting" id="slot-p1">
+          <div class="slot-icon" style="background:var(--p1bg);color:var(--p1txt)">B</div>
+          <div class="slot-info">
+            <div class="slot-name" style="color:var(--p1txt)">Player B</div>
+            <div class="slot-addr">${a1Short}</div>
+          </div>
+          <div class="slot-status" style="color:var(--dim)" id="p1-status">Waiting...</div>
+        </div>
+      </div>
+      <button class="lobby-btn success" id="lobby-action-btn" onclick="lobbyAction()">Join as Player B</button>`;
+  }
+}
+
+async function lobbyAction() {
+  const btn = document.getElementById('lobby-action-btn');
+  const log = document.getElementById('setup-log');
+  const err = document.getElementById('setup-error');
+  if (btn) btn.disabled = true;
+  err.textContent = '';
+
+  try {
+    if (lobbyStep === 1) {
+      log.innerHTML = '<span class="spinner"></span>Connecting to Katana & deploying contract...';
+      const res = await fetch('/api/deploy', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      lobbyData.contractAddr = data.contractAddress;
+      lobbyData.accounts = data.accounts;
+      log.textContent = '';
+      setLobbyStep(2);
+      renderLobbyBody();
+    } else if (lobbyStep === 2) {
+      log.innerHTML = '<span class="spinner"></span>Creating game on-chain...';
+      const res = await fetch('/api/create-game', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ numPlayers: 2 }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      lobbyData.gameId = data.gameId;
+      log.textContent = '';
+      setLobbyStep(3);
+      renderLobbyBody();
+    } else if (lobbyStep === 3) {
+      log.innerHTML = '<span class="spinner"></span>Player B joining game...';
+      const res = await fetch('/api/join-game', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ player: 1, gameId: lobbyData.gameId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      // Mark Player B as joined
+      const slot = document.getElementById('slot-p1');
+      if (slot) { slot.className = 'player-slot filled'; }
+      const status = document.getElementById('p1-status');
+      if (status) { status.textContent = 'Ready'; status.style.color = '#27ae60'; }
+      log.innerHTML = '<span class="spinner"></span>Loading game state...';
+      // Brief delay to show the "Ready" state
+      await new Promise(r => setTimeout(r, 600));
+      await enterGame();
+    }
+  } catch (e) {
+    err.textContent = 'Error: ' + e.message;
+    if (btn) btn.disabled = false;
+    log.textContent = '';
+  }
+}
+
+async function enterGame() {
+  await refreshState();
+  document.getElementById('setup').style.display = 'none';
+  document.getElementById('top-bar').style.display = 'flex';
+  document.getElementById('main').style.display = 'flex';
+  document.getElementById('action-bar').style.display = 'flex';
+  centerCamera();
+  resizeCanvas();
+}
+
+// Legacy doSetup — used by scenario replays
+async function doSetup() {
+  const log = document.getElementById('setup-log');
+  const err = document.getElementById('setup-error');
+  err.textContent = '';
+  log.innerHTML = '<span class="spinner"></span>Deploying contract for scenario...';
   try {
     const res = await fetch('/api/setup', { method: 'POST' });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
-    log.textContent = 'Loading game state...';
-    await refreshState();
-    document.getElementById('setup').style.display = 'none';
-    document.getElementById('top-bar').style.display = 'flex';
-    document.getElementById('main').style.display = 'flex';
-    document.getElementById('action-bar').style.display = 'flex';
-    centerCamera();
-    resizeCanvas();
+    await enterGame();
   } catch (e) {
     err.textContent = 'Error: ' + e.message;
-    btn.disabled = false;
     log.textContent = '';
   }
 }
@@ -551,13 +842,56 @@ async function refreshState() {
   renderSidebar();
   updateActionBar();
   drawMap();
+  checkGameOver();
+}
+
+const VICTORY_NAMES = ['Domination', 'Score', 'Forfeit'];
+function checkGameOver() {
+  if (!G || G.status !== 2) return;
+  const ov = document.getElementById('victory-overlay');
+  if (ov.classList.contains('show')) return;
+  const w = G.winner || 0;
+  const vt = G.victoryType || 0;
+  const pName = w === 0 ? 'Player A' : 'Player B';
+  const pColor = w === 0 ? 'var(--p0)' : 'var(--p1)';
+  document.getElementById('v-title').style.color = pColor;
+  document.getElementById('v-winner-lbl').textContent = pName + ' Wins!';
+  document.getElementById('v-winner-lbl').style.color = pColor;
+  document.getElementById('v-type-lbl').textContent = (VICTORY_NAMES[vt] || 'Unknown') + ' Victory';
+  const scores = G.scores || [0, 0];
+  document.getElementById('v-score-0').textContent = scores[0];
+  document.getElementById('v-score-1').textContent = scores[1];
+  document.getElementById('v-box-0').className = 'v-score-box' + (w === 0 ? '' : ' loser');
+  document.getElementById('v-box-1').className = 'v-score-box' + (w === 1 ? '' : ' loser');
+  ov.classList.add('show');
+  document.getElementById('end-btn').disabled = true;
+  document.getElementById('forfeit-btn').style.display = 'none';
+}
+
+async function forfeitGame() {
+  if (!G || G.status !== 1) return;
+  if (!confirm('Are you sure you want to forfeit? ' +
+    (G.currentPlayer === 0 ? 'Player A' : 'Player B') + ' will lose.')) return;
+  try {
+    const res = await fetch('/api/forfeit', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ player: G.currentPlayer }),
+    });
+    const data = await res.json();
+    if (!res.ok) { showToast('error', 'Forfeit failed', data.error); return; }
+    await refreshState();
+  } catch (e) {
+    showToast('error', 'Forfeit error', e.message);
+  }
 }
 
 function updateTopBar() {
   if (!G) return;
-  document.getElementById('turn-lbl').textContent = 'Turn ' + G.turn;
+  document.getElementById('turn-lbl').textContent = 'Turn ' + G.turn + '/150';
   const pl = document.getElementById('player-lbl');
-  pl.textContent = G.currentPlayer === 0 ? 'Player A' : 'Player B';
+  const pName = G.currentPlayer === 0 ? 'Player A' : 'Player B';
+  pl.textContent = pName;
   pl.className = G.currentPlayer === 0 ? 'p0' : 'p1';
   const cp = G.players[G.currentPlayer];
   document.getElementById('gold-lbl').textContent = cp.treasury + ' gold';
@@ -755,7 +1089,7 @@ function panToHex(q, r) {
 function updateActionBar() {
   const bar = document.getElementById('action-bar');
   if (!selected) {
-    bar.innerHTML = '<span class="label">Click a unit or city on the map, or select from the sidebar. <span class="kb-hint">M</span>=Move <span class="kb-hint">A</span>=Attack <span class="kb-hint">R</span>=Ranged <span class="kb-hint">F</span>=Fortify <span class="kb-hint">E</span>=End Turn</span>';
+    bar.innerHTML = '<span class="label">Click a unit or city on the map, or select from the sidebar. <span class="kb-hint">M</span>=Move <span class="kb-hint">A</span>=Attack <span class="kb-hint">R</span>=Ranged <span class="kb-hint">F</span>=Fortify <span class="kb-hint">E</span>=Submit Turn</span>';
     return;
   }
 
@@ -1766,6 +2100,7 @@ function showTooltip(mx,my,hex) {
 // ═══════════════════════════════════════════════════════════════
 function handleClick(hex) {
   if(loading) return;
+  if(replay && replay.active) return;
 
   // If in action mode, execute the action
   if(actionMode==='move' && selected && selected.type==='unit') {
@@ -1793,15 +2128,12 @@ function handleClick(hex) {
         const locked = city.lockedTiles || [];
         const isLocked = locked.some(lt => lt.q === hex.q && lt.r === hex.r);
         if (isLocked) {
-          queuePredicted({type:'UnassignCitizen', cityId: city.id, q: hex.q, r: hex.r});
-          // Update local state so UI reflects change immediately
+          if (!queuePredicted({type:'UnassignCitizen', cityId: city.id, q: hex.q, r: hex.r})) return;
           city.lockedTiles = locked.filter(lt => !(lt.q === hex.q && lt.r === hex.r));
           showToast('info', 'Citizen unassigned', `Tile (${hex.q},${hex.r}) set to auto-assign.`);
         } else {
-          // Check if we can add more locked tiles (< population)
           if (locked.length < city.population) {
-            queuePredicted({type:'AssignCitizen', cityId: city.id, q: hex.q, r: hex.r});
-            // Update local state
+            if (!queuePredicted({type:'AssignCitizen', cityId: city.id, q: hex.q, r: hex.r})) return;
             city.lockedTiles = [...locked, {q: hex.q, r: hex.r}];
             showToast('info', 'Citizen assigned', `Locked citizen to tile (${hex.q},${hex.r}).`);
           } else {
@@ -1849,10 +2181,261 @@ function startAttack(){ actionMode='attack'; setModeBanner('Click enemy unit to 
 function startRanged(){ actionMode='ranged'; setModeBanner('Click enemy unit for ranged attack'); updateActionBar(); drawMap(); }
 
 // ═══════════════════════════════════════════════════════════════
-// ACTION QUEUE — predicted actions are batched with next unpredicted
+// ACTION VALIDATION — mirrors contract act_* checks client-side
 // ═══════════════════════════════════════════════════════════════
+const UNIT_COMBAT_STRENGTH = [0,0,10,20,5,10];
+const UNIT_RANGED_STRENGTH = [0,0,0,0,15,25];
+const UNIT_RANGE           = [0,0,0,0,1,2];
+const CIVILIAN_TYPES = new Set([0,1]);
+// TECH_PREREQS is defined in scenarios.js (loaded before this script)
+const BLDG_REQ_TECH_MAP = {0:0,1:2,2:8,3:7,4:11,5:9,6:10,7:12};
+const IMP_REQ_TECH = {1:0, 2:1, 3:1, 4:3, 5:1};
+
+function tileMoveCost(tile) {
+  if (!tile) return 0;
+  const t = tile.terrain;
+  if (t === 0 || t === 1 || t === 12) return 0; // ocean, coast, mountain
+  if (tile.feature === 1 || tile.feature === 2 || tile.feature === 3) return 2;
+  if (t === 3 || t === 5 || t === 7 || t === 9 || t === 11) return 2; // hills
+  return 1;
+}
+
+function playerHasTech(player, techId) {
+  if (!techId || techId === 0) return true;
+  const bits = BigInt(player.completedTechs || '0');
+  return (bits & (1n << BigInt(techId))) !== 0n;
+}
+
+function canResearchTech(player, techId) {
+  if (techId < 1 || techId > 18) return false;
+  if (playerHasTech(player, techId)) return false;
+  const prereqs = TECH_PREREQS[techId] || [];
+  return prereqs.every(p => playerHasTech(player, p));
+}
+
+function isValidImpForTile(impType, terrain, feature) {
+  if (impType === 1) return (terrain===2||terrain===4||terrain===6) && feature!==1 && feature!==2;
+  if (impType === 2) return terrain===3||terrain===5||terrain===7||terrain===9||terrain===11;
+  if (impType === 3) return terrain===3||terrain===5||terrain===7;
+  if (impType === 4) return (terrain===2||terrain===4) && feature!==1 && feature!==2;
+  if (impType === 5) return feature===1;
+  return false;
+}
+
+function validateAction(action) {
+  if (!G || G.status !== 1) return {ok:false, reason:'Game not active'};
+  const cp = G.currentPlayer;
+  const p = G.players[cp];
+  const enemy = 1 - cp;
+  const ep = G.players[enemy];
+
+  if (action.type === 'MoveUnit') {
+    const u = p.units.find(x => x.id === action.unitId);
+    if (!u) return {ok:false, reason:'Unit not found'};
+    if (u.hp <= 0) return {ok:false, reason:'Unit is dead'};
+    if (u.mp <= 0) return {ok:false, reason:'No movement points remaining'};
+    const dq = action.destQ, dr = action.destR;
+    if (dq < 0 || dq >= 32 || dr < 0 || dr >= 20) return {ok:false, reason:'Destination out of bounds'};
+    const dist = hexDist(u.q, u.r, dq, dr);
+    if (dist === 0) return {ok:false, reason:'Already on that tile'};
+    const destTile = getTile(dq, dr);
+    if (!destTile) return {ok:false, reason:'Invalid destination tile'};
+    if (dist === 1) {
+      const cost = tileMoveCost(destTile);
+      if (cost === 0) return {ok:false, reason:'Tile is impassable (water/mountain)'};
+      if (u.mp < cost) return {ok:false, reason:`Not enough movement (need ${cost}, have ${u.mp})`};
+    }
+    // Check for enemy combat unit at destination
+    const enemyCombat = ep.units.find(x => x.hp > 0 && x.q === dq && x.r === dr && !CIVILIAN_TYPES.has(x.unitType));
+    if (enemyCombat) return {ok:false, reason:'Enemy combat unit at destination (use Attack instead)'};
+    // Check friendly combat stacking
+    if (!CIVILIAN_TYPES.has(u.unitType)) {
+      const friendlyCombat = p.units.find(x => x.hp > 0 && x.id !== u.id && x.q === dq && x.r === dr && !CIVILIAN_TYPES.has(x.unitType));
+      if (friendlyCombat) return {ok:false, reason:'Cannot stack two combat units on the same tile'};
+    }
+    return {ok:true};
+  }
+
+  if (action.type === 'AttackUnit') {
+    const u = p.units.find(x => x.id === action.unitId);
+    if (!u) return {ok:false, reason:'Unit not found'};
+    if (u.hp <= 0) return {ok:false, reason:'Unit is dead'};
+    if (u.mp <= 0) return {ok:false, reason:'No movement points remaining'};
+    const cs = UNIT_COMBAT_STRENGTH[u.unitType] || 0;
+    if (cs === 0) return {ok:false, reason:'Unit has no melee combat strength'};
+    const tq = action.targetQ, tr = action.targetR;
+    const dist = hexDist(u.q, u.r, tq, tr);
+    if (dist !== 1) return {ok:false, reason:'Target must be adjacent (distance 1)'};
+    // Check for enemy city or combat unit at target
+    const enemyCity = ep.cities.find(c => c.hp > 0 && c.q === tq && c.r === tr);
+    const enemyUnit = ep.units.find(x => x.hp > 0 && x.q === tq && x.r === tr && !CIVILIAN_TYPES.has(x.unitType));
+    if (!enemyCity && !enemyUnit) return {ok:false, reason:'No enemy city or combat unit at target'};
+    if (p.diplomacy !== 1) return {ok:false, reason:'Not at war (declare war first)'};
+    return {ok:true};
+  }
+
+  if (action.type === 'RangedAttack') {
+    const u = p.units.find(x => x.id === action.unitId);
+    if (!u) return {ok:false, reason:'Unit not found'};
+    if (u.hp <= 0) return {ok:false, reason:'Unit is dead'};
+    const rs = UNIT_RANGED_STRENGTH[u.unitType] || 0;
+    if (rs === 0) return {ok:false, reason:'Unit has no ranged attack capability'};
+    const range = UNIT_RANGE[u.unitType] || 0;
+    const tq = action.targetQ, tr = action.targetR;
+    const dist = hexDist(u.q, u.r, tq, tr);
+    if (dist > range) return {ok:false, reason:`Target out of range (distance ${dist}, range ${range})`};
+    // Must have target: enemy city or enemy unit
+    const enemyCity = ep.cities.find(c => c.hp > 0 && c.q === tq && c.r === tr);
+    const enemyUnit = ep.units.find(x => x.hp > 0 && x.q === tq && x.r === tr);
+    if (!enemyCity && !enemyUnit) return {ok:false, reason:'No enemy target at location'};
+    if (p.diplomacy !== 1) return {ok:false, reason:'Not at war (declare war first)'};
+    return {ok:true};
+  }
+
+  if (action.type === 'FoundCity') {
+    const u = p.units.find(x => x.id === action.settlerId);
+    if (!u) return {ok:false, reason:'Settler not found'};
+    if (u.hp <= 0) return {ok:false, reason:'Settler is dead'};
+    if (u.unitType !== 0) return {ok:false, reason:'Only settlers can found cities'};
+    const tile = getTile(u.q, u.r);
+    if (!tile) return {ok:false, reason:'Invalid tile'};
+    if (tile.terrain === 0 || tile.terrain === 1) return {ok:false, reason:'Cannot found city on water'};
+    if (tile.terrain === 12) return {ok:false, reason:'Cannot found city on mountain'};
+    // Check distance from all existing cities
+    const allCities = [...G.players[0].cities, ...G.players[1].cities];
+    for (const c of allCities) {
+      if (hexDist(u.q, u.r, c.q, c.r) < 3) return {ok:false, reason:`Too close to ${c.name} (min distance 3)`};
+    }
+    return {ok:true};
+  }
+
+  if (action.type === 'SetProduction') {
+    const c = p.cities.find(x => x.id === action.cityId);
+    if (!c) return {ok:false, reason:'City not found'};
+    const itemId = action.itemId;
+    const cost = PROD_ITEM_COST[itemId];
+    if (!cost) return {ok:false, reason:'Invalid production item'};
+    // Check unit tech requirements
+    if (itemId >= 1 && itemId <= 63) {
+      const unitType = itemId - 1;
+      const UNIT_REQ = {5:4}; // Archer(5) needs Archery(4)
+      const req = UNIT_REQ[unitType] || 0;
+      if (req && !playerHasTech(p, req)) return {ok:false, reason:`Requires ${TECH_NAMES[req]}`};
+    }
+    // Check building requirements
+    if (itemId >= 64 && itemId <= 127) {
+      const bbit = itemId - 64;
+      if (c.buildings & (1 << bbit)) return {ok:false, reason:'Building already built'};
+      const reqTech = BLDG_REQ_TECH_MAP[bbit] || 0;
+      if (reqTech && !playerHasTech(p, reqTech)) return {ok:false, reason:`Requires ${TECH_NAMES[reqTech]}`};
+    }
+    return {ok:true};
+  }
+
+  if (action.type === 'SetResearch') {
+    const techId = action.techId;
+    if (techId < 1 || techId > 18) return {ok:false, reason:'Invalid tech ID'};
+    if (playerHasTech(p, techId)) return {ok:false, reason:'Already researched'};
+    if (!canResearchTech(p, techId)) return {ok:false, reason:'Prerequisites not met'};
+    return {ok:true};
+  }
+
+  if (action.type === 'BuildImprovement') {
+    const u = p.units.find(x => x.id === action.builderId);
+    if (!u) return {ok:false, reason:'Builder not found'};
+    if (u.hp <= 0) return {ok:false, reason:'Builder is dead'};
+    if (u.unitType !== 1) return {ok:false, reason:'Only builders can build improvements'};
+    if ((u.charges || 0) <= 0) return {ok:false, reason:'Builder has no charges remaining'};
+    if (u.mp <= 0) return {ok:false, reason:'No movement points remaining'};
+    if (u.q !== action.q || u.r !== action.r) return {ok:false, reason:'Builder must be on the target tile'};
+    const tile = getTile(action.q, action.r);
+    if (!tile) return {ok:false, reason:'Invalid tile'};
+    if (tile.ownerPlayer !== cp || tile.ownerCity === 0) return {ok:false, reason:'Tile not in your territory'};
+    if (tile.improvement > 0) return {ok:false, reason:'Tile already has an improvement (remove it first)'};
+    const reqTech = IMP_REQ_TECH[action.improvement] || 0;
+    if (reqTech && !playerHasTech(p, reqTech)) return {ok:false, reason:`Requires ${TECH_NAMES[reqTech]}`};
+    if (!isValidImpForTile(action.improvement, tile.terrain, tile.feature))
+      return {ok:false, reason:`${IMPROVEMENT_NAMES[action.improvement]} cannot be built on this terrain`};
+    return {ok:true};
+  }
+
+  if (action.type === 'RemoveImprovement') {
+    const u = p.units.find(x => x.id === action.builderId);
+    if (!u) return {ok:false, reason:'Builder not found'};
+    if (u.hp <= 0) return {ok:false, reason:'Builder is dead'};
+    if (u.unitType !== 1) return {ok:false, reason:'Only builders can remove improvements'};
+    if (u.mp <= 0) return {ok:false, reason:'No movement points remaining'};
+    if (u.q !== action.q || u.r !== action.r) return {ok:false, reason:'Builder must be on the tile'};
+    const tile = getTile(action.q, action.r);
+    if (!tile) return {ok:false, reason:'Invalid tile'};
+    if (tile.ownerPlayer !== cp || tile.ownerCity === 0) return {ok:false, reason:'Tile not in your territory'};
+    if ((tile.improvement || 0) === 0) return {ok:false, reason:'No improvement to remove'};
+    return {ok:true};
+  }
+
+  if (action.type === 'RemoveFeature') {
+    const u = p.units.find(x => x.id === action.builderId);
+    if (!u) return {ok:false, reason:'Builder not found'};
+    if (u.hp <= 0) return {ok:false, reason:'Builder is dead'};
+    if (u.unitType !== 1) return {ok:false, reason:'Only builders can remove features'};
+    if ((u.charges || 0) <= 0) return {ok:false, reason:'Builder has no charges remaining'};
+    if (u.mp <= 0) return {ok:false, reason:'No movement points remaining'};
+    if (u.q !== action.q || u.r !== action.r) return {ok:false, reason:'Builder must be on the tile'};
+    const tile = getTile(action.q, action.r);
+    if (!tile) return {ok:false, reason:'Invalid tile'};
+    if (tile.ownerPlayer !== cp || tile.ownerCity === 0) return {ok:false, reason:'Tile not in your territory'};
+    if (!tile.feature) return {ok:false, reason:'No feature to remove on this tile'};
+    return {ok:true};
+  }
+
+  if (action.type === 'FortifyUnit') {
+    const u = p.units.find(x => x.id === action.unitId);
+    if (!u) return {ok:false, reason:'Unit not found'};
+    if (u.hp <= 0) return {ok:false, reason:'Unit is dead'};
+    return {ok:true};
+  }
+
+  if (action.type === 'SkipUnit') {
+    const u = p.units.find(x => x.id === action.unitId);
+    if (!u) return {ok:false, reason:'Unit not found'};
+    return {ok:true};
+  }
+
+  if (action.type === 'DeclareWar') {
+    if (p.diplomacy === 1) return {ok:false, reason:'Already at war'};
+    return {ok:true};
+  }
+
+  if (action.type === 'UpgradeUnit') {
+    const u = p.units.find(x => x.id === action.unitId);
+    if (!u) return {ok:false, reason:'Unit not found'};
+    if (u.hp <= 0) return {ok:false, reason:'Unit is dead'};
+    if (u.unitType !== 4) return {ok:false, reason:'Only Slingers can upgrade (to Archer)'};
+    if (!playerHasTech(p, 4)) return {ok:false, reason:'Requires Archery tech'};
+    return {ok:true};
+  }
+
+  if (action.type === 'PurchaseWithGold') {
+    const c = p.cities.find(x => x.id === action.cityId);
+    if (!c) return {ok:false, reason:'City not found'};
+    const cost = PROD_ITEM_COST[action.itemId];
+    if (!cost) return {ok:false, reason:'Invalid item'};
+    const goldCost = Math.floor(cost * 4);
+    if (p.treasury < goldCost) return {ok:false, reason:`Not enough gold (need ${goldCost}, have ${p.treasury})`};
+    return {ok:true};
+  }
+
+  if (action.type === 'AssignCitizen' || action.type === 'UnassignCitizen') {
+    const c = p.cities.find(x => x.id === action.cityId);
+    if (!c) return {ok:false, reason:'City not found'};
+    return {ok:true};
+  }
+
+  return {ok:true};
+}
+
 // ═══════════════════════════════════════════════════════════════
-// ACTION QUEUE — ALL actions are queued locally; only EndTurn flushes
+// ACTION QUEUE — ALL actions are queued locally; only Submit Turn flushes
 // ═══════════════════════════════════════════════════════════════
 let pendingActions = [];
 
@@ -1864,15 +2447,21 @@ function updateQueueBadge() {
   lbl.textContent = pendingActions.length + ' queued';
 }
 
-// Queue any action — apply optimistic state + animation, no transaction
+// Queue any action — validate first, then apply optimistic state + animation
 function queueAction(action) {
+  const v = validateAction(action);
+  if (!v.ok) {
+    showToast('error', 'Invalid action', v.reason, 4000);
+    return false;
+  }
   pendingActions.push(action);
   applyOptimistic(action);
   updateQueueBadge();
+  return true;
 }
 
 // Legacy compat — same as queueAction now
-function queuePredicted(action) { queueAction(action); }
+function queuePredicted(action) { return queueAction(action); }
 
 // ═══════════════════════════════════════════════════════════════
 // ANIMATION SYSTEM — smooth visual transitions
@@ -2161,8 +2750,9 @@ function declareWar() {
 // --- All actions are now queued locally with optimistic updates ---
 
 function doAction(action) {
+  if (G && G.status !== 1) return;
   actionMode=null; setModeBanner(null);
-  queueAction(action);
+  if (!queueAction(action)) return;
   // After move, keep unit selected so player can continue commanding
   if (action.type === 'MoveUnit') {
     const cp = G.currentPlayer;
@@ -2183,7 +2773,7 @@ function foundCity() {
   const settlerQ = selected.q, settlerR = selected.r;
   const name = prompt('City name:', 'City');
   if(!name) return;
-  queueAction({type:'FoundCity', settlerId:selected.id, name});
+  if (!queueAction({type:'FoundCity', settlerId:selected.id, name})) return;
   // Auto-select the new city and open production panel
   const newCity = G.players[cp].cities.find(c => c.q === settlerQ && c.r === settlerR);
   if (newCity) {
@@ -2197,14 +2787,14 @@ function foundCity() {
 }
 
 async function endTurn() {
-  if (!G) return;
+  if (!G || G.status !== 1) return;
   const cp = G.currentPlayer;
   const p = G.players[cp];
 
   // Client-side validation: all cities must have production
   const noProd = p.cities.filter(c => c.production === 0);
   if (noProd.length > 0) {
-    showToast('error', 'Cannot end turn', `<b>${noProd[0].name}</b> has no production set. Click the city and press <b>P</b> to set production.`, 5000);
+    showToast('error', 'Cannot submit turn', `<b>${noProd[0].name}</b> has no production set. Click the city and press <b>P</b> to set production.`, 5000);
     // Auto-select the first city without production
     const c = noProd[0];
     selected = { type: 'city', player: cp, id: c.id, q: c.q, r: c.r };
@@ -2214,13 +2804,13 @@ async function endTurn() {
   }
   // Client-side validation: research must be set if cities exist
   if (p.cities.length > 0 && !p.currentResearch) {
-    showToast('error', 'Cannot end turn', 'You must set a research target. Press <b>T</b> to open the tech tree.', 5000);
+    showToast('error', 'Cannot submit turn', 'You must set a research target. Press <b>T</b> to open the tech tree.', 5000);
     openPanel('tech');
     return;
   }
 
-  // Flush all queued actions + EndTurn in one batch
-  const batch = [...pendingActions, {type:'EndTurn'}];
+  // Flush all queued actions via submit_turn (marks player as submitted)
+  const batch = [...pendingActions];
   pendingActions = [];
   updateQueueBadge();
   await submitBatch(batch, true);
@@ -2239,7 +2829,7 @@ function removeImprovement(builderId, q, r) {
 
 // Legacy alias — kept for backward compatibility
 async function submitActions(actions) {
-  await submitBatch(actions, actions.some(a => a.type === 'EndTurn'));
+  await submitBatch(actions, false);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2557,6 +3147,8 @@ document.addEventListener('keydown', (e) => {
   if (!G || loading) return;
   // Don't capture when typing in inputs
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  // Block action keys during scenario replay (camera keys still work above)
+  if (replay && replay.active) return;
 
   if (kl === 'escape') {
     if (actionMode) { cancelMode(); e.preventDefault(); }
@@ -2650,9 +3242,188 @@ refreshState = async function() {
 };
 
 // ═══════════════════════════════════════════════════════════════
+// SCENARIO REPLAY ENGINE
+// ═══════════════════════════════════════════════════════════════
+let replay = { active: false, paused: false, speed: 1, gen: null, name: '', turnNum: 0, stepMode: false };
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function populateScenarios() {
+  if (typeof SCENARIOS === 'undefined') return;
+  const sel = document.getElementById('scenario-select');
+  for (const s of SCENARIOS) {
+    const opt = document.createElement('option');
+    opt.value = s.id;
+    opt.textContent = s.name;
+    sel.appendChild(opt);
+  }
+}
+
+function updateScenarioDesc() {
+  const sel = document.getElementById('scenario-select');
+  const sc = typeof SCENARIOS !== 'undefined' && SCENARIOS.find(s => s.id === sel.value);
+  document.getElementById('scenario-desc').textContent = sc ? sc.desc : '';
+  document.getElementById('scenario-btn').disabled = !sel.value;
+}
+
+async function runScenario() {
+  const sel = document.getElementById('scenario-select');
+  const scenarioId = sel.value;
+  if (!scenarioId) return;
+  const scenario = typeof SCENARIOS !== 'undefined' && SCENARIOS.find(s => s.id === scenarioId);
+  if (!scenario) return;
+
+  const actionBtn = document.getElementById('lobby-action-btn');
+  const sbtn = document.getElementById('scenario-btn');
+  const log = document.getElementById('setup-log');
+  const err = document.getElementById('setup-error');
+  if (actionBtn) actionBtn.disabled = true;
+  sbtn.disabled = true; err.textContent = '';
+  log.innerHTML = '<span class="spinner"></span>Deploying contract for scenario replay...';
+
+  try {
+    const res = await fetch('/api/setup', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    log.innerHTML = '<span class="spinner"></span>Loading game state...';
+    await enterGame();
+  } catch (e) {
+    err.textContent = 'Error: ' + e.message;
+    if (actionBtn) actionBtn.disabled = false;
+    sbtn.disabled = false;
+    log.textContent = '';
+    return;
+  }
+
+  replay.active = true;
+  replay.paused = false;
+  replay.stepMode = false;
+  replay.speed = parseFloat(document.getElementById('replay-speed').value) || 1;
+  replay.gen = scenario.generate();
+  replay.name = scenario.name;
+  replay.turnNum = 0;
+
+  document.getElementById('replay-bar').style.display = 'flex';
+  document.getElementById('end-btn').disabled = true;
+  document.getElementById('forfeit-btn').disabled = true;
+  updateReplayBar();
+
+  await replayLoop();
+}
+
+function updateReplayBar() {
+  document.getElementById('replay-name').textContent = replay.name;
+  document.getElementById('replay-pause-btn').textContent = replay.paused ? '\u25B6 Resume' : '\u23F8 Pause';
+}
+
+function setReplaySpeed() {
+  replay.speed = parseFloat(document.getElementById('replay-speed').value) || 1;
+}
+
+async function replayLoop() {
+  while (replay.active && !replay.paused) {
+    if (G && G.status === 2) { replayDone('Game over!'); return; }
+
+    const result = replay.gen.next();
+    if (result.done) { replayDone('Scenario complete'); return; }
+
+    const turn = result.value;
+    replay.turnNum++;
+    document.getElementById('replay-info').textContent = turn.label || ('Step ' + replay.turnNum);
+
+    if (G.currentPlayer !== turn.player) {
+      showToast('error', 'Replay Error', `Expected player ${turn.player} but it is player ${G.currentPlayer}'s turn.`);
+      replayDone('Player mismatch'); return;
+    }
+
+    if (turn.focus) panToHex(turn.focus.q, turn.focus.r);
+
+    const actionDelay = Math.max(50, 400 / replay.speed);
+    for (const action of turn.actions) {
+      queueAction(action);
+      await sleep(actionDelay);
+      if (!replay.active) return;
+    }
+
+    const batch = [...pendingActions];
+    pendingActions = [];
+    updateQueueBadge();
+
+    try {
+      const res = await fetch('/api/turn', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({player: turn.player, actions: batch})
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showToast('error', 'Replay: Turn Failed', data.error, 8000);
+        await refreshState();
+      } else {
+        selected = null; actionMode = null; setModeBanner(null);
+        await refreshState();
+      }
+    } catch (e) {
+      showToast('error', 'Replay: Network Error', e.message, 8000);
+      await refreshState();
+    }
+
+    const turnDelay = Math.max(100, 800 / replay.speed);
+    await sleep(turnDelay);
+
+    if (replay.stepMode) {
+      replay.paused = true;
+      replay.stepMode = false;
+      updateReplayBar();
+    }
+  }
+}
+
+function replayPause() {
+  if (!replay.active) return;
+  if (replay.paused) {
+    replay.paused = false;
+    updateReplayBar();
+    replayLoop();
+  } else {
+    replay.paused = true;
+    updateReplayBar();
+  }
+}
+
+function replayStep() {
+  if (!replay.active) return;
+  replay.stepMode = true;
+  if (replay.paused) {
+    replay.paused = false;
+    updateReplayBar();
+    replayLoop();
+  }
+}
+
+function replayStop() {
+  replay.active = false;
+  replay.paused = false;
+  document.getElementById('replay-bar').style.display = 'none';
+  document.getElementById('end-btn').disabled = false;
+  document.getElementById('forfeit-btn').disabled = false;
+  showToast('success', 'Replay Stopped', 'You can now play manually from this state.', 4000);
+}
+
+function replayDone(msg) {
+  replay.active = false;
+  document.getElementById('replay-info').textContent = msg || 'Done';
+  document.getElementById('replay-pause-btn').disabled = true;
+  document.getElementById('replay-step-btn').disabled = true;
+  document.getElementById('end-btn').disabled = false;
+  document.getElementById('forfeit-btn').disabled = false;
+  showToast('success', 'Scenario Finished', (msg || 'Replay complete.') + ' You can now play manually.', 6000);
+}
+
+// ═══════════════════════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════════════════════
-setTimeout(() => { resizeCanvas(); updateZoomLabel(); }, 50);
+setTimeout(() => { resizeCanvas(); updateZoomLabel(); populateScenarios(); }, 50);
 </script>
 </body>
 </html>
