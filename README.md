@@ -156,13 +156,27 @@ The server will declare the contract, deploy it, create a 2-player game, and aut
 
 Each action submits a real transaction to the contract on Katana. The game state (map, units, cities, treasury, research) is read back from the contract after every turn.
 
+### Playing Over the Network (Two Players, Two Computers)
+
+The default setup runs as hotseat (both players on one browser). To play with someone else over the internet using [ngrok](https://ngrok.com/):
+
+1. Install ngrok: `npm install -g ngrok` or `snap install ngrok`
+2. Start Katana and the UI server locally as described above.
+3. In a new terminal, expose the server:
+
+```bash
+ngrok http 3000
+```
+
+4. ngrok prints a public URL (e.g. `https://abc123.ngrok-free.app`). Share it with your opponent.
+5. Player 1 opens the URL and deploys/creates the game. Player 2 opens the same URL and joins.
+
 ### Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `KATANA_URL` | `http://localhost:5050` | Katana RPC endpoint |
 | `PORT` | `3000` | UI server port |
-
 Example: `KATANA_URL=http://localhost:5050 PORT=8080 npm start`
 
 ## Tech Stack

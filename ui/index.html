@@ -678,15 +678,18 @@ const ctx2d = canvas.getContext('2d');
 // ═══════════════════════════════════════════════════════════════
 let lobbyStep = 1;
 let lobbyData = { contractAddr: null, accounts: [], gameId: null };
+let myPlayer = parseInt(sessionStorage.getItem('myPlayer') || '0');
+function setMyPlayer(p) { myPlayer = p; sessionStorage.setItem('myPlayer', String(p)); }
 
 function setLobbyStep(step) {
   lobbyStep = step;
+  const visualStep = step === 4 ? 3 : step;
   for (let i = 1; i <= 3; i++) {
     const el = document.getElementById('lstep-' + i);
-    el.className = 'lobby-step' + (i < step ? ' done' : i === step ? ' active' : '');
+    el.className = 'lobby-step' + (i < visualStep ? ' done' : i === visualStep ? ' active' : '');
   }
-  document.getElementById('lline-1').className = 'step-line' + (step > 1 ? ' done' : '');
-  document.getElementById('lline-2').className = 'step-line' + (step > 2 ? ' done' : '');
+  document.getElementById('lline-1').className = 'step-line' + (visualStep > 1 ? ' done' : '');
+  document.getElementById('lline-2').className = 'step-line' + (visualStep > 2 ? ' done' : '');
 }
 
 function renderLobbyBody() {
@@ -718,35 +721,27 @@ function renderLobbyBody() {
       </div>
       <button class="lobby-btn gold" id="lobby-action-btn" onclick="lobbyAction()">Create Game</button>`;
   } else if (lobbyStep === 3) {
-    const a0 = lobbyData.accounts[0] || '';
-    const a1 = lobbyData.accounts[1] || '';
-    const a0Short = a0.slice(0, 10) + '...' + a0.slice(-6);
-    const a1Short = a1.slice(0, 10) + '...' + a1.slice(-6);
     body.innerHTML = `
-      <h2>Game Lobby</h2>
+      <h2>Join Game</h2>
+      <p>A game is waiting for you to join as <b style="color:var(--p1txt)">Player B</b>.</p>
       <div class="info-row" style="margin-bottom:4px">
         <span class="label">Game ID</span>
         <span class="value" style="color:var(--gold)">#${lobbyData.gameId}</span>
       </div>
-      <div class="player-slots">
-        <div class="player-slot filled">
-          <div class="slot-icon" style="background:var(--p0bg);color:var(--p0txt)">A</div>
-          <div class="slot-info">
-            <div class="slot-name" style="color:var(--p0txt)">Player A</div>
-            <div class="slot-addr">${a0Short}</div>
-          </div>
-          <div class="slot-status" style="color:#27ae60">Ready</div>
-        </div>
-        <div class="player-slot waiting" id="slot-p1">
-          <div class="slot-icon" style="background:var(--p1bg);color:var(--p1txt)">B</div>
-          <div class="slot-info">
-            <div class="slot-name" style="color:var(--p1txt)">Player B</div>
-            <div class="slot-addr">${a1Short}</div>
-          </div>
-          <div class="slot-status" style="color:var(--dim)" id="p1-status">Waiting...</div>
-        </div>
+      <button class="lobby-btn success" id="lobby-action-btn" onclick="lobbyAction()">Join Game</button>`;
+  } else if (lobbyStep === 4) {
+    body.innerHTML = `
+      <h2>Waiting for Player B</h2>
+      <p>Game created! Share this link with your opponent:</p>
+      <div class="info-row" style="margin-bottom:4px;cursor:pointer" onclick="navigator.clipboard.writeText(location.href);this.querySelector('.label').textContent='Copied!';setTimeout(()=>this.querySelector('.label').textContent='Link',1500)">
+        <span class="label">Link</span>
+        <span class="value" style="font-size:.72rem;word-break:break-all">${location.href}</span>
       </div>
-      <button class="lobby-btn success" id="lobby-action-btn" onclick="lobbyAction()">Join as Player B</button>`;
+      <div class="info-row" style="margin-bottom:4px">
+        <span class="label">Game ID</span>
+        <span class="value" style="color:var(--gold)">#${lobbyData.gameId}</span>
+      </div>
+      <p style="font-size:.82rem"><span class="spinner"></span> Waiting for opponent to join...</p>`;
   }
 }
 
@@ -765,6 +760,7 @@ async function lobbyAction() {
       if (!res.ok) throw new Error(data.error);
       lobbyData.contractAddr = data.contractAddress;
       lobbyData.accounts = data.accounts;
+      setMyPlayer(0);
       log.textContent = '';
       setLobbyStep(2);
       renderLobbyBody();
@@ -778,11 +774,13 @@ async function lobbyAction() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
       lobbyData.gameId = data.gameId;
+      setMyPlayer(0);
       log.textContent = '';
-      setLobbyStep(3);
+      setLobbyStep(4);
       renderLobbyBody();
+      pollForOpponent();
     } else if (lobbyStep === 3) {
-      log.innerHTML = '<span class="spinner"></span>Player B joining game...';
+      log.innerHTML = '<span class="spinner"></span>Joining game...';
       const res = await fetch('/api/join-game', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -790,20 +788,32 @@ async function lobbyAction() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
-      // Mark Player B as joined
-      const slot = document.getElementById('slot-p1');
-      if (slot) { slot.className = 'player-slot filled'; }
-      const status = document.getElementById('p1-status');
-      if (status) { status.textContent = 'Ready'; status.style.color = '#27ae60'; }
+      setMyPlayer(1);
       log.innerHTML = '<span class="spinner"></span>Loading game state...';
-      // Brief delay to show the "Ready" state
-      await new Promise(r => setTimeout(r, 600));
+      await new Promise(r => setTimeout(r, 400));
       await enterGame();
     }
   } catch (e) {
     err.textContent = 'Error: ' + e.message;
     if (btn) btn.disabled = false;
     log.textContent = '';
+  }
+}
+
+async function pollForOpponent() {
+  while (true) {
+    await new Promise(r => setTimeout(r, 2000));
+    try {
+      const res = await fetch('/api/lobby-status');
+      const data = await res.json();
+      if (data.phase === 'active') {
+        const log = document.getElementById('setup-log');
+        log.innerHTML = '<span class="spinner"></span>Opponent joined! Loading game...';
+        await new Promise(r => setTimeout(r, 400));
+        await enterGame();
+        return;
+      }
+    } catch (_) {}
   }
 }
 
@@ -871,12 +881,12 @@ function checkGameOver() {
 async function forfeitGame() {
   if (!G || G.status !== 1) return;
   if (!confirm('Are you sure you want to forfeit? ' +
-    (G.currentPlayer === 0 ? 'Player A' : 'Player B') + ' will lose.')) return;
+    (myPlayer === 0 ? 'Player A' : 'Player B') + ' will lose.')) return;
   try {
     const res = await fetch('/api/forfeit', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ player: G.currentPlayer }),
+      body: JSON.stringify({ player: myPlayer }),
     });
     const data = await res.json();
     if (!res.ok) { showToast('error', 'Forfeit failed', data.error); return; }
@@ -890,10 +900,11 @@ function updateTopBar() {
   if (!G) return;
   document.getElementById('turn-lbl').textContent = 'Turn ' + G.turn + '/150';
   const pl = document.getElementById('player-lbl');
-  const pName = G.currentPlayer === 0 ? 'Player A' : 'Player B';
-  pl.textContent = pName;
-  pl.className = G.currentPlayer === 0 ? 'p0' : 'p1';
-  const cp = G.players[G.currentPlayer];
+  const pName = myPlayer === 0 ? 'Player A' : 'Player B';
+  const submitted = G.players[myPlayer]?.submitted;
+  pl.textContent = submitted ? pName + ' (waiting)' : pName;
+  pl.className = myPlayer === 0 ? 'p0' : 'p1';
+  const cp = G.players[myPlayer];
   document.getElementById('gold-lbl').textContent = cp.treasury + ' gold';
 
   // Science display: per-turn rate + current research progress
@@ -934,7 +945,7 @@ function switchTab(tab) {
 function renderSidebar() {
   if (!G) return;
   const body = document.getElementById('sidebar-body');
-  const cp = G.currentPlayer;
+  const cp = myPlayer;
   const p = sidebarTab === 'mine' ? cp : (1 - cp);
   const isMine = sidebarTab === 'mine';
   const pData = G.players[p];
@@ -1093,7 +1104,7 @@ function updateActionBar() {
     return;
   }
 
-  const isMine = selected.player === G.currentPlayer;
+  const isMine = selected.player === myPlayer;
 
   if (selected.type === 'unit') {
     const u = selected;
@@ -1116,12 +1127,12 @@ function updateActionBar() {
         if (isBuilder && u.charges > 0 && u.mp > 0) {
           const tile = getTile(u.q, u.r);
           if (tile) {
-            const cp = G.players[G.currentPlayer];
+            const cp = G.players[myPlayer];
             const techs = cp.completedTechs || '0';
             const tileImp = tile.improvement || 0;
 
             // Build improvement options (only if no existing improvement)
-            if (tileImp === 0 && tile.ownerCity > 0 && tile.ownerPlayer === G.currentPlayer) {
+            if (tileImp === 0 && tile.ownerCity > 0 && tile.ownerPlayer === myPlayer) {
               const validImps = getValidImprovements(tile, techs);
               if (validImps.length > 0) {
                 html += '<span class="label" style="margin-left:6px">Build:</span><span class="builder-grid">';
@@ -1137,7 +1148,7 @@ function updateActionBar() {
             }
 
             // Remove feature (if tile has a removable feature, in own territory)
-            if (tile.feature > 0 && tile.ownerCity > 0 && tile.ownerPlayer === G.currentPlayer) {
+            if (tile.feature > 0 && tile.ownerCity > 0 && tile.ownerPlayer === myPlayer) {
               const rf = canRemoveFeature(tile.feature, techs);
               const fname = FEATURE_NAMES[tile.feature] || 'Feature';
               if (rf.ok) {
@@ -1148,7 +1159,7 @@ function updateActionBar() {
             }
 
             // Remove improvement (if tile has improvement, in own territory)
-            if (tileImp > 0 && tile.ownerCity > 0 && tile.ownerPlayer === G.currentPlayer) {
+            if (tileImp > 0 && tile.ownerCity > 0 && tile.ownerPlayer === myPlayer) {
               html += `<button class="ab demolish" onclick="removeImprovement(${u.id},${u.q},${u.r})">Remove ${IMPROVEMENT_NAMES[tileImp]||'Improvement'}</button>`;
             }
           }
@@ -1224,7 +1235,7 @@ function pixelToHex(sx, sy) {
 }
 function centerCamera() {
   if (!G) return;
-  const cp = G.currentPlayer;
+  const cp = myPlayer;
   const u = G.players[cp].units.find(u => u.hp > 0);
   if (u) panToHex(u.q, u.r);
 }
@@ -1599,7 +1610,7 @@ function drawMap() {
       const dist = hexDist(selected.q,selected.r,nq,nr);
       if(dist>range) continue;
       // Check if enemy unit here
-      const enemy = 1 - G.currentPlayer;
+      const enemy = 1 - myPlayer;
       const hasEnemy = G.players[enemy].units.some(u => u.hp>0 && u.q===nq && u.r===nr);
       if (!hasEnemy) continue;
       const [hx,hy]=hexCenter(nq,nr);
@@ -2117,7 +2128,7 @@ function handleClick(hex) {
   }
 
   // If a city is selected and we click a territory tile, toggle citizen lock
-  if (selected && selected.type === 'city' && selected.player === G.currentPlayer) {
+  if (selected && selected.type === 'city' && selected.player === myPlayer) {
     const city = G.players[selected.player].cities.find(c => c.id === selected.id);
     if (city) {
       const tile = getTile(hex.q, hex.r);
@@ -2146,8 +2157,8 @@ function handleClick(hex) {
     }
   }
 
-  // Try to select entity at this hex (prefer current player, then enemy)
-  for (const p of [G.currentPlayer, 1 - G.currentPlayer]) {
+  // Try to select entity at this hex (prefer my player, then enemy)
+  for (const p of [myPlayer, 1 - myPlayer]) {
     const unit = G.players[p].units.find(u => u.hp>0 && u.q===hex.q && u.r===hex.r);
     if (unit) {
       selected = {...unit, type:'unit', player:p};
@@ -2224,7 +2235,7 @@ function isValidImpForTile(impType, terrain, feature) {
 
 function validateAction(action) {
   if (!G || G.status !== 1) return {ok:false, reason:'Game not active'};
-  const cp = G.currentPlayer;
+  const cp = myPlayer;
   const p = G.players[cp];
   const enemy = 1 - cp;
   const ep = G.players[enemy];
@@ -2449,6 +2460,10 @@ function updateQueueBadge() {
 
 // Queue any action — validate first, then apply optimistic state + animation
 function queueAction(action) {
+  if (G && G.players[myPlayer]?.submitted) {
+    showToast('info', 'Turn submitted', 'Waiting for opponent — cannot queue actions.', 3000);
+    return false;
+  }
   const v = validateAction(action);
   if (!v.ok) {
     showToast('error', 'Invalid action', v.reason, 4000);
@@ -2503,7 +2518,7 @@ function easeOutBack(t) { const c1=1.70158,c3=c1+1; return 1+c3*Math.pow(t-1,3)+
 // ── Optimistic local state update with animations ──
 function applyOptimistic(action) {
   if (!G) return;
-  const cp = G.currentPlayer;
+  const cp = myPlayer;
   const p = G.players[cp];
 
   if (action.type === 'MoveUnit') {
@@ -2706,27 +2721,50 @@ async function submitBatch(actions, isEndTurn) {
     const res = await fetch(endpoint, {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({player: G.currentPlayer, actions})
+      body: JSON.stringify({player: myPlayer, actions})
     });
     const data = await res.json();
     if(!res.ok) {
       const summary = batchSummary(actions);
       showToast('error', 'Transaction failed', `<b>Reason:</b> ${data.error}<br><b>Actions:</b> ${summary}`, 10000);
-      // Revert optimistic state — re-fetch real state
       await refreshState();
       loading=false; document.getElementById('end-btn').disabled=false; return;
     }
-    // Confirm with real server state
     selected=null; actionMode=null; setModeBanner(null);
     await refreshState();
-    if (isEndTurn) centerCamera();
+    if (isEndTurn) {
+      if (G.players[myPlayer]?.submitted) {
+        showToast('info', 'Turn submitted', 'Waiting for opponent...', 4000);
+        pollForTurnResolve();
+      } else {
+        centerCamera();
+      }
+    }
   } catch(e) {
     const summary = batchSummary(actions);
     showToast('error', 'Network error', `<b>Details:</b> ${e.message}<br><b>Actions:</b> ${summary}`, 10000);
-    await refreshState(); // revert on error
+    await refreshState();
   }
   loading=false;
   document.getElementById('end-btn').disabled=false;
+}
+
+let polling = false;
+async function pollForTurnResolve() {
+  if (polling) return;
+  polling = true;
+  const submittedTurn = G.turn;
+  while (true) {
+    await new Promise(r => setTimeout(r, 2500));
+    try {
+      await refreshState();
+      if (G.turn !== submittedTurn || G.status === 2) {
+        polling = false;
+        centerCamera();
+        return;
+      }
+    } catch (_) {}
+  }
 }
 
 // --- Predicted actions (queued locally, no transaction) ---
@@ -2743,7 +2781,7 @@ function skipUnit() {
 
 function declareWar() {
   if (!confirm('Declare war on the other player?')) return;
-  const target = G.currentPlayer === 0 ? 1 : 0;
+  const target = myPlayer === 0 ? 1 : 0;
   queuePredicted({type:'DeclareWar', target});
 }
 
@@ -2755,7 +2793,7 @@ function doAction(action) {
   if (!queueAction(action)) return;
   // After move, keep unit selected so player can continue commanding
   if (action.type === 'MoveUnit') {
-    const cp = G.currentPlayer;
+    const cp = myPlayer;
     const u = G.players[cp].units.find(x => x.id === action.unitId);
     if (u && u.hp > 0 && u.mp > 0) {
       selected = { type: 'unit', player: cp, id: u.id, q: u.q, r: u.r,
@@ -2769,7 +2807,7 @@ function doAction(action) {
 
 function foundCity() {
   if(!selected||selected.unitType!==0) return;
-  const cp = G.currentPlayer;
+  const cp = myPlayer;
   const settlerQ = selected.q, settlerR = selected.r;
   const name = prompt('City name:', 'City');
   if(!name) return;
@@ -2788,8 +2826,12 @@ function foundCity() {
 
 async function endTurn() {
   if (!G || G.status !== 1) return;
-  const cp = G.currentPlayer;
+  const cp = myPlayer;
   const p = G.players[cp];
+  if (p.submitted) {
+    showToast('info', 'Already submitted', 'Waiting for opponent to submit their turn.', 3000);
+    return;
+  }
 
   // Client-side validation: all cities must have production
   const noProd = p.cities.filter(c => c.production === 0);
@@ -2842,7 +2884,7 @@ function openPanel(type) {
   panel.classList.add('open');
 
   // Helper: check if a tech is researched from completedTechs bitmask
-  const cp = G.players[G.currentPlayer];
+  const cp = G.players[myPlayer];
   const techBits = BigInt(cp.completedTechs || '0');
   function hasTech(techId) {
     if (!techId || techId === 0) return true;
@@ -2982,7 +3024,7 @@ function openPanel(type) {
     ];
     // Get selected city's buildings to grey out already-built buildings
     let cityBuildings = 0;
-    if (selected && selected.type === 'city' && selected.player === G.currentPlayer) {
+    if (selected && selected.type === 'city' && selected.player === myPlayer) {
       cityBuildings = selected.buildings || 0;
     } else if (cp.cities.length > 0) {
       cityBuildings = cp.cities[0].buildings || 0;
@@ -3037,7 +3079,7 @@ function setResearch(techId) {
 function setProduction(itemId) {
   let cityId;
   if(!selected || selected.type!=='city') {
-    const cp = G.currentPlayer;
+    const cp = myPlayer;
     const city = G.players[cp].cities[0];
     if(!city){ showToast('error', 'No city', 'You need a city to set production.'); closePanel(); return; }
     cityId = city.id;
@@ -3163,7 +3205,7 @@ document.addEventListener('keydown', (e) => {
   if (kl === 'p') { openPanel('prod'); e.preventDefault(); return; }
 
   // Unit shortcuts (only when a friendly unit is selected)
-  if (selected && selected.type === 'unit' && selected.player === G.currentPlayer && !actionMode) {
+  if (selected && selected.type === 'unit' && selected.player === myPlayer && !actionMode) {
     if (kl === 'm') { startMove(); e.preventDefault(); return; }
     if (kl === 'a') { startAttack(); e.preventDefault(); return; }
     if (kl === 'r' && (selected.unitType === 4 || selected.unitType === 5)) { startRanged(); e.preventDefault(); return; }
@@ -3198,7 +3240,7 @@ function updateZoomLabel() {
 // Cycle to next alive unit with MP remaining
 function cycleNextUnit() {
   if (!G) return;
-  const cp = G.currentPlayer;
+  const cp = myPlayer;
   const units = G.players[cp].units.filter(u => u.hp > 0 && u.mp > 0);
   if (units.length === 0) return;
   let startIdx = 0;
@@ -3221,7 +3263,7 @@ function showTurnNotification() {
   if (!G || G.turn === lastNotifiedTurn) return;
   lastNotifiedTurn = G.turn;
   const el = document.getElementById('turn-notify');
-  const pName = G.currentPlayer === 0 ? 'Player A' : 'Player B';
+  const pName = myPlayer === 0 ? 'Player A' : 'Player B';
   document.getElementById('turn-notify-title').textContent = `Turn ${G.turn}`;
   document.getElementById('turn-notify-sub').textContent = `${pName}'s Turn`;
   el.style.display = 'block';
@@ -3336,6 +3378,7 @@ async function replayLoop() {
       replayDone('Player mismatch'); return;
     }
 
+    setMyPlayer(turn.player);
     if (turn.focus) panToHex(turn.focus.q, turn.focus.r);
 
     const actionDelay = Math.max(50, 400 / replay.speed);
@@ -3423,7 +3466,24 @@ function replayDone(msg) {
 // ═══════════════════════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════════════════════
-setTimeout(() => { resizeCanvas(); updateZoomLabel(); populateScenarios(); }, 50);
+setTimeout(async () => {
+  resizeCanvas(); updateZoomLabel(); populateScenarios();
+  try {
+    const res = await fetch('/api/lobby-status');
+    const data = await res.json();
+    if (data.phase === 'waiting_for_join') {
+      lobbyData.gameId = data.gameId;
+      lobbyData.contractAddr = data.contractAddress;
+      setMyPlayer(1);
+      setLobbyStep(3);
+      renderLobbyBody();
+    } else if (data.phase === 'active') {
+      lobbyData.gameId = data.gameId;
+      lobbyData.contractAddr = data.contractAddress;
+      await enterGame();
+    }
+  } catch (_) {}
+}, 50);
 </script>
 </body>
 </html>

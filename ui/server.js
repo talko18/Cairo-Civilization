@@ -11,6 +11,7 @@ const { RpcProvider, Account, Contract, shortString, CallData, constants } = req
 // ---------------------------------------------------------------------------
 const KATANA_URL = process.env.KATANA_URL || 'http://localhost:5050';
 const PORT       = process.env.PORT || 3000;
+const HOST       = process.env.HOST || 'localhost';
 const ARTIFACTS  = path.join(__dirname, '..', 'target', 'dev');
 const SIERRA     = path.join(ARTIFACTS, 'cairo_civ_CairoCiv.contract_class.json');
 const CASM       = path.join(ARTIFACTS, 'cairo_civ_CairoCiv.compiled_contract_class.json');
@@ -365,6 +366,25 @@ app.get('/api/game-status', async (_req, res) => {
   }
 });
 
+// ---- Lobby status: tells new browsers what state the server is in ----
+app.get('/api/lobby-status', async (_req, res) => {
+  if (!contract || !contractAddr) return res.json({ phase: 'none' });
+  if (!gameId) return res.json({ phase: 'deployed', contractAddress: contractAddr });
+  try {
+    const rc = new Contract(sierraAbi, contractAddr, provider);
+    const status = n(await rc.call('get_game_status', [gameId]));
+    if (status === 0) {
+      return res.json({ phase: 'waiting_for_join', gameId, contractAddress: contractAddr });
+    }
+    if (status === 1) {
+      return res.json({ phase: 'active', gameId, contractAddress: contractAddr });
+    }
+    return res.json({ phase: 'finished', gameId, contractAddress: contractAddr });
+  } catch (e) {
+    res.status(500).json({ error: e.message || String(e) });
+  }
+});
+
 // ---- Legacy setup: deploy + create + join in one step (for scenario replays) ----
 app.post('/api/setup', async (_req, res) => {
   try {
@@ -640,8 +660,8 @@ app.post('/api/forfeit', async (req, res) => {
 });
 
 // ---- Start server ----
-app.listen(PORT, () => {
-  console.log(`\n  Cairo Civ UI server running at http://localhost:${PORT}`);
+app.listen(PORT, HOST, () => {
+  console.log(`\n  Cairo Civ UI server running at http://${HOST}:${PORT}`);
   console.log(`  Expecting Katana at ${KATANA_URL}\n`);
   console.log('  Steps:');
   console.log('    1. Make sure Katana is running:');
