@@ -158,18 +158,30 @@ Each action submits a real transaction to the contract on Katana. The game state
 
 ### Playing Over the Network (Two Players, Two Computers)
 
-The default setup runs as hotseat (both players on one browser). To play with someone else over the internet using [ngrok](https://ngrok.com/):
+The default setup runs as hotseat (both players on one browser). To play with someone else over the internet using [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/), which creates a secure outbound tunnel — no ports need to be opened on your machine:
 
-1. Install ngrok: `npm install -g ngrok` or `snap install ngrok`
-2. Start Katana and the UI server locally as described above.
-3. In a new terminal, expose the server:
+1. Install cloudflared (one-time):
 
 ```bash
-ngrok http 3000
+# Debian/Ubuntu
+sudo apt install cloudflared
+
+# Or download directly
+# https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
 ```
 
-4. ngrok prints a public URL (e.g. `https://abc123.ngrok-free.app`). Share it with your opponent.
+2. Start Katana and the UI server locally as described above.
+3. In a new terminal, create a quick tunnel (no account required):
+
+```bash
+cloudflared tunnel --url http://localhost:3000
+```
+
+4. cloudflared prints a public URL (e.g. `https://random-words.trycloudflare.com`). Share it with your opponent.
 5. Player 1 opens the URL and deploys/creates the game. Player 2 opens the same URL and joins.
+6. When done, press Ctrl+C to stop the tunnel.
+
+**Why Cloudflare Tunnel?** It works by making an outbound connection from your machine to Cloudflare's edge network. No inbound ports need to be opened on your firewall or router. The free quick-tunnel mode requires no account or configuration.
 
 ### Configuration
 
