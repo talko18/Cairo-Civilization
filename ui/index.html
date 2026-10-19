@@ -268,6 +268,42 @@ button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);t
 #turn-notify p{font-size:.9rem;color:var(--text)}
 @keyframes turn-pop{0%{opacity:0;transform:translate(-50%,-50%) scale(.8)}100%{opacity:1;transform:translate(-50%,-50%) scale(1)}}
 
+/* ── Turn report ── */
+#turn-report{position:absolute;top:12px;left:12px;z-index:24;width:330px;max-height:62%;display:none;flex-direction:column;
+  background:rgba(13,27,42,.96);border:1px solid var(--gold);border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.55)}
+#turn-report.show{display:flex;animation:toast-in .3s ease-out}
+#tr-head{display:flex;align-items:center;padding:8px 12px;border-bottom:1px solid var(--border)}
+#tr-head h3{flex:1;font-size:.9rem;color:var(--gold)}
+#tr-head button{background:none;color:var(--dim);font-size:1rem;padding:0 4px}
+#tr-head button:hover{color:#fff}
+#tr-body{overflow-y:auto;padding:6px 0}
+.tr-row{display:flex;gap:8px;align-items:flex-start;padding:4px 12px;font-size:.78rem;line-height:1.35}
+.tr-row.click{cursor:pointer}
+.tr-row.click:hover{background:rgba(255,255,255,.06)}
+.tr-row .tr-ic{width:18px;flex-shrink:0;text-align:center}
+.tr-row.good{color:#a5d6a7}.tr-row.bad{color:#ef9a9a}.tr-row.warn{color:#ffe082}.tr-row.info{color:var(--text)}
+.tr-sec{font-size:.65rem;text-transform:uppercase;letter-spacing:1px;color:var(--dim);padding:6px 12px 2px}
+
+/* ── Score race ── */
+#score-badge{cursor:pointer;position:relative}
+#score-badge:hover{border-color:var(--gold)}
+#score-pop{position:absolute;top:calc(100% + 8px);left:0;z-index:60;display:none;min-width:280px;cursor:default;
+  background:rgba(13,27,42,.97);border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-weight:400;
+  box-shadow:0 6px 24px rgba(0,0,0,.55)}
+#score-pop.show{display:block}
+#score-pop table{width:100%;border-collapse:collapse;font-size:.76rem}
+#score-pop th,#score-pop td{padding:3px 6px;text-align:right}
+#score-pop th:first-child,#score-pop td:first-child{text-align:left;color:var(--dim)}
+#score-pop tr.total td{border-top:1px solid var(--border);font-weight:700;color:var(--gold)}
+#score-pop .sp-note{font-size:.68rem;color:var(--dim);margin-top:6px;line-height:1.4}
+#fog-btn{padding:5px 10px;background:rgba(255,255,255,.06);color:var(--text);font-size:.75rem;border:1px solid rgba(255,255,255,.1)}
+#fog-btn.off{color:var(--dim)}
+
+/* ── Play vs AI ── */
+#ai-btn{padding:12px 36px;font-size:1rem;font-weight:700;background:linear-gradient(135deg,#8e44ad,#a569bd);color:#fff;border-radius:8px}
+#ai-btn:hover{background:linear-gradient(135deg,#7d3c98,#8e44ad)}
+#ai-btn:disabled{opacity:.5;cursor:wait}
+
 ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
 
 /* ── Replay control bar ── */
@@ -288,6 +324,9 @@ button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);t
   color:var(--text);border:1px solid rgba(255,255,255,.15);border-radius:4px;font-family:inherit}
 
 /* ── Scenario picker in setup screen ── */
+#ai-section{margin-top:24px;max-width:420px;text-align:center}
+#ai-section .sc-divider{font-size:.75rem;color:var(--dim);margin-bottom:12px;letter-spacing:1px}
+#ai-section .sc-desc{font-size:.75rem;color:var(--dim);margin-bottom:12px;line-height:1.5}
 #scenario-section{margin-top:24px;padding-top:20px;border-top:1px solid rgba(255,255,255,.1);
   max-width:420px;text-align:center}
 #scenario-section .sc-divider{font-size:.75rem;color:var(--dim);margin-bottom:12px;letter-spacing:1px}
@@ -335,6 +374,13 @@ button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);t
     <div id="setup-error"></div>
   </div>
 
+  <!-- Play vs AI -->
+  <div id="ai-section">
+    <div class="sc-divider">&mdash;&mdash; or play solo &mdash;&mdash;</div>
+    <div class="sc-desc">Deploy a fresh game and play as Player A against a computer opponent.</div>
+    <button id="ai-btn" onclick="startAiGame()">Play vs AI</button>
+  </div>
+
   <!-- Scenario replay section -->
   <div id="scenario-section">
     <div class="sc-divider">&mdash;&mdash; or replay a test scenario &mdash;&mdash;</div>
@@ -374,7 +420,13 @@ button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);t
   <div class="badge"><span class="dot" style="background:var(--sci)"></span><span id="tech-lbl">--</span></div>
   <div class="badge"><span class="dot" style="background:var(--p1)"></span><span id="diplo-lbl">Peace</span></div>
   <div class="badge" id="queue-badge" style="display:none;background:#554;border:1px solid #aa8"><span id="queue-lbl">0 queued</span></div>
+  <div class="badge" id="score-badge" onclick="toggleScorePop(event)" title="Score race — click for breakdown">
+    <span class="dot" style="background:var(--gold)"></span><span id="score-lbl">Score</span>
+    <div id="score-pop" onclick="event.stopPropagation()"></div>
+  </div>
   <div id="spacer"></div>
+  <button class="ab" onclick="reopenTurnReport()" title="Show last turn report">Report</button>
+  <button id="fog-btn" onclick="toggleFog()" title="Toggle fog of war (V)">Fog: On</button>
   <button class="ab" onclick="openPanel('tech')">Research <span class="kb-hint">T</span></button>
   <button class="ab" onclick="openPanel('prod')">Production <span class="kb-hint">P</span></button>
   <button id="forfeit-btn" onclick="forfeitGame()">Forfeit</button>
@@ -422,6 +474,7 @@ button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);t
       </select>
       <button class="rp-stop" onclick="replayStop()">&#x25A0; Stop</button>
     </div>
+    <div id="turn-report"><div id="tr-head"><h3 id="tr-title">Turn report</h3><button onclick="closeTurnReport()" title="Close">&#x2715;</button></div><div id="tr-body"></div></div>
     <div id="turn-notify"><h2 id="turn-notify-title">Your Turn</h2><p id="turn-notify-sub">Player A - Turn 1</p></div>
     <div id="zoom-controls">
       <button onclick="zoomAtCenter(ZOOM_STEP)" title="Zoom in (+)">+</button>
@@ -680,6 +733,21 @@ let lobbyStep = 1;
 let lobbyData = { contractAddr: null, accounts: [], gameId: null };
 let myPlayer = parseInt(sessionStorage.getItem('myPlayer') || '0');
 function setMyPlayer(p) { myPlayer = p; sessionStorage.setItem('myPlayer', String(p)); }
+// "Play vs AI": the computer controls AI_PLAYER and moves right after the human submits
+const AI_PLAYER = 1;
+let aiOpponent = sessionStorage.getItem('aiOpponent') === '1';
+function setAiOpponent(on) { aiOpponent = on; sessionStorage.setItem('aiOpponent', on ? '1' : '0'); }
+// Mirrors constants.cairo (TURN_LIMIT, SCORE_PER_*)
+const TURN_LIMIT = 150;
+const SCORE_WEIGHTS = { pop: 5, city: 10, tech: 3, building: 10, kill: 4, capture: 15 };
+// Clears state that belongs to a previous game (game ids restart at 1 on every deploy)
+function resetPerGameState() {
+  try {
+    for (const k of Object.keys(sessionStorage)) if (k.startsWith('explored:')) sessionStorage.removeItem(k);
+    sessionStorage.removeItem('turnSnapshot');
+  } catch (_) {}
+  exploredKey = null; turnSnapshot = null; lastReport = null;
+}
 
 function setLobbyStep(step) {
   lobbyStep = step;
@@ -760,6 +828,8 @@ async function lobbyAction() {
       if (!res.ok) throw new Error(data.error);
       lobbyData.contractAddr = data.contractAddress;
       lobbyData.accounts = data.accounts;
+      resetPerGameState();
+      setAiOpponent(false);
       setMyPlayer(0);
       log.textContent = '';
       setLobbyStep(2);
@@ -788,6 +858,8 @@ async function lobbyAction() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
+      resetPerGameState();
+      setAiOpponent(false);
       setMyPlayer(1);
       log.innerHTML = '<span class="spinner"></span>Loading game state...';
       await new Promise(r => setTimeout(r, 400));
@@ -823,8 +895,10 @@ async function enterGame() {
   document.getElementById('top-bar').style.display = 'flex';
   document.getElementById('main').style.display = 'flex';
   document.getElementById('action-bar').style.display = 'flex';
-  centerCamera();
   resizeCanvas();
+  centerCamera();
+  drawMap(); updateMinimapViewport();
+  if (aiOpponent) runAiTurn();
 }
 
 // Legacy doSetup — used by scenario replays
@@ -848,6 +922,7 @@ async function refreshState() {
   const res = await fetch('/api/state');
   G = await res.json();
   buildTileIndex();
+  updateVisibility();
   updateTopBar();
   renderSidebar();
   updateActionBar();
@@ -898,7 +973,7 @@ async function forfeitGame() {
 
 function updateTopBar() {
   if (!G) return;
-  document.getElementById('turn-lbl').textContent = 'Turn ' + G.turn + '/150';
+  document.getElementById('turn-lbl').textContent = 'Turn ' + G.turn + '/' + TURN_LIMIT;
   const pl = document.getElementById('player-lbl');
   const pName = myPlayer === 0 ? 'Player A' : 'Player B';
   const submitted = G.players[myPlayer]?.submitted;
@@ -931,6 +1006,7 @@ function updateTopBar() {
   document.getElementById('tech-lbl').textContent = techText;
 
   document.getElementById('diplo-lbl').textContent = G.players[0].diplomacy === 1 ? 'WAR' : 'Peace';
+  updateScoreBadge();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -949,12 +1025,15 @@ function renderSidebar() {
   const p = sidebarTab === 'mine' ? cp : (1 - cp);
   const isMine = sidebarTab === 'mine';
   const pData = G.players[p];
+  const hideEnemy = !isMine && fogActive();
+  const shownCities = hideEnemy ? pData.cities.filter(c => isTileExplored(c.q, c.r)) : pData.cities;
   let html = '';
+  if (hideEnemy) html += '<div style="padding:8px 10px;font-size:.72rem;color:var(--dim)">\u{1F32B} Fog of war: showing only enemy cities you have discovered and units in sight.</div>';
 
   // Cities section
-  if (pData.cities.length > 0) {
-    html += '<div class="s-section"><div class="s-section-title">Cities (' + pData.cities.length + ')</div>';
-    for (const c of pData.cities) {
+  if (shownCities.length > 0) {
+    html += '<div class="s-section"><div class="s-section-title">Cities (' + shownCities.length + ')</div>';
+    for (const c of shownCities) {
       const isSel = selected && selected.type === 'city' && selected.player === p && selected.id === c.id;
       const prodName = PROD_ITEM_NAMES[c.production] || 'None';
       const prodCost = PROD_ITEM_COST[c.production] || 0;
@@ -1010,8 +1089,8 @@ function renderSidebar() {
   }
 
   // Units section
-  const alive = pData.units.filter(u => u.hp > 0);
-  const dead = pData.units.filter(u => u.hp <= 0);
+  const alive = pData.units.filter(u => u.hp > 0 && (!hideEnemy || isTileVisible(u.q, u.r)));
+  const dead = hideEnemy ? [] : pData.units.filter(u => u.hp <= 0);
   if (alive.length > 0 || dead.length > 0) {
     html += '<div class="s-section"><div class="s-section-title">Units (' + alive.length + ' alive)</div>';
     for (const u of alive) {
@@ -1054,6 +1133,12 @@ function renderSidebar() {
       + `<div style="height:100%;width:${rPct}%;background:var(--sci);border-radius:3px"></div></div>`;
   } else {
     researchLine = '<b style="color:var(--dim)">None</b>';
+  }
+  if (hideEnemy) {
+    html += `<div class="s-section"><div class="s-section-title">Diplomacy</div><div style="padding:4px 10px;font-size:.78rem;color:var(--dim)">
+      \u{1F3F3} <b style="color:${pData.diplomacy===1?'var(--p1)':'var(--food)'}">${pData.diplomacy===1?'At War':'Peace'}</b></div></div>`;
+    body.innerHTML = html;
+    return;
   }
   html += '<div class="s-section"><div class="s-section-title">Economy</div>';
   html += `<div style="padding:4px 10px;font-size:.78rem;color:var(--dim)">
@@ -1398,6 +1483,11 @@ function drawMap() {
     ctx2d.beginPath(); ctx2d.moveTo(pts[0][0],pts[0][1]);
     for(let i=1;i<6;i++) ctx2d.lineTo(pts[i][0],pts[i][1]);
     ctx2d.closePath();
+    if (!isTileExplored(t.q, t.r)) {
+      ctx2d.fillStyle = '#0b1020'; ctx2d.fill();
+      ctx2d.strokeStyle = 'rgba(255,255,255,.04)'; ctx2d.lineWidth = 1; ctx2d.stroke();
+      continue;
+    }
     ctx2d.fillStyle = TERRAIN_COLORS[t.terrain] || '#333';
     ctx2d.fill();
     ctx2d.strokeStyle='rgba(0,0,0,.25)'; ctx2d.lineWidth=1;
@@ -1446,7 +1536,7 @@ function drawMap() {
 
   // Territory overlays — color owned tiles
   for (const t of G.tiles) {
-    if (t.ownerCity > 0) {
+    if (t.ownerCity > 0 && isTileExplored(t.q, t.r)) {
       const p = t.ownerPlayer;
       const [cx,cy] = hexCenter(t.q, t.r);
       const pts = hexPts(cx,cy,sz);
@@ -1460,7 +1550,7 @@ function drawMap() {
   // Territory borders — thick colored lines on edges between owned and unowned/different-owner tiles
   ctx2d.lineWidth = 2.5; ctx2d.lineCap = 'round';
   for (const t of G.tiles) {
-    if (t.ownerCity <= 0) continue;
+    if (t.ownerCity <= 0 || !isTileExplored(t.q, t.r)) continue;
     const p = t.ownerPlayer;
     const [cx,cy] = hexCenter(t.q, t.r);
     const pts = hexPts(cx,cy,sz);
@@ -1483,6 +1573,19 @@ function drawMap() {
     }
   }
   ctx2d.lineCap = 'butt';
+
+  // Fog: dim explored tiles that are out of sight
+  if (fogActive()) {
+    ctx2d.fillStyle = 'rgba(5,10,25,.45)';
+    for (const t of G.tiles) {
+      if (!isTileExplored(t.q, t.r) || isTileVisible(t.q, t.r)) continue;
+      const [cx,cy] = hexCenter(t.q, t.r);
+      const pts = hexPts(cx,cy,sz);
+      ctx2d.beginPath(); ctx2d.moveTo(pts[0][0],pts[0][1]);
+      for(let i=1;i<6;i++) ctx2d.lineTo(pts[i][0],pts[i][1]);
+      ctx2d.closePath(); ctx2d.fill();
+    }
+  }
 
   // Worked tile highlights + yield labels (when a city is selected)
   if (selected && selected.type === 'city') {
@@ -1612,7 +1715,7 @@ function drawMap() {
       // Check if enemy unit here
       const enemy = 1 - myPlayer;
       const hasEnemy = G.players[enemy].units.some(u => u.hp>0 && u.q===nq && u.r===nr);
-      if (!hasEnemy) continue;
+      if (!hasEnemy || !isTileVisible(nq, nr)) continue;
       const [hx,hy]=hexCenter(nq,nr);
       const hp=hexPts(hx,hy,sz);
       ctx2d.beginPath(); ctx2d.moveTo(hp[0][0],hp[0][1]);
@@ -1634,6 +1737,7 @@ function drawMap() {
   // Cities — Civ-style banner: name plate above, pop circle, production bar, HP bar
   for (let p=0;p<2;p++) {
     for (const c of G.players[p].cities) {
+      if (p !== myPlayer && !isTileExplored(c.q, c.r)) continue;
       const [cx,cy]=hexCenter(c.q,c.r);
       const pColor = p===0 ? '#2874a6' : '#c0392b';
       const pColorDark = p===0 ? '#1a5276' : '#922b21';
@@ -1749,6 +1853,7 @@ function drawMap() {
   for (let p=0;p<2;p++) {
     for (const u of G.players[p].units) {
       if (u.hp<=0) continue;
+      if (p !== myPlayer && !isTileVisible(u.q, u.r)) continue;
       const key = p + ':' + u.id;
       if (animatedUnits.has(key)) continue; // drawn by animation code below
       // Check for shake animation
@@ -2049,6 +2154,11 @@ function showTooltip(mx,my,hex) {
   const tt=document.getElementById('tile-tip');
   const t=getTile(hex.q,hex.r);
   if(!t){tt.style.display='none';return;}
+  if(!isTileExplored(hex.q,hex.r)){
+    tt.innerHTML=`<b>Unexplored</b> (${hex.q},${hex.r})`; tt.style.display='block';
+    tt.style.left=(mx+14)+'px'; tt.style.top=(my+14)+'px';
+    return;
+  }
   let html=`<b>${TERRAIN_NAMES[t.terrain]||'?'}</b> (${hex.q},${hex.r})`;
   if(t.feature) html+=` \u2014 ${FEATURE_NAMES[t.feature]||'Feature #'+t.feature}`;
   if(t.resource) html+=`<br>Resource: ${RESOURCE_NAMES[t.resource]||'#'+t.resource}`;
@@ -2094,7 +2204,14 @@ function showTooltip(mx,my,hex) {
       }
     }
   }
+  if(!isTileVisible(hex.q,hex.r)) html+=`<br><span style="color:var(--dim)">Out of sight</span>`;
   for(let p=0;p<2;p++){
+    if(p!==myPlayer&&!isTileVisible(hex.q,hex.r)){
+      for(const c of G.players[p].cities){
+        if(c.q===hex.q&&c.r===hex.r) html+=`<br>${p===0?'A':'B'}: ${c.name}`;
+      }
+      continue;
+    }
     for(const u of G.players[p].units){
       if(u.hp>0&&u.q===hex.q&&u.r===hex.r) html+=`<br>${p===0?'A':'B'}: ${UNIT_NAMES[u.unitType]} HP:${u.hp} MP:${u.mp}`;
     }
@@ -2159,7 +2276,9 @@ function handleClick(hex) {
 
   // Try to select entity at this hex (prefer my player, then enemy)
   for (const p of [myPlayer, 1 - myPlayer]) {
-    const unit = G.players[p].units.find(u => u.hp>0 && u.q===hex.q && u.r===hex.r);
+    if (p !== myPlayer && !isTileExplored(hex.q, hex.r)) continue;
+    const unit = (p === myPlayer || isTileVisible(hex.q, hex.r))
+      && G.players[p].units.find(u => u.hp>0 && u.q===hex.q && u.r===hex.r);
     if (unit) {
       selected = {...unit, type:'unit', player:p};
       actionMode=null; setModeBanner(null);
@@ -2214,7 +2333,7 @@ function tileMoveCost(tile) {
 function playerHasTech(player, techId) {
   if (!techId || techId === 0) return true;
   const bits = BigInt(player.completedTechs || '0');
-  return (bits & (1n << BigInt(techId))) !== 0n;
+  return (bits & (1n << BigInt(techId - 1))) !== 0n;  // bit (id-1), matches tech::is_researched
 }
 
 function canResearchTech(player, techId) {
@@ -2707,7 +2826,8 @@ function applyOptimistic(action) {
   }
 
   // Redraw immediately with new state
-  updateActionBar(); renderSidebar(); drawMap();
+  updateVisibility();
+  updateActionBar(); renderSidebar(); drawMap(); drawMinimap();
 }
 
 // Send all queued actions to the server (only on EndTurn)
@@ -2727,13 +2847,17 @@ async function submitBatch(actions, isEndTurn) {
     if(!res.ok) {
       const summary = batchSummary(actions);
       showToast('error', 'Transaction failed', `<b>Reason:</b> ${data.error}<br><b>Actions:</b> ${summary}`, 10000);
+      if (isEndTurn) clearTurnSnapshot();
       await refreshState();
       loading=false; document.getElementById('end-btn').disabled=false; return;
     }
     selected=null; actionMode=null; setModeBanner(null);
     await refreshState();
     if (isEndTurn) {
-      if (G.players[myPlayer]?.submitted) {
+      if (G.players[myPlayer]?.submitted && aiOpponent) {
+        await runAiTurn();
+        centerCamera();
+      } else if (G.players[myPlayer]?.submitted) {
         showToast('info', 'Turn submitted', 'Waiting for opponent...', 4000);
         pollForTurnResolve();
       } else {
@@ -2743,6 +2867,7 @@ async function submitBatch(actions, isEndTurn) {
   } catch(e) {
     const summary = batchSummary(actions);
     showToast('error', 'Network error', `<b>Details:</b> ${e.message}<br><b>Actions:</b> ${summary}`, 10000);
+    if (isEndTurn) clearTurnSnapshot();
     await refreshState();
   }
   loading=false;
@@ -2855,6 +2980,8 @@ async function endTurn() {
   const batch = [...pendingActions];
   pendingActions = [];
   updateQueueBadge();
+  saveTurnSnapshot(batch);
+  closeTurnReport();
   await submitBatch(batch, true);
 }
 
@@ -3103,6 +3230,11 @@ function drawMinimap() {
   mmCtx.clearRect(0, 0, MM_W, MM_H);
   // Draw terrain tiles
   for (const t of G.tiles) {
+    if (!isTileExplored(t.q, t.r)) {
+      mmCtx.fillStyle = '#0b1020';
+      mmCtx.fillRect(t.q * MM_TILE_W, t.r * MM_TILE_H, MM_TILE_W + 0.5, MM_TILE_H + 0.5);
+      continue;
+    }
     mmCtx.fillStyle = TERRAIN_COLORS[t.terrain] || '#333';
     mmCtx.fillRect(t.q * MM_TILE_W, t.r * MM_TILE_H, MM_TILE_W + 0.5, MM_TILE_H + 0.5);
     // Territory overlay
@@ -3110,10 +3242,15 @@ function drawMinimap() {
       mmCtx.fillStyle = t.ownerPlayer === 0 ? 'rgba(52,152,219,.35)' : 'rgba(231,76,60,.35)';
       mmCtx.fillRect(t.q * MM_TILE_W, t.r * MM_TILE_H, MM_TILE_W + 0.5, MM_TILE_H + 0.5);
     }
+    if (!isTileVisible(t.q, t.r)) {
+      mmCtx.fillStyle = 'rgba(5,10,25,.45)';
+      mmCtx.fillRect(t.q * MM_TILE_W, t.r * MM_TILE_H, MM_TILE_W + 0.5, MM_TILE_H + 0.5);
+    }
   }
   // Draw cities
   for (let p = 0; p < 2; p++) {
     for (const c of G.players[p].cities) {
+      if (p !== myPlayer && !isTileExplored(c.q, c.r)) continue;
       mmCtx.fillStyle = p === 0 ? '#3498db' : '#e74c3c';
       mmCtx.beginPath();
       mmCtx.arc(c.q * MM_TILE_W + MM_TILE_W/2, c.r * MM_TILE_H + MM_TILE_H/2, 3, 0, Math.PI*2);
@@ -3124,6 +3261,7 @@ function drawMinimap() {
   for (let p = 0; p < 2; p++) {
     for (const u of G.players[p].units) {
       if (u.hp <= 0) continue;
+      if (p !== myPlayer && !isTileVisible(u.q, u.r)) continue;
       mmCtx.fillStyle = p === 0 ? '#5dade2' : '#ec7063';
       mmCtx.fillRect(u.q * MM_TILE_W + 1, u.r * MM_TILE_H + 1, MM_TILE_W - 2, MM_TILE_H - 2);
     }
@@ -3203,6 +3341,7 @@ document.addEventListener('keydown', (e) => {
   if (kl === 'e') { endTurn(); e.preventDefault(); return; }
   if (kl === 't') { openPanel('tech'); e.preventDefault(); return; }
   if (kl === 'p') { openPanel('prod'); e.preventDefault(); return; }
+  if (kl === 'v') { toggleFog(); e.preventDefault(); return; }
 
   // Unit shortcuts (only when a friendly unit is selected)
   if (selected && selected.type === 'unit' && selected.player === myPlayer && !actionMode) {
@@ -3274,12 +3413,400 @@ function showTurnNotification() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// PLAY VS AI — the computer plays AI_PLAYER after the human submits
+// ═══════════════════════════════════════════════════════════════
+async function startAiGame() {
+  const btn = document.getElementById('ai-btn');
+  const log = document.getElementById('setup-log');
+  const err = document.getElementById('setup-error');
+  btn.disabled = true; err.textContent = '';
+  log.innerHTML = '<span class="spinner"></span>Deploying contract and creating a game vs AI...';
+  try {
+    const res = await fetch('/api/setup', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    lobbyData.contractAddr = data.contractAddress;
+    lobbyData.gameId = data.gameId;
+    resetPerGameState();
+    setMyPlayer(0);
+    setAiOpponent(true);
+    await enterGame();
+  } catch (e) {
+    err.textContent = 'Error: ' + e.message;
+    log.textContent = '';
+    btn.disabled = false;
+  }
+}
+
+async function postTurn(player, actions) {
+  const res = await fetch('/api/turn', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({player, actions}),
+  });
+  const data = await res.json().catch(() => ({}));
+  return { ok: res.ok, error: data.error };
+}
+
+// Plays the AI's turn if the human has submitted and the AI hasn't. The AI plans from
+// the full on-chain state (it ignores fog of war).
+let aiRunning = false;
+async function runAiTurn() {
+  if (!aiOpponent || aiRunning || !G || G.status !== 1) return;
+  if (!G.players[myPlayer].submitted || G.players[AI_PLAYER].submitted) return;
+  aiRunning = true;
+  setModeBanner('Opponent is planning its turn…');
+  try {
+    let r = await postTurn(AI_PLAYER, scAiTurnActions(AI_PLAYER));
+    if (!r.ok) {
+      // A full AI turn can revert turn validation (e.g. a city left without production).
+      // Retry with a minimal turn so the game never deadlocks.
+      console.warn('[AI] turn reverted, retrying with safe actions:', r.error);
+      r = await postTurn(AI_PLAYER, scAiSafeActions(AI_PLAYER));
+    }
+    if (!r.ok) showToast('error', 'AI turn failed', `${r.error || 'Unknown error'}<br>Reload the page to retry.`, 10000);
+  } catch (e) {
+    showToast('error', 'AI turn failed', e.message, 10000);
+  }
+  setModeBanner(null);
+  aiRunning = false;
+  await refreshState();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// FOG OF WAR — client-side only (the on-chain state is still public)
+// ═══════════════════════════════════════════════════════════════
+const UNIT_SIGHT = 2, SCOUT_SIGHT = 3, CITY_SIGHT = 3;
+let fogEnabled = true;
+let visibleSet = new Set();   // tile indices (r*COLS+q) currently in sight
+let exploredSet = new Set();  // tile indices ever seen by this player
+let exploredKey = null;
+
+function fogActive() {
+  return fogEnabled && !!G && G.status === 1 && !(replay && replay.active);
+}
+function isTileVisible(q, r) { return !fogActive() || visibleSet.has(r * COLS + q); }
+function isTileExplored(q, r) { return !fogActive() || exploredSet.has(r * COLS + q); }
+
+// Tiles a player can currently see in `state`: around live units, cities, and owned territory.
+function computeVisibleSet(state, player) {
+  const vis = new Set();
+  const pData = state.players[player];
+  const sources = [];
+  for (const u of pData.units) if (u.hp > 0) sources.push([u.q, u.r, u.unitType === 2 ? SCOUT_SIGHT : UNIT_SIGHT]);
+  for (const c of pData.cities) sources.push([c.q, c.r, CITY_SIGHT]);
+  for (const t of state.tiles) {
+    if (t.ownerCity > 0 && t.ownerPlayer === player) { vis.add(t.r * COLS + t.q); continue; }
+    for (const [sq, sr, range] of sources) {
+      if (hexDist(sq, sr, t.q, t.r) <= range) { vis.add(t.r * COLS + t.q); break; }
+    }
+  }
+  return vis;
+}
+
+function updateVisibility() {
+  if (!G) return;
+  const key = `explored:${lobbyData.contractAddr || ''}:${G.gameId}:${myPlayer}`;
+  if (key !== exploredKey) {
+    exploredKey = key;
+    exploredSet = new Set();
+    try { JSON.parse(sessionStorage.getItem(key) || '[]').forEach(i => exploredSet.add(i)); } catch (_) {}
+  }
+  visibleSet = computeVisibleSet(G, myPlayer);
+  const before = exploredSet.size;
+  for (const i of visibleSet) exploredSet.add(i);
+  if (exploredSet.size !== before) {
+    try { sessionStorage.setItem(key, JSON.stringify([...exploredSet])); } catch (_) {}
+  }
+}
+
+function toggleFog() {
+  fogEnabled = !fogEnabled;
+  const btn = document.getElementById('fog-btn');
+  btn.textContent = 'Fog: ' + (fogEnabled ? 'On' : 'Off');
+  btn.classList.toggle('off', !fogEnabled);
+  renderSidebar(); drawMap(); drawMinimap();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// TURN REPORT — diff of the state before submitting vs. the next turn
+// ═══════════════════════════════════════════════════════════════
+let turnSnapshot = null;  // { turn, G, actions } taken when the player submits
+let lastReport = null;    // { turn, events } for the "Report" button
+
+function saveTurnSnapshot(actions) {
+  turnSnapshot = { turn: G.turn, player: myPlayer, G: structuredClone(G), actions };
+  try { sessionStorage.setItem('turnSnapshot', JSON.stringify(turnSnapshot)); } catch (_) {}
+}
+function clearTurnSnapshot() {
+  turnSnapshot = null;
+  try { sessionStorage.removeItem('turnSnapshot'); } catch (_) {}
+}
+function restoreTurnSnapshot() {
+  try { turnSnapshot = JSON.parse(sessionStorage.getItem('turnSnapshot') || 'null'); } catch (_) { turnSnapshot = null; }
+}
+
+function techBitsList(bitsStr) {
+  const bits = BigInt(bitsStr || '0'), out = [];
+  for (let i = 1; i <= 18; i++) if (bits & (1n << BigInt(i - 1))) out.push(i);
+  return out;
+}
+
+// Returns a list of {sec, cls, icon, text, q?, r?, float?, open?} events, newest turn vs. snapshot.
+function buildTurnReport(prev, cur, actions, me) {
+  const en = 1 - me, ev = [];
+  const prevVis = computeVisibleSet(prev, me);
+  const seenNow = (q, r) => !fogActive() || visibleSet.has(r * COLS + q);
+  const seenPrev = (q, r) => !fogActive() || prevVis.has(r * COLS + q);
+  const attackers = new Set(actions.filter(a => a.type === 'AttackUnit' || a.type === 'RangedAttack').map(a => a.unitId));
+  const uName = u => UNIT_NAMES[u.unitType] || 'Unit';
+  const cityKey = c => c.q + ',' + c.r;
+
+  // ── My units ──
+  const myCityTiles = new Set(cur.players[me].cities.map(cityKey));
+  const prevMyUnits = new Map(prev.players[me].units.map(u => [u.id, u]));
+  let healed = 0;
+  for (const u of cur.players[me].units) {
+    const pu = prevMyUnits.get(u.id);
+    if (!pu) {
+      if (u.hp > 0) {
+        const trained = myCityTiles.has(u.q + ',' + u.r);
+        ev.push({sec: 'Military', cls: 'good', icon: UNIT_ICONS[u.unitType], q: u.q, r: u.r,
+          text: trained ? `New ${uName(u)} is ready` : `Captured an enemy ${uName(u)}`});
+      }
+      continue;
+    }
+    if (pu.hp <= 0 && u.hp > 0) {
+      if (u.unitType === 0) ev.push({sec: 'Cities', cls: 'bad', icon: '⚠', q: u.q, r: u.r, text: 'City founding was rejected — your Settler is still alive'});
+      continue;
+    }
+    if (pu.hp > 0 && u.hp <= 0) {
+      ev.push({sec: 'Military', cls: 'bad', icon: '☠', q: pu.q, r: pu.r,
+        text: attackers.has(u.id) ? `Your ${uName(u)} died attacking` : `Your ${uName(u)} was killed`,
+        float: {text: '☠', color: '#ff5252'}});
+      continue;
+    }
+    if (u.hp <= 0) continue;
+    if (u.hp < pu.hp) {
+      const d = pu.hp - u.hp;
+      ev.push({sec: 'Military', cls: 'bad', icon: '\u{1FA78}', q: u.q, r: u.r,
+        text: attackers.has(u.id) ? `Your ${uName(u)} took ${d} damage attacking (HP ${u.hp})`
+                                  : `Enemy hit your ${uName(u)} for ${d} (HP ${u.hp})`,
+        float: {text: '-' + d, color: '#ff5252'}});
+    } else if (u.hp > pu.hp) {
+      healed++;
+    }
+    if (u.q !== pu.q || u.r !== pu.r) {
+      ev.push({sec: 'Military', cls: 'warn', icon: '↩', q: u.q, r: u.r, text: `A move by your ${uName(u)} was rejected by the contract`});
+    }
+  }
+  if (healed) ev.push({sec: 'Military', cls: 'info', icon: '⚕', text: `${healed} unit${healed > 1 ? 's' : ''} healed`});
+
+  // ── Enemy units (only what this player can see) ──
+  const prevEnUnits = new Map(prev.players[en].units.map(u => [u.id, u]));
+  const spotted = [];
+  for (const u of cur.players[en].units) {
+    const pu = prevEnUnits.get(u.id);
+    if (pu && pu.hp > 0 && u.hp <= 0) {
+      if (seenNow(pu.q, pu.r) || seenPrev(pu.q, pu.r)) {
+        ev.push({sec: 'Military', cls: 'good', icon: '⚔', q: pu.q, r: pu.r, text: `Enemy ${uName(u)} destroyed`,
+          float: {text: '☠', color: '#ffd54f'}});
+      }
+      continue;
+    }
+    if (u.hp <= 0) continue;
+    if (pu && u.hp < pu.hp && (seenNow(u.q, u.r) || seenPrev(pu.q, pu.r))) {
+      const d = pu.hp - u.hp;
+      ev.push({sec: 'Military', cls: 'good', icon: '\u{1F3AF}', q: u.q, r: u.r, text: `Enemy ${uName(u)} took ${d} damage (HP ${u.hp})`,
+        float: {text: '-' + d, color: '#ffd54f'}});
+    }
+    if (seenNow(u.q, u.r) && !(pu && pu.hp > 0 && seenPrev(pu.q, pu.r))) spotted.push(u);
+  }
+  if (spotted.length && fogActive()) {
+    const u = spotted[0];
+    ev.push({sec: 'Military', cls: 'warn', icon: '\u{1F441}', q: u.q, r: u.r,
+      text: spotted.length === 1 ? `Enemy ${uName(u)} spotted` : `${spotted.length} enemy units spotted (${spotted.map(uName).join(', ')})`});
+  }
+
+  // ── Cities (keyed by tile: capture swaps city ids around) ──
+  const prevMine = new Map(prev.players[me].cities.map(c => [cityKey(c), c]));
+  const prevTheirs = new Map(prev.players[en].cities.map(c => [cityKey(c), c]));
+  const curMine = new Map(cur.players[me].cities.map(c => [cityKey(c), c]));
+  const curTheirs = new Map(cur.players[en].cities.map(c => [cityKey(c), c]));
+  for (const [k, c] of curMine) {
+    const pc = prevMine.get(k);
+    if (!pc) {
+      if (prevTheirs.has(k)) ev.push({sec: 'Cities', cls: 'good', icon: '\u{1F3F4}', q: c.q, r: c.r, text: `You captured ${c.name}!`});
+      else ev.push({sec: 'Cities', cls: 'good', icon: '\u{1F3D9}', q: c.q, r: c.r, text: `${c.name} was founded`});
+      continue;
+    }
+    if (c.population > pc.population) ev.push({sec: 'Cities', cls: 'good', icon: '\u{1F465}', q: c.q, r: c.r, text: `${c.name} grew to population ${c.population}`});
+    else if (c.population < pc.population) ev.push({sec: 'Cities', cls: 'bad', icon: '\u{1F465}', q: c.q, r: c.r, text: `${c.name} shrank to population ${c.population}`});
+    const newBldg = c.buildings & ~pc.buildings;
+    for (let b = 0; b < 8; b++) {
+      if (newBldg & (1 << b)) ev.push({sec: 'Cities', cls: 'good', icon: '\u{1F3DB}', q: c.q, r: c.r, text: `${c.name} built ${BUILDING_NAMES[b]}`});
+    }
+    if (c.hp < pc.hp) {
+      ev.push({sec: 'Cities', cls: 'bad', icon: '\u{1F525}', q: c.q, r: c.r, text: `${c.name} was attacked (-${pc.hp - c.hp} HP, ${c.hp}/200)`,
+        float: {text: '-' + (pc.hp - c.hp), color: '#ff5252'}});
+    }
+    if (c.production === 0) {
+      ev.push({sec: 'Cities', cls: 'warn', icon: '⚒', q: c.q, r: c.r, open: 'prod', cityId: c.id,
+        text: pc.production ? `${c.name} finished ${PROD_ITEM_NAMES[pc.production] || 'its build'} — choose what to build next`
+                            : `${c.name} needs a production choice`});
+    }
+  }
+  for (const [k, pc] of prevMine) {
+    if (!curMine.has(k) && curTheirs.has(k)) ev.push({sec: 'Cities', cls: 'bad', icon: '\u{1F3F4}', q: pc.q, r: pc.r, text: `${pc.name} was captured by the enemy!`});
+  }
+  for (const [k, c] of curTheirs) {
+    const pc = prevTheirs.get(k);
+    if (!pc && !prevMine.has(k) && isTileExplored(c.q, c.r)) {
+      ev.push({sec: 'Cities', cls: 'warn', icon: '\u{1F3D9}', q: c.q, r: c.r, text: `Enemy founded ${c.name}`});
+    } else if (pc && c.hp < pc.hp) {
+      ev.push({sec: 'Cities', cls: 'good', icon: '\u{1F3AF}', q: c.q, r: c.r, text: `Enemy city ${c.name} took ${pc.hp - c.hp} damage (${c.hp}/200)`,
+        float: {text: '-' + (pc.hp - c.hp), color: '#ffd54f'}});
+    }
+  }
+
+  // ── Research ──
+  const prevTechs = new Set(techBitsList(prev.players[me].completedTechs));
+  for (const t of techBitsList(cur.players[me].completedTechs)) {
+    if (!prevTechs.has(t)) ev.push({sec: 'Research', cls: 'good', icon: '\u{1F52C}', text: `Researched ${TECH_NAMES[t] || 'Tech ' + t}`});
+  }
+  if (!cur.players[me].currentResearch && cur.players[me].cities.length > 0) {
+    ev.push({sec: 'Research', cls: 'warn', icon: '\u{1F4D6}', open: 'tech', text: 'Choose your next research'});
+  }
+
+  // ── Diplomacy, economy & score ──
+  if (prev.players[me].diplomacy !== 1 && cur.players[me].diplomacy === 1 && !actions.some(a => a.type === 'DeclareWar')) {
+    ev.push({sec: 'Empire', cls: 'bad', icon: '⚔', text: 'The enemy has declared war on you!'});
+  }
+  const dGold = cur.players[me].treasury - prev.players[me].treasury;
+  if (dGold) ev.push({sec: 'Empire', cls: dGold > 0 ? 'info' : 'bad', icon: '\u{1F4B0}', text: `Gold ${dGold > 0 ? '+' : ''}${dGold} (treasury ${cur.players[me].treasury})`});
+  const owned = st => st.tiles.filter(t => t.ownerCity > 0 && t.ownerPlayer === me).length;
+  const dTiles = owned(cur) - owned(prev);
+  if (dTiles > 0) ev.push({sec: 'Empire', cls: 'good', icon: '\u{1F5FA}', text: `Borders expanded by ${dTiles} tile${dTiles > 1 ? 's' : ''}`});
+  const ps = prev.scores || [0, 0], cs = cur.scores || [0, 0];
+  if (cs[me] !== ps[me] || cs[en] !== ps[en]) {
+    const sd = (a, b) => (a - b >= 0 ? '+' : '') + (a - b);
+    ev.push({sec: 'Empire', cls: 'info', icon: '\u{1F3C6}', text: `Score: you ${cs[me]} (${sd(cs[me], ps[me])}) · enemy ${cs[en]} (${sd(cs[en], ps[en])})`});
+  }
+  return ev;
+}
+
+function showTurnReport(turn, events) {
+  lastReport = { turn, events };
+  renderTurnReport();
+  // Floating numbers on the map, staggered so overlapping ones are readable
+  let i = 0;
+  for (const e of events) {
+    if (!e.float || e.q === undefined) continue;
+    const [x, y] = hexCenter(e.q, e.r);
+    startAnimation({ type: 'floatingText', duration: 1800, text: e.float.text, x, y: y - 15, color: e.float.color, delay: 300 + i * 180 });
+    i++;
+  }
+}
+
+function renderTurnReport() {
+  if (!lastReport) return;
+  const { turn, events } = lastReport;
+  document.getElementById('tr-title').textContent = `Turn ${turn - 1} results`;
+  let html = '', sec = null;
+  if (events.length === 0) html = '<div class="tr-row info"><span class="tr-ic">\u{1F343}</span><span>A quiet turn. Nothing to report.</span></div>';
+  for (let i = 0; i < events.length; i++) {
+    const e = events[i];
+    if (e.sec !== sec) { sec = e.sec; html += `<div class="tr-sec">${sec}</div>`; }
+    const click = e.q !== undefined || e.open;
+    html += `<div class="tr-row ${e.cls}${click ? ' click' : ''}" ${click ? `onclick="turnReportClick(${i})"` : ''}><span class="tr-ic">${e.icon}</span><span>${e.text}</span></div>`;
+  }
+  document.getElementById('tr-body').innerHTML = html;
+  document.getElementById('turn-report').classList.add('show');
+}
+
+function turnReportClick(i) {
+  const e = lastReport && lastReport.events[i];
+  if (!e) return;
+  if (e.q !== undefined) panToHex(e.q, e.r);
+  if (e.open === 'prod') {
+    const c = G.players[myPlayer].cities.find(x => x.q === e.q && x.r === e.r);
+    if (c) { selected = { type: 'city', player: myPlayer, id: c.id, q: c.q, r: c.r }; renderSidebar(); updateActionBar(); drawMap(); openPanel('prod'); }
+  } else if (e.open === 'tech') {
+    openPanel('tech');
+  }
+}
+function closeTurnReport() { document.getElementById('turn-report').classList.remove('show'); }
+function reopenTurnReport() {
+  if (lastReport) renderTurnReport();
+  else showToast('info', 'No report yet', 'A report appears at the start of each new turn.', 3000);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SCORE RACE — mirrors victory::calculate_score
+// ═══════════════════════════════════════════════════════════════
+function scoreBreakdown(p) {
+  const pData = G.players[p];
+  const pop = pData.cities.reduce((s, c) => s + c.population, 0);
+  const bldg = pData.cities.reduce((s, c) => s + getBuildingList(c.buildings).length, 0);
+  const techs = techBitsList(pData.completedTechs).length;
+  const rows = [
+    ['Population', pop, pop * SCORE_WEIGHTS.pop],
+    ['Cities', pData.cities.length, pData.cities.length * SCORE_WEIGHTS.city],
+    ['Techs', techs, techs * SCORE_WEIGHTS.tech],
+    ['Buildings', bldg, bldg * SCORE_WEIGHTS.building],
+  ];
+  const total = (G.scores || [0, 0])[p];
+  const known = rows.reduce((s, r) => s + r[2], 0);
+  rows.push(['Kills & captures', '', Math.max(0, total - known)]);
+  return { rows, total };
+}
+
+function updateScoreBadge() {
+  if (!G) return;
+  const sc = G.scores || [0, 0], me = myPlayer, en = 1 - me;
+  const left = Math.max(0, TURN_LIMIT - G.turn);
+  const lead = sc[me] > sc[en] ? '▲' : sc[me] < sc[en] ? '▼' : '=';
+  document.getElementById('score-lbl').innerHTML =
+    `<span style="color:var(--p${me}txt)">You ${sc[me]}</span> ${lead} <span style="color:var(--p${en}txt)">Enemy ${sc[en]}</span> <span style="color:var(--dim);font-weight:400">· ${left} turns left</span>`;
+  const pop = document.getElementById('score-pop');
+  if (pop.classList.contains('show')) renderScorePop();
+}
+
+function renderScorePop() {
+  const me = myPlayer, en = 1 - me;
+  const a = scoreBreakdown(me), b = scoreBreakdown(en);
+  let html = `<table><tr><th></th><th style="color:var(--p${me}txt)">You</th><th style="color:var(--p${en}txt)">Enemy</th></tr>`;
+  for (let i = 0; i < a.rows.length; i++) {
+    const fmt = r => r[1] === '' ? r[2] : `${r[2]} <span style="color:var(--dim)">(${r[1]})</span>`;
+    html += `<tr><td>${a.rows[i][0]}</td><td>${fmt(a.rows[i])}</td><td>${fmt(b.rows[i])}</td></tr>`;
+  }
+  html += `<tr class="total"><td>Total</td><td>${a.total}</td><td>${b.total}</td></tr></table>`;
+  html += `<div class="sp-note">Points: ${SCORE_WEIGHTS.pop}/citizen, ${SCORE_WEIGHTS.city}/city, ${SCORE_WEIGHTS.tech}/tech, ${SCORE_WEIGHTS.building}/building, ${SCORE_WEIGHTS.kill}/kill, ${SCORE_WEIGHTS.capture}/captured city.<br>`
+    + `Highest score at turn ${TURN_LIMIT} wins, unless someone captures every enemy capital first.</div>`;
+  document.getElementById('score-pop').innerHTML = html;
+}
+
+function toggleScorePop(e) {
+  e.stopPropagation();
+  const pop = document.getElementById('score-pop');
+  if (!pop.classList.contains('show')) renderScorePop();
+  pop.classList.toggle('show');
+}
+document.addEventListener('click', () => document.getElementById('score-pop').classList.remove('show'));
+
+// ═══════════════════════════════════════════════════════════════
 // ENHANCED REFRESH — triggers minimap + turn notification
 // ═══════════════════════════════════════════════════════════════
 const _origRefresh = refreshState;
 refreshState = async function() {
   await _origRefresh();
   drawMinimap();
+  if (turnSnapshot && (G.turn > turnSnapshot.turn || G.status === 2) && turnSnapshot.player === myPlayer
+      && !(replay && replay.active)) {
+    const snap = turnSnapshot;
+    clearTurnSnapshot();
+    showTurnReport(G.turn, buildTurnReport(snap.G, G, snap.actions, myPlayer));
+  }
   showTurnNotification();
 };
 
@@ -3322,6 +3849,8 @@ async function runScenario() {
   if (actionBtn) actionBtn.disabled = true;
   sbtn.disabled = true; err.textContent = '';
   log.innerHTML = '<span class="spinner"></span>Deploying contract for scenario replay...';
+  resetPerGameState();
+  setAiOpponent(false);
 
   try {
     const res = await fetch('/api/setup', { method: 'POST' });
@@ -3472,6 +4001,7 @@ setTimeout(async () => {
     const res = await fetch('/api/lobby-status');
     const data = await res.json();
     if (data.phase === 'waiting_for_join') {
+      setAiOpponent(false);
       lobbyData.gameId = data.gameId;
       lobbyData.contractAddr = data.contractAddress;
       setMyPlayer(1);
@@ -3480,6 +4010,7 @@ setTimeout(async () => {
     } else if (data.phase === 'active') {
       lobbyData.gameId = data.gameId;
       lobbyData.contractAddr = data.contractAddress;
+      restoreTurnSnapshot();
       await enterGame();
     }
   } catch (_) {}

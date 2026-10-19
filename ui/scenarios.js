@@ -308,6 +308,95 @@ function scBuilderActions(player) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// AI opponent — one full turn of actions for a player, from the current G.
+// Used by the "AI vs AI" scenario and by "Play vs AI" games.
+// ═══════════════════════════════════════════════════════════════
+
+function scAiTurnActions(pl) {
+  const p = G.players[pl];
+  const actions = [];
+  const claimed = new Set();
+  const round = G.turn;
+  const cityNames = pl === 0
+    ? ['Athens','Sparta','Thebes','Corinth','Delphi']
+    : ['Rome','Carthage','Syracuse','Milan','Naples'];
+
+  // ── First city: found the capital where the settler stands ──
+  if (p.cities.length === 0) {
+    const s = scAlive(pl, 0)[0];
+    if (s) {
+      return [
+        {type: 'FoundCity', settlerId: s.id, name: cityNames[0]},
+        {type: 'SetResearch', techId: scStrategicTech(pl) || 1},
+        {type: 'SetProduction', cityId: 0, itemId: PROD.MONUMENT},
+      ];
+    }
+  }
+
+  // ── Research: strategic tech ordering ──
+  if (p.cities.length > 0 && !p.currentResearch) {
+    const tid = scStrategicTech(pl);
+    if (tid) actions.push({type: 'SetResearch', techId: tid});
+  }
+
+  // ── Production: phase-aware choices per city ──
+  for (const c of p.cities) {
+    if (c.production === 0) {
+      actions.push({type: 'SetProduction', cityId: c.id, itemId: scChooseProduction(pl, c, round)});
+    }
+  }
+
+  // ── Builder: improve tiles near cities ──
+  actions.push(...scBuilderActions(pl));
+
+  // ── Settler: move and found new cities ──
+  actions.push(...scSettlerActions(pl, claimed));
+
+  // ── Upgrade Slingers → Archers when Archery is researched ──
+  if (scHasTech(pl, 4)) {
+    for (const u of p.units.filter(u => u.hp > 0 && u.unitType === 4)) {
+      actions.push({type: 'UpgradeUnit', unitId: u.id});
+    }
+  }
+
+  // ── War declaration: when we have enough military advantage ──
+  let atWar = p.diplomacy === 1;
+  if (!atWar && round >= 20) {
+    const myArmy = p.units.filter(u => u.hp > 0 && u.unitType >= 3).length;
+    if (myArmy >= 4) {
+      actions.push({type: 'DeclareWar', target: 1 - pl});
+      atWar = true;
+    }
+  }
+
+  // ── Military: attack or scout ──
+  if (atWar) {
+    actions.push(...scMilitaryActions(pl, claimed));
+  } else {
+    actions.push(...scScoutActions(pl, claimed));
+  }
+
+  // ── Skip idle scouts ──
+  for (const u of p.units.filter(u => u.hp > 0 && u.mp > 0 && u.unitType === 2)) {
+    actions.push({type: 'SkipUnit', unitId: u.id});
+  }
+
+  // ── Cities gained this turn (founded or captured) start with no production, and the
+  // contract rejects a turn with an idle city. Set production for the slots they would
+  // take; SetProduction on a city id that doesn't exist is silently skipped on-chain.
+  const gained = actions.filter(a => a.type === 'FoundCity' || a.type === 'AttackUnit').length;
+  for (let i = 0; i < gained; i++) {
+    actions.push({type: 'SetProduction', cityId: p.cities.length + i, itemId: PROD.WARRIOR});
+  }
+  return actions;
+}
+
+// Minimal turn that always passes turn validation — fallback if the full AI turn reverts.
+function scAiSafeActions(pl) {
+  return [...scEnsureResearch(pl), ...scEnsureProduction(pl, PROD.WARRIOR)];
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Scenario Definitions
 // ═══════════════════════════════════════════════════════════════
 
@@ -422,7 +511,6 @@ const SCENARIOS = [
         if (sB) yield { player: 1, label: 'Rome is founded', focus: sB,
           actions: [{type:'FoundCity', settlerId:sB.id, name:'Rome'}, {type:'SetResearch', techId:2}, {type:'SetProduction', cityId:0, itemId:PROD.MONUMENT}] };
 
-        let warDeclared = false;
         const names = ['Athens', 'Rome'];
 
         for (let round = 2; round <= 150; round++) {
@@ -430,59 +518,11 @@ const SCENARIOS = [
           for (let pl = 0; pl <= 1; pl++) {
             if (G.status === 2) return;
             const p = G.players[pl];
-            const enemy = 1 - pl;
-            const actions = [];
-            const claimed = new Set();
-
-            // ── Research: strategic tech ordering ──
-            if (p.cities.length > 0 && !p.currentResearch) {
-              const tid = scStrategicTech(pl);
-              if (tid) actions.push({type: 'SetResearch', techId: tid});
-            }
-
-            // ── Production: phase-aware choices per city ──
-            for (const c of p.cities) {
-              if (c.production === 0) {
-                const item = scChooseProduction(pl, c, round);
-                actions.push({type: 'SetProduction', cityId: c.id, itemId: item});
-              }
-            }
-
-            // ── Builder: improve tiles near cities ──
-            actions.push(...scBuilderActions(pl));
-
-            // ── Settler: move and found new cities ──
-            actions.push(...scSettlerActions(pl, claimed));
-
-            // ── Upgrade Slingers → Archers when Archery is researched ──
-            if (scHasTech(pl, 4)) {
-              for (const u of p.units.filter(u => u.hp > 0 && u.unitType === 4)) {
-                actions.push({type: 'UpgradeUnit', unitId: u.id});
-              }
-            }
-
-            // ── War declaration: when we have enough military advantage ──
-            if (!warDeclared && pl === 0 && round >= 20) {
-              const myArmy = p.units.filter(u => u.hp > 0 && u.unitType >= 3).length;
-              if (myArmy >= 4) {
-                actions.push({type: 'DeclareWar', target: 1});
-                warDeclared = true;
-              }
-            }
-
-            // ── Military: attack or scout ──
-            if (warDeclared) {
-              actions.push(...scMilitaryActions(pl, claimed));
-            } else {
-              actions.push(...scScoutActions(pl, claimed));
-            }
-
-            // ── Skip idle scouts ──
-            for (const u of p.units.filter(u => u.hp > 0 && u.mp > 0 && u.unitType === 2)) {
-              actions.push({type: 'SkipUnit', unitId: u.id});
-            }
+            const wasAtWar = p.diplomacy === 1;
+            const actions = scAiTurnActions(pl);
 
             // ── Build label ──
+            const warDeclared = p.diplomacy === 1 || actions.some(a => a.type === 'DeclareWar');
             const numCities = p.cities.length;
             const numMilitary = p.units.filter(u => u.hp > 0 && u.unitType >= 3).length;
             let phase = '';
@@ -492,7 +532,7 @@ const SCENARIOS = [
             else phase = actions.some(a => a.type === 'AttackUnit' || a.type === 'RangedAttack') ? 'attacking!' : 'advancing';
 
             let label = `Turn ${round}: ${names[pl]} — ${phase}`;
-            if (warDeclared && round === 20 && pl === 0) label = `Turn ${round}: ${names[pl]} DECLARES WAR!`;
+            if (warDeclared && !wasAtWar) label = `Turn ${round}: ${names[pl]} DECLARES WAR!`;
             label += ` (${numCities} cities, ${numMilitary} units)`;
 
             // Focus camera on combat > settler > military > city
