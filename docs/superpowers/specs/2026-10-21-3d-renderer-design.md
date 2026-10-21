@@ -292,6 +292,12 @@ marked. Everything else is the builder's.
     the existing buffer, touching only tiles whose state changed, so no
     geometry is ever rebuilt (Decision 9 still holds).
 
+    The shell follows the **visible** surface, which is not always the
+    terrain mesh. On water tiles the terrain mesh is the seabed, well below
+    the water plane, so a shell built from it sat under the sea and left
+    unexplored ocean and coast fully visible. Water tiles clamp the shell to
+    just above the wave crests instead.
+
     The underlying mistake is worth naming, because it caused all three
     leaks: **2D intuitions about hiding things do not survive into 3D.** On a
     flat map, filling a hex with dark paint hides everything in it, and
