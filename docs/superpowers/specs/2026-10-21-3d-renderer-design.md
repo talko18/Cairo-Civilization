@@ -298,6 +298,13 @@ marked. Everything else is the builder's.
     unexplored ocean and coast fully visible. Water tiles clamp the shell to
     just above the wave crests instead.
 
+    The shell also needs a **skirt**. It floats slightly above the ground to
+    avoid z-fighting, and that gap is a slot you can see through at a low
+    camera angle — at coasts it showed the yellow beach around every
+    unexplored tile. A short wall hanging off the rim closes it. Inland the
+    skirt is buried in neighbouring ground and never seen; at a coast or
+    cliff it reads as the edge of unknown land.
+
     The underlying mistake is worth naming, because it caused all three
     leaks: **2D intuitions about hiding things do not survive into 3D.** On a
     flat map, filling a hex with dark paint hides everything in it, and
