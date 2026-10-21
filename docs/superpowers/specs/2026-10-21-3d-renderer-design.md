@@ -329,6 +329,35 @@ are on the parity checklist:
 - 8 of the 10 resources and 4 of the 5 improvements
 - all 11 animation types
 
+### Parity spike result
+
+The spike was built: the full-map prototype was extended with fog of war, all
+seven tile overlays, DOM labels and HP bars for every unit and city, yield
+pills, the remaining resources and improvements, and all 11 animation types
+running continuously. A "stress" mode lights every overlay on every land
+tile, puts yield pills on all 640, and fires animations roughly eight times
+as often as play would.
+
+| Scene | Draw calls | Triangles | DOM labels | Live animations |
+|---|---|---|---|---|
+| Play zoom, no game layer *(earlier baseline)* | 277 | 162k | 0 | 0 |
+| Play zoom, full game layer | **304** | 189k | 29 | 14 |
+| Play zoom, stress | **320** | 190k | 121 | 48 |
+| Whole map, full game layer | **739** | 221k | 6 | 14 |
+| Whole map, stress | **773** | 222k | 6 | 48 |
+
+**The whole game layer costs about 27 draw calls at play zoom and about 39 in
+the worst case.** The architecture holds: fog is 2 instanced layers, all seven
+overlays share 1 instanced layer with per-instance color, and labels are DOM
+and cost no draw calls at all. Even the deliberately unrealistic stress case
+stays inside the ~800 budget.
+
+Two honest limits on this result. Frame rate still has to come from real
+hardware, since the measuring environment renders in software. And the
+whole-map rows show few labels because unit and yield labels hide beyond a
+camera distance of 26 — by design, but it means the DOM worst case is the
+121-label play-zoom row, not the whole-map one.
+
 **Therefore the work opens with a parity spike,** not with production code:
 extend the full-map prototype until it renders the complete parity set at
 640 tiles, and re-measure. The chunk size, the instancing buckets, and the
