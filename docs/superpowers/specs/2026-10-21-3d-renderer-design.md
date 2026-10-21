@@ -278,6 +278,32 @@ marked. Everything else is the builder's.
     - **filtering:** each layer independently refuses to draw on unexplored
       tiles, so a future layer added above the fog still cannot leak.
 
+    **Fog is a shell over the terrain, not a sheet under the sky.** The owner
+    found a third leak after the first two fixes: hills were visible through
+    the fog at all times, *including their colour, which is their terrain
+    type*. A flat disc lies at the tile's base height, and terrain has
+    height — a hill simply rises through it. Mountains did not leak only
+    because their peaks are separate instanced objects that were already
+    being culled.
+
+    Fog is therefore built from the **same triangles as the ground**, offset
+    slightly upward, so it covers whatever shape the tile actually has. It is
+    built once; a fog change collapses or restores each tile's vertices in
+    the existing buffer, touching only tiles whose state changed, so no
+    geometry is ever rebuilt (Decision 9 still holds).
+
+    The underlying mistake is worth naming, because it caused all three
+    leaks: **2D intuitions about hiding things do not survive into 3D.** On a
+    flat map, filling a hex with dark paint hides everything in it, and
+    "on top" and "drawn later" are the same thing. In 3D, neither is true.
+    Anything that hides game state has to account for height and draw order,
+    and wants a second, independent check behind it.
+
+    Known cosmetic gap, not a leak: on *remembered* tiles the fog shell dims
+    the ground, but instanced scenery standing on it (mountain peaks in
+    particular) is not dimmed and looks too bright. Dimming it needs
+    per-instance colour. Deliberately left to the builder.
+
 13. **A full-screen flash must never stack or repeat quickly.** *(Owner found
     this under stress: "it flickers white".)* Overlapping flashes read as a
     strobe, which is unpleasant and a genuine photosensitivity risk. One
