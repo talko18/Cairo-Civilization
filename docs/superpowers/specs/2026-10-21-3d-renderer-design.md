@@ -265,6 +265,26 @@ marked. Everything else is the builder's.
     respect fog, not just the terrain pass.** Overlays, labels, yield pills,
     tooltips and animations all qualify.
 
+    **Two layers of defence, because one is not enough.** The owner found a
+    second leak after the first fix: with the stress overlays on, unexplored
+    tiles lit up in overlay colors and gave away that there was land there.
+    The cause is worth stating plainly, because it will catch the builder
+    too. *Transparent layers do not write depth.* Sitting physically lower
+    than the fog does not put a layer behind it — draw order alone decides,
+    and the overlay was drawing later. So fog needs both:
+
+    - **ordering:** unexplored fog renders after every overlay, ring and
+      highlight, as a backstop;
+    - **filtering:** each layer independently refuses to draw on unexplored
+      tiles, so a future layer added above the fog still cannot leak.
+
+13. **A full-screen flash must never stack or repeat quickly.** *(Owner found
+    this under stress: "it flickers white".)* Overlapping flashes read as a
+    strobe, which is unpleasant and a genuine photosensitivity risk. One
+    flash at a time, a cooldown between them, a modest peak opacity, and none
+    at all under `prefers-reduced-motion`. The same caution applies to any
+    other full-screen effect added later.
+
 ## Parity checklist
 
 The port is not done until every one of these works as it does today. This
