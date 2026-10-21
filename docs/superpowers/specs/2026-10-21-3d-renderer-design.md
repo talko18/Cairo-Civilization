@@ -1,7 +1,7 @@
 # Cairo Civ — 3D Renderer
 
 **Date:** 2026-10-21
-**Status:** design, awaiting approval
+**Status:** design, awaiting approval. Performance questions closed by the parity spike (steady 60fps on target hardware, including stress).
 
 ## Intent
 
@@ -240,6 +240,30 @@ marked. Everything else is the builder's.
     pattern generalises: when 3D makes game state harder to read than the
     flat map did, fix it with an explicit affordance rather than accepting
     the loss.
+
+12. **Fog hides objects, not just ground — and the tooltip is part of the
+    fog.** *(Owner found this in the spike; the first implementation was
+    wrong.)* On a flat map, filling a hex with dark paint genuinely hides
+    everything on it. In 3D it does not: a dark disc lies on the ground while
+    trees, rocks, buildings and mountains stand up through it in plain sight.
+    Fog is therefore three separate things that must agree:
+
+    - a **ground layer** drawn above the tile edges, territory borders and
+      every tile overlay, so none of them leak through;
+    - **per-instance culling of scenery**, which means every instanced mesh
+      has to record which tile each instance sits on, so unexplored tiles can
+      drop theirs;
+    - **units hidden** wherever the tile is not currently in sight, since
+      remembered ground must not reveal who is standing on it now.
+
+    The hover tooltip is the fourth. It reads the real tile data and will
+    happily report terrain, resources and units on a tile the player has
+    never scouted. Unexplored tiles must answer "Unexplored"; remembered
+    tiles show the land but not its occupants.
+
+    The general rule for the port: **anything that reveals game state has to
+    respect fog, not just the terrain pass.** Overlays, labels, yield pills,
+    tooltips and animations all qualify.
 
 ## Parity checklist
 
