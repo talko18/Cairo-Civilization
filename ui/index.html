@@ -162,6 +162,33 @@ button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);t
 #map-area{flex:1;position:relative;overflow:hidden;background:#0a1628;cursor:grab}
 #map-area.dragging{cursor:grabbing}
 #map-canvas{position:absolute;top:0;left:0}
+/* ── Map labels (DOM overlay driven by render3d.js; below #tile-tip and #zoom-controls) ── */
+#labels{position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none;overflow:hidden;z-index:5}
+#labels .lbl{position:absolute;left:0;top:0;visibility:hidden;white-space:nowrap;font:600 10px/1.2 sans-serif;color:#fff;will-change:transform}
+#labels .lbl-unit{display:flex;flex-direction:column;align-items:center;gap:1px}
+#labels .lbl-unit .nm{background:rgba(15,25,45,.82);border:1px solid #bdc3c7;border-radius:3px;padding:0 4px}
+#labels .lbl-unit.p0 .nm{border-color:#3498db}
+#labels .lbl-unit.p1 .nm{border-color:#e74c3c}
+#labels .hpbar,#labels .bar{display:block;width:24px;height:3px;background:rgba(0,0,0,.55)}
+#labels .hpbar i,#labels .bar i{display:block;height:100%}
+#labels .lbl-city{display:flex;align-items:center;gap:3px;font-size:11px}
+#labels .lbl-city .nm{background:rgba(15,25,45,.88);border:1.5px solid #bdc3c7;border-radius:3px;padding:1px 6px}
+#labels .lbl-city.p0 .nm{border-color:#2874a6}
+#labels .lbl-city.p1 .nm{border-color:#c0392b}
+#labels .lbl-city.sel .nm{background:rgba(245,197,66,.88);border-color:#f5c542;color:#1a1a2e}
+#labels .lbl-city .pop{width:18px;height:18px;border-radius:50%;border:1.5px solid #fff;text-align:center;line-height:15px;background:#888}
+#labels .lbl-city.p0 .pop{background:#2874a6}
+#labels .lbl-city.p1 .pop{background:#c0392b}
+#labels .lbl-city .bars{display:flex;flex-direction:column;gap:1px}
+#labels .lbl-city .am{width:8px;height:8px;border-radius:50%;background:#999}
+#labels .am-ecstatic{background:#4caf50!important}#labels .am-happy{background:#8bc34a!important}#labels .am-content{background:#9e9e9e!important}
+#labels .am-displeased{background:#ff9800!important}#labels .am-unhappy{background:#f44336!important}#labels .am-unrest{background:#b71c1c!important}
+#labels .lbl-city.mem{opacity:.75}
+#labels .lbl-yield{background:rgba(0,0,0,.65);border-radius:4px;padding:1px 4px;font:700 10px/1.3 monospace}
+#labels .lbl-yield b{margin:0 2px}
+#labels .lbl-yield .yf{color:#66bb6a}#labels .lbl-yield .yp{color:#f5a623}#labels .lbl-yield .yg{color:#ffd54f}
+#labels .lbl-yield.locked{outline:1px solid rgba(52,152,219,.8)}
+#labels .lbl-yield .lock{text-decoration:none;font-size:9px}
 #tile-tip{position:absolute;pointer-events:none;background:rgba(10,22,40,.94);border:1px solid var(--border);
   border-radius:var(--rad);padding:8px 12px;font-size:.78rem;z-index:20;display:none;max-width:280px;backdrop-filter:blur(4px);line-height:1.5}
 #tile-tip b{color:var(--gold)}
@@ -458,6 +485,7 @@ button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);t
   <!-- Map -->
   <div id="map-area">
     <canvas id="map-canvas"></canvas>
+    <div id="labels"></div>
     <div id="tile-tip"></div>
     <div id="mode-banner"></div>
     <div id="replay-bar">

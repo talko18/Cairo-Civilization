@@ -189,6 +189,16 @@ const groundPixels = () => {
 const testCanvas = document.createElement('canvas');
 testCanvas.width = 800; testCanvas.height = 500;
 document.body.appendChild(testCanvas);
+// The labels overlay, laid exactly over the canvas the way #map-area does in the app.
+const labelsRoot = document.createElement('div');
+labelsRoot.id = 'labels';
+document.body.appendChild(labelsRoot);
+Object.assign(labelsRoot.style, {position: 'absolute', left: testCanvas.offsetLeft + 'px', top: testCanvas.offsetTop + 'px',
+  width: '800px', height: '500px', overflow: 'hidden', pointerEvents: 'none'});
+const lblStyle = document.createElement('style');
+lblStyle.textContent = '#labels .lbl{position:absolute;left:0;top:0;visibility:hidden;white-space:nowrap;font:600 10px sans-serif}' +
+  '#labels .hpbar,#labels .bar{display:block;width:24px;height:3px}#labels .hpbar i,#labels .bar i{display:block;height:100%}';
+document.head.appendChild(lblStyle);
 
 // ── Task 5: renderer bootstrap ──
 TESTS.push({name: 'init succeeds with WebGL', fn: () =>
@@ -984,6 +994,583 @@ TESTS.push({name: 'the grid is visible on explored ground and invisible through 
       assert(got.n <= 200, 'grid shows through the fog: ' + got.n + ' pixels (worst ' + got.worst + ')');
     });
   } finally { __r3d.setWaterVisible(true); }
+}});
+
+
+// ── Task 10: units and cities ──
+// Every assertion reads the real built models (instance matrices, vertex
+// buffers) or the drawn frame. Units show only on currently visible ground;
+// a city also stays on remembered ground and is hidden only when unexplored.
+const UNIT_AT = (p, id) => fixture.players[p].units.find(u => u.id === id);
+const CITY_AT = (p, id) => fixture.players[p].cities.find(c => c.id === id);
+const fogIdx = (p) => p.r * COLS + p.q;
+const withFog = async (p, v, fn) => {
+  const i = fogIdx(p), was = FOGM.state[i], wasOn = FOGM.on;
+  FOGM.state[i] = v; FOGM.on = true; R3D.refreshFog();
+  try { return await fn(); } finally { FOGM.state[i] = was; FOGM.on = wasOn; R3D.refreshFog(); }
+};
+const withFields = async (obj, patch, fn) => {
+  const keep = {}; for (const k in patch) keep[k] = obj[k];
+  Object.assign(obj, patch); R3D.syncState();
+  try { return await fn(); } finally { Object.assign(obj, keep); R3D.syncState(); }
+};
+const fogOff = () => { FOGM.on = false; R3D.refreshFog(); };
+// How many pixels change when a piece layer is taken away.
+const diffPieces = (layer) => {
+  const a = __r3d.renderAndSample(FRAME.x, FRAME.y, FRAME.w, FRAME.h);
+  __r3d.setPiecesVisible(false, layer);
+  const b = __r3d.renderAndSample(FRAME.x, FRAME.y, FRAME.w, FRAME.h);
+  __r3d.setPiecesVisible(true, layer);
+  let n = 0, worst = 0;
+  for (let i = 0; i < a.length; i += 4) {
+    const d = Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]);
+    if (d > 8) { n++; worst = Math.max(worst, d); }
+  }
+  return {n, worst};
+};
+const flatGround = (tile, x, z) => R3DCore.heightAt(Object.assign({}, tile, {hasCity: false}), x, z);
+
+TESTS.push({name: 'each of the six unit types has distinct art', fn: () => {
+  const sigs = new Set();
+  for (let t = 0; t <= 5; t++) { assert(__r3d.hasUnitArt(t), 'type ' + t); sigs.add(__r3d.unitArtSignature(t)); }
+  assert(sigs.size === 6, 'unit types must be visually distinguishable: ' + sigs.size + ' distinct of 6');
+  assert(!__r3d.hasUnitArt(6) && !__r3d.hasUnitArt(-1), 'a type that does not exist has art');
+}});
+TESTS.push({name: 'every unit model stands on its own ground and has height', fn: () => {
+  for (let t = 0; t <= 5; t++) {
+    const r = __r3d.unitArtRange(t);
+    assert(r.min >= -0.03 && r.min <= 0.03, 'type ' + t + ' lowest vertex ' + r.min + ': it floats or sinks');
+    assert(r.max >= 0.25 && r.max <= 0.9, 'type ' + t + ' tallest vertex ' + r.max);
+  }
+}});
+TESTS.push({name: 'each unit is drawn on its own tile, as its own type, on the ground', fn: () => {
+  fogOff();
+  for (const p of [0, 1]) for (const u of fixture.players[p].units) {
+    const pl = __r3d.unitPlacement(p, u.id), c = R3DCore.hexCenter(u.q, u.r), g = flatGround(tileOf(u), c.x, c.z);
+    assert(pl, 'unit ' + p + ':' + u.id + ' is not drawn');
+    assert(Math.hypot(pl.x - c.x, pl.z - c.z) < 0.01, 'unit ' + p + ':' + u.id + ' drawn at ' + pl.x + ',' + pl.z + ' not ' + c.x + ',' + c.z);
+    assert(Math.abs(pl.y - g) < 0.05, 'unit ' + p + ':' + u.id + ' at height ' + pl.y + ' on ground ' + g);
+    assert(pl.type === u.unitType && pl.owner === p, 'unit ' + p + ':' + u.id + ' drawn as type ' + pl.type + ' owner ' + pl.owner);
+    assert(pl.sig === __r3d.unitArtSignature(u.unitType), 'unit ' + p + ':' + u.id + ' is not drawn with its type\'s model');
+  }
+  assert(__r3d.unitMeshCount() === 6, 'drawn units ' + __r3d.unitMeshCount());
+}});
+TESTS.push({name: 'units of different types never share a model', fn: () => {
+  fogOff();
+  const sigs = new Set([UNIT_AT(0, 0), UNIT_AT(0, 1), UNIT_AT(0, 2), UNIT_AT(1, 1), UNIT_AT(1, 2)].map(u => __r3d.unitPlacement(u === UNIT_AT(1, 1) || u === UNIT_AT(1, 2) ? 1 : 0, u.id).sig));
+  assert(sigs.size === 5, 'five different types shared models: ' + sigs.size);
+}});
+TESTS.push({name: 'a unit follows the game: moves, is removed, stacks', fn: () => {
+  fogOff();
+  const u = UNIT_AT(0, 2), q0 = u.q, c1 = R3DCore.hexCenter(q0 + 1, u.r);
+  u.q = q0 + 1; R3D.syncState();
+  try {
+    const pl = __r3d.unitPlacement(0, 2);
+    assert(pl && Math.hypot(pl.x - c1.x, pl.z - c1.z) < 0.01, 'unit did not follow its tile');
+    const b = UNIT_AT(0, 1), keepQ = b.q, keepR = b.r; b.q = u.q; b.r = u.r; R3D.syncState();
+    const a1 = __r3d.unitPlacement(0, 1), a2 = __r3d.unitPlacement(0, 2);
+    assert(Math.hypot(a1.x - a2.x, a1.z - a2.z) > 0.25, 'two units on one tile draw on top of each other');
+    b.q = keepQ; b.r = keepR;
+    fixture.players[0].units.splice(fixture.players[0].units.indexOf(u), 1); R3D.syncState();
+    assert(!__r3d.unitVisible(0, 2) && __r3d.unitMeshCount() === 5, 'a removed unit is still drawn');
+  } finally { u.q = q0; if (!fixture.players[0].units.includes(u)) fixture.players[0].units.push(u); R3D.syncState(); }
+  assert(__r3d.unitVisible(0, 2), 'the unit did not come back');
+}});
+TESTS.push({name: 'a unit on a tile that is not currently visible is not drawn', fn: async () => {
+  const F = R3DCore.FOG, W = LM.UNIT_ENEMY_WARRIOR;
+  await withFog(W, F.VISIBLE, () => assert(__r3d.unitVisible(1, 0), 'a unit in sight is not drawn'));
+  await withFog(W, F.REMEMBERED, () => assert(__r3d.unitVisible(1, 0) === false, 'remembered ground shows who stands there now'));
+  await withFog(W, F.UNSEEN, () => assert(__r3d.unitVisible(1, 0) === false, 'unexplored ground shows a unit'));
+  fogOn();
+  assert(__r3d.unitVisible(0, 2) === true && __r3d.unitVisible(1, 0) === false, 'fog model: own unit seen, enemy hidden');
+}});
+TESTS.push({name: 'a city stays on remembered ground and goes only from unexplored ground', fn: async () => {
+  const F = R3DCore.FOG, B = LM.CITY_B;
+  await withFog(B, F.VISIBLE, () => assert(__r3d.cityVisible(B.q, B.r), 'a city in sight is not drawn'));
+  await withFog(B, F.REMEMBERED, () => assert(__r3d.cityVisible(B.q, B.r), 'a remembered city vanished'));
+  await withFog(B, F.UNSEEN, () => assert(__r3d.cityVisible(B.q, B.r) === false, 'an unexplored city is drawn'));
+}});
+TESTS.push({name: 'cities grow with population', fn: async () => {
+  const c = CITY_AT(0, 0), A = LM.CITY_A;
+  let small, big, hs, hb, vs, vb;
+  await withFields(c, {population: 1}, () => { small = __r3d.cityTier(A.q, A.r); hs = __r3d.cityHouses(A.q, A.r); vs = __r3d.cityVertexCount(A.q, A.r); });
+  await withFields(c, {population: 8}, () => { big = __r3d.cityTier(A.q, A.r); hb = __r3d.cityHouses(A.q, A.r); vb = __r3d.cityVertexCount(A.q, A.r); });
+  assert(small < big, 'tier ' + small + ' vs ' + big);
+  assert(hb > hs + 6 && vb > vs * 1.5, 'houses ' + hs + ' -> ' + hb + ', vertices ' + vs + ' -> ' + vb);
+  await withFields(c, {population: 4}, () => assert(__r3d.cityTier(A.q, A.r) > small && __r3d.cityTier(A.q, A.r) < big, 'a mid-size city is not mid-tier'));
+}});
+TESTS.push({name: 'walls appear only when the Walls building is built', fn: async () => {
+  const c = CITY_AT(0, 0), A = LM.CITY_A;
+  let bare, walled;
+  await withFields(c, {buildings: 0}, () => { assert(__r3d.cityHasWalls(A.q, A.r) === false); bare = __r3d.cityVertexCount(A.q, A.r); });
+  await withFields(c, {buildings: 1 | 2 | 8 | 16 | 32 | 64 | 128}, () => assert(__r3d.cityHasWalls(A.q, A.r) === false, 'another building drew walls'));
+  await withFields(c, {buildings: 4}, () => { assert(__r3d.cityHasWalls(A.q, A.r) === true, 'no walls with the Walls bit'); walled = __r3d.cityVertexCount(A.q, A.r); });
+  assert(walled > bare + 200, 'walls add geometry: ' + bare + ' -> ' + walled);
+  assert(__r3d.cityHasWalls(CITY_AT(1, 0) && LM.CITY_B.q, LM.CITY_B.r) === false, 'an unwalled city has walls');
+}});
+TESTS.push({name: 'cities sit on their ground and rise above it', fn: () => {
+  fogOff();
+  for (const L of [LM.CITY_A, LM.CITY_B, LM.CITY_HILLS]) {
+    const rg = __r3d.cityYRange(L.q, L.r), t = Object.assign({}, tileOf(L), {hasCity: true}), c = R3DCore.hexCenter(L.q, L.r);
+    let lo = Infinity; for (let a = 0; a < 6.28; a += 0.5) lo = Math.min(lo, R3DCore.heightAt(t, c.x + Math.cos(a) * 0.6, c.z + Math.sin(a) * 0.6));
+    assert(rg.min >= lo - 0.06 && rg.min <= lo + 0.03, 'city ' + L.name + ' floor ' + rg.min + ' vs ground ' + lo);
+    assert(rg.max - rg.min > 0.3, 'city ' + L.name + ' is flat: ' + (rg.max - rg.min));
+  }
+}});
+
+// Pixels: take a piece layer away and count what changed on explored ground.
+const NAMES = ['Settler', 'Builder', 'Scout', 'Warrior', 'Slinger', 'Archer'];
+// Park every unit but the subject on unexplored ground (culled), so a frame
+// holds exactly one unit. Restores everything afterwards.
+const ELSEWHERE = {q: 28, r: 3};
+const alone = async (subject, patch, fn) => {
+  const saved = [];
+  for (const pl of fixture.players) for (const u of pl.units) if (u !== subject) { saved.push([u, u.q, u.r]); u.q = ELSEWHERE.q; u.r = ELSEWHERE.r; }
+  try { return await withFields(subject, patch, fn); }
+  finally { for (const [u, q, r] of saved) { u.q = q; u.r = r; } R3D.syncState(); }
+};
+const frameNow = () => __r3d.renderAndSample(FRAME.x, FRAME.y, FRAME.w, FRAME.h).slice();
+const framesDiffer = (a, b) => { let n = 0; for (let i = 0; i < a.length; i += 4) if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) > 8) n++; return n; };
+for (let t = 0; t <= 5; t++) {
+  TESTS.push({name: 'a ' + NAMES[t] + ' is visible on explored ground', fn: async () => {
+    fogOn();
+    await alone(UNIT_AT(0, 0), {unitType: t}, () => {
+      assert(__r3d.unitMeshCount() === 1, 'precondition: one unit in the frame, got ' + __r3d.unitMeshCount());
+      __r3d.lookAt(7, 6, 5, 0.9, 0.4);
+      const near = diffPieces('units');
+      assert(near.n >= 1200, NAMES[t] + ' changes only ' + near.n + ' pixels up close (want >= 1200)');
+      __r3d.lookAt(7, 6, 14, 1.0, 0.4);
+      const far = diffPieces('units');
+      assert(far.n >= 120, NAMES[t] + ' changes only ' + far.n + ' pixels at play zoom (want >= 120)');
+    });
+  }});
+}
+TESTS.push({name: 'the owner ring is visible on explored ground and follows the slope', fn: () => {
+  fogOn();
+  __r3d.lookAt(6, 6, 9, 0.9, 0.4);
+  const got = diffPieces('rings');
+  assert(got.n >= 600, 'rings change only ' + got.n + ' pixels (want >= 600)');
+  const r = __r3d.ringRange();
+  assert(r.count > 0 && r.min > -0.5, 'ring range ' + JSON.stringify(r));
+}});
+TESTS.push({name: 'a city is visible on explored ground, and so are its walls', fn: async () => {
+  fogOn();
+  const c = CITY_AT(0, 0), A = LM.CITY_A;
+  __r3d.lookAt(A.q, A.r, 7, 0.9, 0.4);
+  const got = diffPieces('cities');
+  assert(got.n >= 4000, 'the city changes only ' + got.n + ' pixels (want >= 4000)');
+  const frame = () => __r3d.renderAndSample(FRAME.x, FRAME.y, FRAME.w, FRAME.h);
+  let withWalls, without;
+  await withFields(c, {buildings: 4}, () => { __r3d.lookAt(A.q, A.r, 7, 0.9, 0.4); withWalls = frame(); });
+  await withFields(c, {buildings: 0}, () => { __r3d.lookAt(A.q, A.r, 7, 0.9, 0.4); without = frame(); });
+  let n = 0; for (let i = 0; i < withWalls.length; i += 4) if (Math.abs(withWalls[i] - without[i]) + Math.abs(withWalls[i + 1] - without[i + 1]) + Math.abs(withWalls[i + 2] - without[i + 2]) > 8) n++;
+  assert(n >= 800, 'walls change only ' + n + ' pixels (want >= 800)');
+}});
+TESTS.push({name: 'a remembered city is still drawn, a unit on remembered ground is not', fn: async () => {
+  const F = R3DCore.FOG, B = LM.CITY_B;
+  await withFog(B, F.REMEMBERED, () => {
+    __r3d.lookAt(B.q, B.r, 7, 0.9, 0.4);
+    const got = diffPieces('cities');
+    assert(got.n >= 1500, 'a remembered city changes only ' + got.n + ' pixels');
+  });
+}});
+for (const view of [{name: 'close', dist: 8, polar: 0.9}, {name: 'from above', dist: 30, polar: 0.4}, {name: 'grazing', dist: 8, polar: GRAZE}]) {
+  for (const at of [{q: 7, r: 6}, {q: 25, r: 14}]) {
+    TESTS.push({name: 'no city shows through unexplored fog (' + view.name + ' at ' + at.q + ',' + at.r + ')', fn: () => allFog(() => {
+      __r3d.setMarksUnfiltered(true);
+      try {
+        assert(__r3d.cityVisible(LM.CITY_A.q, LM.CITY_A.r) && __r3d.cityVisible(LM.CITY_B.q, LM.CITY_B.r), 'precondition: the cities are drawn');
+        __r3d.lookAt(at.q, at.r, view.dist, view.polar, 0.4);
+        const got = diffPieces('cities');
+        assert(got.n <= 200, got.n + ' pixels of cities show outside the fog (worst ' + got.worst + ')');
+      } finally { __r3d.setMarksUnfiltered(false); }
+    })});
+  }
+}
+// Units are opaque, so nothing but the cull keeps them off unexplored ground.
+// The cull never reads the test bypass: this is the real path, pinned hard.
+TESTS.push({name: 'units are culled, not covered: an all-unexplored map submits zero unit instances', fn: () => allFog(() => {
+  assert(__r3d.unitMeshCount() === 0 && __r3d.unitInstancesDrawn() === 0, 'units on unexplored ground: ' + __r3d.unitInstancesDrawn());
+  __r3d.setMarksUnfiltered(true);
+  try { assert(__r3d.unitInstancesDrawn() === 0, 'the test bypass reached the unit cull: ' + __r3d.unitInstancesDrawn()); }
+  finally { __r3d.setMarksUnfiltered(false); }
+  __r3d.lookAt(7, 6, 6, 0.9, 0.4);
+  const a = __r3d.renderAndSample(FRAME.x, FRAME.y, FRAME.w, FRAME.h);
+  __r3d.setPiecesVisible(false, 'units');
+  const b = __r3d.renderAndSample(FRAME.x, FRAME.y, FRAME.w, FRAME.h);
+  __r3d.setPiecesVisible(true, 'units');
+  for (let i = 0; i < a.length; i++) assert(a[i] === b[i], 'a unit pixel differs on an unexplored map');
+})});
+TESTS.push({name: 'every opaque layer is a fog-culled unit mesh, and only those', fn: () => {
+  fogOn();
+  assert(__r3d.fogCulledMeshes() >= 3, 'culled meshes ' + __r3d.fogCulledMeshes());
+  assert(__r3d.depthWritingLayersAboveTerrain() === 0, 'a layer writes depth without being culled');
+  allFog(() => assert(__r3d.fogCulledMeshes() === 0 || __r3d.unitInstancesDrawn() === 0, 'a culled mesh still draws'));
+}});
+TESTS.push({name: 'the filtered path draws nothing else on a map that is all unexplored', fn: () => allFog(() => {
+  for (const L of [LM.CITY_A, LM.CITY_B, LM.CITY_HILLS]) assert(!__r3d.cityVisible(L.q, L.r), L.name + ' is drawn on unexplored ground');
+  assert(__r3d.ringRange().count === 0, 'rings on unexplored ground');
+})});
+TESTS.push({name: 'units and cities sit below the fog and write no depth', fn: () => {
+  fogOn();
+  const O = __r3d.renderOrderOf, F = O('fogRemembered');
+  assert(__r3d.unitMeshCount() > 0 && __r3d.cityVisible(LM.CITY_A.q, LM.CITY_A.r), 'precondition: pieces exist');
+  for (const k of ['units3:0', 'city0:0', 'unitRings', 'unitDiscs']) assert(O(k) > 1 && O(k) < F, k + ' at ' + O(k) + ' (live mesh)');
+  assert(__r3d.depthWritingLayersAboveTerrain() === 0, 'a piece writes depth or is opaque');
+  assert(__r3d.drawablesAtOrAboveUnseenFog() === 0);
+}});
+TESTS.push({name: 'many units cost draw calls per model, not per figure', fn: async () => {
+  fogOff();
+  const extra = [];
+  for (let i = 0; i < 30; i++) {
+    const q = 4 + (i % 10), r = 8 + Math.floor(i / 10), t = i % 6, p = i % 2;
+    const u = {id: 100 + i, unitType: t, q, r, hp: 100, mp: 2, charges: 0, fortify: 0};
+    fixture.players[p].units.push(u); extra.push([p, u]);
+  }
+  R3D.syncState();
+  try {
+    assert(__r3d.unitMeshCount() === 36, 'drawn units ' + __r3d.unitMeshCount());
+    const calls = __r3d.pieceDrawCalls();
+    assert(calls <= 12 + 2 + 3, 'units, rings and cities cost ' + calls + ' draw calls for 36 units');
+    R3D.centerOn(8, 9); __r3d.setCameraDistance(14); await nextFrame();
+    assert(__r3d.drawCalls() < 300, 'draw calls with 36 units: ' + __r3d.drawCalls());
+  } finally {
+    for (const [p, u] of extra) fixture.players[p].units.splice(fixture.players[p].units.indexOf(u), 1);
+    R3D.syncState();
+  }
+  assert(__r3d.unitMeshCount() === 6, 'the extra units were not removed');
+}});
+TESTS.push({name: 'the renderer leaves units and cities exactly as the game made them', fn: () => {
+  const uk = 'id,unitType,q,r,hp,mp,charges,fortify', ck = 'id,name,q,r,population,hp,foodStockpile,prodStockpile,production,buildings,foundedTurn,isCapital,lockedTiles';
+  R3D.syncState(); fogOn(); R3D.syncState(); fogOff();
+  for (const p of fixture.players) {
+    assert(p.units.every(u => Object.keys(u).join() === uk), 'a unit gained or lost a field');
+    assert(p.cities.every(c => Object.keys(c).join() === ck), 'a city gained or lost a field');
+  }
+}});
+
+// A player has to tell the types apart on screen: render each type alone on
+// the same tile from the same camera and compare the frames, pairwise.
+TESTS.push({name: 'every pair of unit types is visibly different on screen', fn: async () => {
+  fogOn();
+  const frames = [];
+  for (let t = 0; t <= 5; t++) {
+    await alone(UNIT_AT(0, 0), {unitType: t}, () => { __r3d.lookAt(7, 6, 4, 0.9, 0.4); frames.push(frameNow()); });
+  }
+  let worst = {n: Infinity};
+  for (let a = 0; a < 6; a++) for (let b = a + 1; b < 6; b++) {
+    const n = framesDiffer(frames[a], frames[b]);
+    if (n < worst.n) worst = {n, a, b};
+  }
+  assert(worst.n >= 900, NAMES[worst.a] + ' and ' + NAMES[worst.b] + ' differ in only ' + worst.n + ' pixels (want >= 900)');
+}});
+// Owner colour: the same type on the same tile, once per owner. The changed
+// pixels against an empty tile must lean blue for player 0 and red for 1.
+TESTS.push({name: 'a unit wears its owner colour', fn: async () => {
+  fogOn();
+  const lean = (frame, base) => {
+    let blue = 0, red = 0;
+    for (let i = 0; i < frame.length; i += 4) {
+      if (Math.abs(frame[i] - base[i]) + Math.abs(frame[i + 1] - base[i + 1]) + Math.abs(frame[i + 2] - base[i + 2]) <= 24) continue;
+      if (frame[i + 2] > frame[i] + 30) blue++; else if (frame[i] > frame[i + 2] + 30) red++;
+    }
+    return {blue, red};
+  };
+  const mine = UNIT_AT(0, 2), foe = UNIT_AT(1, 0), at = {q: 7, r: 7};
+  let base, a, b;
+  const view = () => __r3d.lookAt(at.q, at.r, 4, 0.9, 0.4);
+  await alone(mine, {q: ELSEWHERE.q, r: ELSEWHERE.r}, () => { view(); base = frameNow(); });
+  await alone(mine, {q: at.q, r: at.r, unitType: 3}, () => { view(); a = lean(frameNow(), base); });
+  // the enemy stands on the same tile, made visible by the fog model
+  const i = fogIdx(at), was = FOGM.state[i]; FOGM.state[i] = R3DCore.FOG.VISIBLE;
+  try {
+    await alone(foe, {q: at.q, r: at.r, unitType: 3}, () => { view(); b = lean(frameNow(), base); });
+  } finally { FOGM.state[i] = was; R3D.refreshFog(); }
+  assert(a.blue > a.red + 150, 'player 0 is not blue: ' + JSON.stringify(a));
+  assert(b.red > b.blue + 150, 'player 1 is not red: ' + JSON.stringify(b));
+}});
+// The remembered fog must dim a city. An opaque city passes the depth test
+// ahead of the shell and glows out of a dark hex; pixels are the only proof.
+TESTS.push({name: 'a city on remembered ground is darker than the same city in sight', fn: async () => {
+  const F = R3DCore.FOG, A = LM.CITY_A;
+  fogOn();
+  __r3d.lookAt(A.q, A.r, 7, 0.9, 0.4);
+  const lit = frameNow();
+  __r3d.setPiecesVisible(false, 'cities'); const bare = frameNow(); __r3d.setPiecesVisible(true, 'cities');
+  const mask = []; for (let i = 0; i < lit.length; i += 4) if (Math.abs(lit[i] - bare[i]) + Math.abs(lit[i + 1] - bare[i + 1]) + Math.abs(lit[i + 2] - bare[i + 2]) > 24) mask.push(i);
+  assert(mask.length > 2000, 'precondition: the city covers ' + mask.length + ' pixels');
+  // Judge the tall owner-coloured parts (roofs, flag, tower caps): they stand
+  // above the shell, so they are what an opaque city leaves undimmed. The
+  // plaza lies under the shell and is dimmed either way.
+  const tall = mask.filter((i) => lit[i + 2] > lit[i] + 30);
+  assert(tall.length > 150, 'precondition: ' + tall.length + ' owner-coloured pixels');
+  mask.length = 0; for (const i of tall) mask.push(i);
+  const lum = (f) => mask.reduce((s, i) => s + f[i] * 0.3 + f[i + 1] * 0.59 + f[i + 2] * 0.11, 0) / mask.length;
+  let dim;
+  await withFog(A, F.REMEMBERED, () => { __r3d.lookAt(A.q, A.r, 7, 0.9, 0.4); dim = lum(frameNow()); });
+  const bright = lum(lit);
+  assert(dim < bright * 0.8, 'remembered city luminance ' + dim.toFixed(1) + ' vs ' + bright.toFixed(1) + ' in sight: the fog is not dimming it');
+}});
+
+
+// ── Task 11: DOM labels, HP bars, yield pills ──
+// A label is only right if it is the right text, on the right pixels, for a
+// thing that still exists. Each assertion below was broken the way a plausible
+// regression would break it (see the task report).
+const canvasBox = () => testCanvas.getBoundingClientRect();
+const lblBox = (el) => { const b = el.getBoundingClientRect(), c = canvasBox(); return {x: b.left - c.left, y: b.top - c.top, w: b.width, h: b.height, cx: b.left - c.left + b.width / 2, bottom: b.bottom - c.top}; };
+const shown = (el) => !!el && el.style.visibility === 'visible';
+// Bounding box of the pixels the unit layer contributes: where the figure really is.
+const unitPixelBox = () => {
+  const a = frameNow(); __r3d.setPiecesVisible(false, 'units'); const b = frameNow(); __r3d.setPiecesVisible(true, 'units');
+  let x0 = 1e9, x1 = -1, y0 = 1e9, y1 = -1, n = 0;
+  for (let i = 0; i < a.length; i += 4) {
+    if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) <= 24) continue;
+    const px = (i / 4) % FRAME.w, py = Math.floor((i / 4) / FRAME.w);
+    x0 = Math.min(x0, px); x1 = Math.max(x1, px); y0 = Math.min(y0, py); y1 = Math.max(y1, py); n++;
+  }
+  return {x0, x1, y0, y1, n, cx: (x0 + x1) / 2};
+};
+const WARRIOR = () => UNIT_AT(0, 2);
+const stateSnapshot = () => JSON.stringify(fixture);
+
+TESTS.push({name: 'labels are DOM elements, not 3D text', fn: () => {
+  fogOff(); R3D.syncState();
+  assert(document.querySelectorAll('#labels .lbl').length > 0, 'no labels in the overlay');
+  assert(__r3d.labelsInDom() === __r3d.labelElements(), 'DOM ' + __r3d.labelsInDom() + ' vs held ' + __r3d.labelElements());
+  assert(__r3d.labelElements() === __r3d.expectedLabelCount(), 'held ' + __r3d.labelElements() + ' vs state ' + __r3d.expectedLabelCount());
+  assert(__r3d.labelElements() === 6 + 3, '6 units + 3 cities, got ' + __r3d.labelElements());
+  for (const l of document.querySelectorAll('#labels .lbl')) assert(l.parentNode === labelsRoot, 'label not directly in the overlay');
+}});
+TESTS.push({name: 'a unit label has the unit name, owner class, and sits on the figure it names', fn: async () => {
+  fogOff();
+  await alone(WARRIOR(), {}, async () => {
+    __r3d.lookAt(5, 5, 9, 0.9, 0.4); await nextFrame();
+    const el = __r3d.labelFor('unit', 2, 0);
+    assert(el && el.textContent.includes('Warrior'), 'text: ' + (el && el.textContent));
+    assert(el.className.includes('p0') && !el.className.includes('p1'), 'owner class: ' + el.className);
+    assert(shown(el), 'label of a unit in view is hidden');
+    const px = unitPixelBox(), lb = lblBox(el);
+    assert(px.n > 300, 'precondition: the unit covers ' + px.n + ' pixels');
+    assert(Math.abs(lb.cx - px.cx) < 24, 'label centre x ' + lb.cx.toFixed(0) + ' vs figure ' + px.cx.toFixed(0));
+    assert(lb.bottom <= px.y0 + 14 && lb.bottom > px.y0 - 70, 'label bottom ' + lb.bottom.toFixed(0) + ' vs figure top ' + px.y0);
+    // move the camera: the label must follow the figure, not stay where it was
+    __r3d.lookAt(7, 5, 9, 0.9, 0.4); await nextFrame();
+    const px2 = unitPixelBox(), lb2 = lblBox(el);
+    assert(Math.abs(px2.cx - px.cx) > 30, 'precondition: the figure moved on screen');
+    assert(Math.abs(lb2.cx - px2.cx) < 24, 'after panning the label is at x ' + lb2.cx.toFixed(0) + ', figure at ' + px2.cx.toFixed(0));
+    assert(Math.abs((lb2.cx - lb.cx) - (px2.cx - px.cx)) < 24, 'label did not move by the amount the figure did');
+  });
+}});
+TESTS.push({name: 'a label for something off screen is hidden, not drawn at a stale position', fn: async () => {
+  fogOff();
+  const el = __r3d.labelFor('unit', 0, 1);                       // enemy warrior, far east
+  __r3d.lookAt(24, 14, 9, 0.9, 0.4); await nextFrame();
+  assert(shown(el), 'precondition: the enemy warrior is in view');
+  __r3d.lookAt(3, 4, 9, 0.9, 0.4); await nextFrame();
+  assert(!shown(el), 'a label for a unit off screen is still shown');
+}});
+TESTS.push({name: 'a unit HP bar appears only when damaged and its width follows hp', fn: async () => {
+  fogOff();
+  const w = WARRIOR(), el = () => __r3d.labelFor('unit', 2, 0), bar = () => el().querySelector('.hpbar'), fill = () => bar().querySelector('i');
+  __r3d.lookAt(5, 5, 9, 0.9, 0.4); await nextFrame();
+  assert(bar().style.display === 'none', 'a healthy unit shows an HP bar');
+  await withFields(w, {hp: 40}, async () => {
+    assert(bar().style.display !== 'none', 'a damaged unit has no HP bar');
+    assert(fill().style.width === '40%', 'hp 40 drew width ' + fill().style.width);
+    await nextFrame(); assert(bar().getBoundingClientRect().width > 10 && fill().getBoundingClientRect().width > 4, 'bar has no area on screen');
+  });
+  await withFields(w, {hp: 80}, () => assert(fill().style.width === '80%', 'hp 80 drew width ' + fill().style.width));
+  await withFields(w, {hp: 20}, () => assert(fill().style.background.length > 0 && fill().style.background !== '', 'low hp bar has no colour'));
+  assert(bar().style.display === 'none', 'bar stayed after healing');
+}});
+TESTS.push({name: 'a removed unit removes its label', fn: () => {
+  fogOff(); R3D.syncState();
+  const victim = UNIT_AT(0, 1), at = fixture.players[0].units.indexOf(victim);
+  const before = __r3d.labelElements(), inDom = __r3d.labelsInDom(), el = __r3d.labelFor('unit', 1, 0);
+  assert(el && el.isConnected, 'precondition: the builder has a label');
+  victim.hp = 0; fixture.players[0].units.splice(at, 1);
+  try {
+    R3D.syncState();
+    assert(__r3d.labelElements() === before - 1, 'held labels ' + before + ' -> ' + __r3d.labelElements());
+    assert(__r3d.labelsInDom() === inDom - 1, 'DOM labels ' + inDom + ' -> ' + __r3d.labelsInDom() + ': a dead unit left its name floating');
+    assert(!el.isConnected, 'the dead unit\'s element is still attached');
+    assert(__r3d.labelFor('unit', 1, 0) === null);
+    assert(__r3d.labelElements() === __r3d.expectedLabelCount());
+  } finally { fixture.players[0].units.splice(at, 0, victim); victim.hp = 100; R3D.syncState(); }
+  assert(__r3d.labelFor('unit', 1, 0) !== null, 'the label did not come back with the unit');
+}});
+TESTS.push({name: 'a unit that dies by hp alone (still in the list) also loses its label', fn: () => {
+  fogOff(); const u = UNIT_AT(1, 1), el = __r3d.labelFor('unit', 1, 1);
+  assert(el && el.isConnected, 'precondition');
+  u.hp = 0; R3D.syncState();
+  try { assert(!el.isConnected && __r3d.labelFor('unit', 1, 1) === null, 'a 0 hp unit keeps its label'); }
+  finally { u.hp = 100; R3D.syncState(); }
+}});
+TESTS.push({name: 'a unit label follows its unit: the label moves to the new tile, no duplicate', fn: async () => {
+  fogOff(); const u = UNIT_AT(0, 0), n = __r3d.labelElements();
+  __r3d.lookAt(7, 6, 9, 0.9, 0.4); await nextFrame();
+  const el = __r3d.labelFor('unit', 0, 0), x0 = lblBox(el).cx;
+  await withFields(u, {q: 9, r: 6}, async () => {
+    await nextFrame();
+    assert(__r3d.labelElements() === n, 'labels ' + n + ' -> ' + __r3d.labelElements());
+    assert(lblBox(__r3d.labelFor('unit', 0, 0)).cx - x0 > 40, 'label did not move with the unit');
+  });
+}});
+TESTS.push({name: 'a unit on remembered or unexplored ground has no label (labels follow fog)', fn: async () => {
+  const P = LM.UNIT_ENEMY_WARRIOR;
+  fogOff(); R3D.syncState();
+  assert(__r3d.labelFor('unit', 0, 1), 'precondition: the enemy warrior has a label');
+  await withFog(P, R3DCore.FOG.REMEMBERED, () => assert(__r3d.labelFor('unit', 0, 1) === null, 'a unit on remembered ground is named'));
+  await withFog(P, R3DCore.FOG.UNSEEN, () => assert(__r3d.labelFor('unit', 0, 1) === null, 'a unit on unexplored ground is named'));
+  assert(__r3d.labelFor('unit', 0, 1), 'the label did not return when the tile became visible');
+}});
+TESTS.push({name: 'a city label shows name, capital star and population, and HP/production only when meaningful', fn: async () => {
+  fogOff(); const c = CITY_AT(0, 0);
+  __r3d.lookAt(6, 5, 9, 0.9, 0.4); await nextFrame();
+  const el = __r3d.labelFor('city', 0, 0);
+  assert(el.querySelector('.nm').textContent === 'Alpha ★', 'name: ' + el.querySelector('.nm').textContent);
+  assert(el.querySelector('.pop').textContent === '3', 'population: ' + el.querySelector('.pop').textContent);
+  assert(el.className.includes('p0'), 'owner class ' + el.className);
+  assert(el.querySelector('.hp').style.display === 'none' && el.querySelector('.prod').style.display === 'none', 'bars for a full-hp city with nothing in production');
+  await withFields(c, {hp: 100, production: 1, prodStockpile: 40, population: 5, isCapital: false}, async () => {
+    assert(el.querySelector('.hp i').style.width === '50%', 'city hp width ' + el.querySelector('.hp i').style.width);
+    assert(el.querySelector('.prod').style.display !== 'none' && el.querySelector('.prod i').style.width === '50%', 'production width ' + el.querySelector('.prod i').style.width);
+    assert(el.querySelector('.pop').textContent === '5' && el.querySelector('.nm').textContent === 'Alpha', 'pop/star not updated');
+  });
+  assert(shown(el), 'city label hidden in view');
+  const A = LM.CITY_A, cc = R3DCore.hexCenter(A.q, A.r);
+  assert(lblBox(el).cx > 100 && lblBox(el).cx < 700, 'city label is not near the middle of the screen: ' + lblBox(el).cx);
+}});
+TESTS.push({name: 'a city on remembered ground keeps a name-only label; unexplored drops it', fn: async () => {
+  const A = LM.CITY_A;
+  fogOff(); const el = __r3d.labelFor('city', 0, 0);
+  await withFields(CITY_AT(0, 0), {hp: 90, production: 1, prodStockpile: 30}, async () => {
+    await withFog(A, R3DCore.FOG.REMEMBERED, () => {
+      const m = __r3d.labelFor('city', 0, 0);
+      assert(m, 'a remembered city lost its label');
+      assert(m.querySelector('.nm').textContent.startsWith('Alpha'), 'name missing on remembered city');
+      for (const sel of ['.pop', '.bars', '.am']) assert(m.querySelector(sel).style.display === 'none', 'remembered city leaks ' + sel);
+      assert(!m.className.includes('p1') && m.className.includes('p0'), 'remembered city lost its owner: ' + m.className);
+    });
+    await withFog(A, R3DCore.FOG.UNSEEN, () => assert(__r3d.labelFor('city', 0, 0) === null, 'a city on unexplored ground is named'));
+    assert(__r3d.labelFor('city', 0, 0).querySelector('.hp').style.display !== 'none', 'the full label did not come back');
+  });
+}});
+TESTS.push({name: 'a captured city keeps one label, in the new owner colour', fn: () => {
+  fogOff(); R3D.syncState();
+  const from = fixture.players[0].cities, to = fixture.players[1].cities, c = from[0], n = __r3d.labelElements();
+  const old = __r3d.labelFor('city', 0, 0);
+  assert(old && old.className.includes('p0'), 'precondition');
+  from.splice(0, 1); const moved = Object.assign({}, c, {id: 9}); to.push(moved);
+  try {
+    R3D.syncState();
+    const el = __r3d.labelFor('city', 9, 1);
+    assert(el && el.className.includes('p1') && !el.className.includes('p0'), 'new owner colour: ' + (el && el.className));
+    assert(__r3d.labelFor('city', 0, 0) === null && !old.isConnected, 'the old owner\'s banner is still up');
+    assert(__r3d.labelElements() === n && __r3d.labelsInDom() === n, 'labels ' + n + ' -> ' + __r3d.labelElements() + '/' + __r3d.labelsInDom());
+    assert(__r3d.labelElements() === __r3d.expectedLabelCount());
+  } finally { to.pop(); from.splice(0, 0, c); R3D.syncState(); }
+  assert(__r3d.labelFor('city', 0, 0).className.includes('p0'), 'restore failed');
+}});
+TESTS.push({name: 'a city that is gone loses its label', fn: () => {
+  fogOff(); const cities = fixture.players[1].cities, c = cities[0], el = __r3d.labelFor('city', 0, 1);
+  assert(el && el.isConnected, 'precondition');
+  cities.splice(0, 1);
+  try { R3D.syncState(); assert(!el.isConnected && __r3d.labelFor('city', 0, 1) === null, 'destroyed city kept its banner'); }
+  finally { cities.splice(0, 0, c); R3D.syncState(); }
+}});
+TESTS.push({name: 'yield pills carry the tile\'s yield, the lock marker, and exist only where tileFacts allows', fn: async () => {
+  fogOff();
+  // an open grassland tile near Alpha, given a silver deposit: 2 food (terrain) + 3 gold (silver)
+  const T = tileOf({q: 7, r: 4}); const keep = {terrain: T.terrain, feature: T.feature, resource: T.resource, improvement: T.improvement};
+  Object.assign(T, {terrain: 2, feature: 0, resource: 8, improvement: 0});
+  try {
+    R3D.setYieldTiles([{q: 7, r: 4}, {q: 8, r: 4, locked: true}]);
+    const a = __r3d.yieldLabelOn(7, 4), b = __r3d.yieldLabelOn(8, 4);
+    assert(a && a.textContent.replace(/\s+/g, '') === '2F3G', 'yield text: ' + (a && a.textContent));
+    assert(!a.querySelector('.lock') && b.querySelector('.lock'), 'lock marker on the wrong pill');
+    __r3d.lookAt(7, 4, 7, 0.9, 0.4); await nextFrame();
+    assert(shown(a) && lblBox(a).cx > 300 && lblBox(a).cx < 500, 'pill not over its tile: ' + lblBox(a).cx);
+    assert(lblBox(b).cx > lblBox(a).cx + 15, 'the east neighbour\'s pill is not east of this one');
+    Object.assign(T, {resource: 0, improvement: 1}); R3D.syncState();           // a farm: 3 food
+    assert(__r3d.yieldLabelOn(7, 4).textContent.replace(/\s+/g, '') === '3F', 'pill did not update: ' + __r3d.yieldLabelOn(7, 4).textContent);
+    // far camera: pills are clutter
+    __r3d.setCameraDistance(60); await nextFrame();
+    assert(!shown(__r3d.yieldLabelOn(7, 4)), 'pills still shown from far away');
+  } finally { Object.assign(T, keep); R3D.setYieldTiles([]); R3D.syncState(); }
+  assert(__r3d.yieldLabelOn(7, 4) === null, 'clearing the yield tiles left pills behind');
+}});
+TESTS.push({name: 'yield pills never appear on unexplored tiles', fn: () => {
+  const U = LM.UNSEEN, T = tileOf(U), keep = {terrain: T.terrain, resource: T.resource};
+  Object.assign(T, {terrain: 2, resource: 8});                                    // a tile worth showing: nonzero yield
+  try {
+    fogOff();
+    R3D.setYieldTiles(fixture.tiles.map(t => ({q: t.q, r: t.r})));
+    assert(__r3d.yieldLabelOn(U.q, U.r) !== null, 'control: with the map visible the pill exists');
+    fogOn(); R3D.syncState();
+    assert(R3D.fogAt(U.q, U.r) === R3DCore.FOG.UNSEEN, 'precondition: UNSEEN is unexplored');
+    assert(__r3d.yieldLabelOn(U.q, U.r) === null, 'a pill on unexplored ground reveals its terrain');
+    let leaked = 0;
+    for (const t of fixture.tiles) if (R3D.fogAt(t.q, t.r) === R3DCore.FOG.UNSEEN && __r3d.yieldLabelOn(t.q, t.r)) leaked++;
+    assert(leaked === 0, leaked + ' pills on unexplored tiles');
+    const rem = LM.FOG_REMEMBERED;
+    assert(R3D.fogAt(rem.q, rem.r) === R3DCore.FOG.REMEMBERED && __r3d.yieldLabelOn(rem.q, rem.r) !== null, 'explored ground should keep its pills');
+    assert(__r3d.labelElements() === __r3d.expectedLabelCount(), 'the label set has pills the state does not account for');
+  } finally { Object.assign(T, keep); R3D.setYieldTiles([]); fogOff(); R3D.syncState(); }
+}});
+TESTS.push({name: 'a city-centre yield pill (floored yields) never appears on an unexplored tile', fn: () => {
+  const U = LM.UNSEEN;
+  try {
+    fogOn(); R3D.syncState();
+    assert(R3D.fogAt(U.q, U.r) === R3DCore.FOG.UNSEEN, 'precondition: UNSEEN is unexplored');
+    R3D.setYieldTiles([{q: U.q, r: U.r, isCenter: true}]);
+    assert(__r3d.yieldLabelOn(U.q, U.r) === null, 'isCenter floors food/prod regardless of terrain: a pill reveals unexplored ground');
+    fogOff(); R3D.syncState();
+    assert(__r3d.yieldLabelOn(U.q, U.r) !== null, 'control: with the tile visible the centre pill exists');
+  } finally { R3D.setYieldTiles([]); fogOff(); R3D.syncState(); }
+}});
+TESTS.push({name: 'a unit moved in place onto unexplored ground loses its label on the next label-only update', fn: () => {
+  fogOn(); R3D.syncState();
+  const u = UNIT_AT(0, 2), keep = {q: u.q, r: u.r};
+  const vis = fixture.tiles.find(t => R3D.fogAt(t.q, t.r) === R3DCore.FOG.VISIBLE && t.terrain >= 2 && t.terrain !== 12 && !(t.q === u.q && t.r === u.r));
+  assert(__r3d.labelFor('unit', 2, 0), 'precondition: the warrior has a label');
+  try {
+    // optimistic updates move units in place; setSelection/setYieldTiles re-run labels WITHOUT re-running the unit pieces
+    u.q = LM.UNSEEN.q; u.r = LM.UNSEEN.r;
+    assert(R3D.fogAt(u.q, u.r) === R3DCore.FOG.UNSEEN, 'precondition: destination is unexplored');
+    R3D.setSelection(null);
+    assert(__r3d.labelFor('unit', 2, 0) === null, 'setSelection kept a unit label over unexplored ground');
+    u.q = keep.q; u.r = keep.r; R3D.syncState();
+    assert(__r3d.labelFor('unit', 2, 0), 'label did not return');
+    u.q = LM.UNSEEN.q; u.r = LM.UNSEEN.r;
+    R3D.setYieldTiles([]);
+    assert(__r3d.labelFor('unit', 2, 0) === null, 'setYieldTiles kept a unit label over unexplored ground');
+  } finally { u.q = keep.q; u.r = keep.r; fogOff(); R3D.syncState(); }
+}});
+TESTS.push({name: 'labels hide when the camera pulls far back', fn: async () => {
+  fogOff(); R3D.syncState();
+  const el = __r3d.labelFor('unit', 2, 0);
+  __r3d.lookAt(5, 5, 14, 1.0, 0.4); await nextFrame();
+  assert(shown(el), 'precondition: the unit name is shown at play zoom');
+  __r3d.setCameraDistance(60); await nextFrame();
+  assert(__r3d.labelCount() < __r3d.expectedLabelCount(), 'shown ' + __r3d.labelCount() + ' of ' + __r3d.expectedLabelCount());
+  assert(!shown(el), 'unit names should be hidden from far away');
+  assert(__r3d.labelElements() === __r3d.expectedLabelCount(), 'hiding must not delete: the labels have to come back');
+  __r3d.lookAt(5, 5, 14, 1.0, 0.4); await nextFrame();
+  assert(shown(el), 'the label did not return when the camera came back');
+}});
+TESTS.push({name: 'a selected city\'s banner is marked', fn: () => {
+  fogOff(); const A = LM.CITY_A;
+  R3D.setSelection({kind: 'city', q: A.q, r: A.r});
+  try { assert(__r3d.labelFor('city', 0, 0).className.includes('sel'), 'selected city not marked'); assert(!__r3d.labelFor('city', 1, 0).className.includes('sel'), 'other city marked'); }
+  finally { R3D.setSelection(null); }
+  assert(!__r3d.labelFor('city', 0, 0).className.includes('sel'), 'mark did not clear');
+}});
+TESTS.push({name: 'labels never write into game state', fn: () => {
+  fogOff(); const before = stateSnapshot();
+  R3D.setYieldTiles(fixture.tiles.slice(0, 200).map(t => ({q: t.q, r: t.r, locked: true}))); fogOn(); R3D.syncState(); R3D.setYieldTiles([]); fogOff();
+  assert(stateSnapshot() === before, 'labels changed the game state');
 }});
 
 async function runAll() {

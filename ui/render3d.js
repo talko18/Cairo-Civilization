@@ -523,7 +523,10 @@
   // order from this table (and must stay below fogUnseen).
   // 'labels' is a reserved slot, not a layer: labels are DOM elements over the
   // canvas (Decision 5). It is here so nothing else claims 5.
-  const RENDER_ORDER = { terrain: 0, grid: 1, territory: 1, borders: 1, fogRemembered: 2,
+  // Cities and units sit BELOW fogRemembered on purpose: with no depth writes,
+  // draw order alone decides, and the remembered fog must be drawn over them.
+  const RENDER_ORDER = { terrain: 0, grid: 1, territory: 1, borders: 1,
+    cities: 1.2, unitDiscs: 1.25, unitRings: 1.3, units: 1.4, fogRemembered: 2,
     overlays: 3, rings: 4, labels: 5, fogUnseen: 6 };
 
   // The surface the player actually sees, which is not always the terrain
@@ -685,7 +688,7 @@
     // straight up through a ground layer unless their instances are culled.
     if (changed || S.sceneryHide !== fogHidesScenery) applyFogToScenery(fogHidesScenery);
     S.hoverTile = null;      // the tooltip must re-read its tile under the new fog
-    if (changed) { updateMarks(); requestRender(); }
+    if (changed) { updateMarks(); updatePieces(); requestRender(); }
   }
 
   // Test-only reader over the live buffer: 'live' means this tile's range
@@ -1017,7 +1020,9 @@
       onTileClick: opts.onTileClick || null,
       onTileHover: opts.onTileHover || null,
       needsRender: true, frames: 0, raf: 0, fly: null, anims: [], hoverTile: null,
-      fog: null, layers: {}, marks: null, unfiltered: false, selection: null, hover: null,
+      labelRoot: opts.labels || document.getElementById('labels') || null, amenityOf: opts.amenityOf || null,
+      labels: new Map(), yieldTiles: [], vw: 0, vh: 0,
+      fog: null, layers: {}, marks: null, pieces: null, unfiltered: false, selection: null, hover: null,
       quality: { shadows: true, props: true, fullRes: false },
       tileIdx: new Map(), cityTiles: new Set(), chunks: [], chunksX: Math.ceil(cols / CHUNK), chunksY: Math.ceil(rows / CHUNK),
       scenery: [], fogHideable: [], sceneryMats: new Map(), sceneryGeo: makeSceneryGeo(), sceneryHide: null,
@@ -1070,6 +1075,7 @@
       updateGridFade();
       S.renderer.render(S.scene, S.camera);
       S.frames++;
+      positionLabels();
       return true;
     }
     return false;
@@ -1097,6 +1103,7 @@
     S.renderer.setSize(w, h, false);
     S.camera.aspect = w / h;
     S.camera.updateProjectionMatrix();
+    S.vw = w; S.vh = h;      // the only place labels read layout: never per frame
     S.needsRender = true;
   }
 
@@ -1142,11 +1149,527 @@
     disposeScenery();
     disposeFog();
     disposeMarks();
+    disposePieces();
+    clearLabels();
     for (const g of Object.values(S.sceneryGeo)) g.dispose();
     S.terrainMat.dispose();
     S.renderer.dispose();
     S = null;
   }
+
+  // ---- Units and cities ----
+  // The approved art, baked. Every figure, wagon, ox, house and wall is a
+  // primitive placed by a transform; bakeParts() merges the lot into ONE
+  // vertex-coloured geometry per (unit type, owner) and one per city, so a
+  // squad of three is a single instance and a city is a single draw call.
+  //
+  // These are ABOVE the ground, so by the rule that cost Task 8 a fix round
+  // they are transparent and write no depth, and draw before the remembered
+  // fog (renderOrder below it) so the fog dims what it covers. Without depth
+  // writes a model cannot sort itself: parts are added far-to-near for the
+  // default camera, and every unit faces the default camera (+z, small yaw).
+  // Fog is also a FILTER: a unit is drawn only on a currently visible tile
+  // (remembered ground must not show who stands there now); a city stays on
+  // remembered ground and is hidden only on unexplored ground.
+  const OWNER_HEX = ['#3498db', '#e74c3c'], OWNER_FALLBACK = '#bdc3c7';
+  const ownerHex = (p) => OWNER_HEX[p] || OWNER_FALLBACK;
+  const UNIT_SCALE = 1.3, UNIT_TYPE_COUNT = 6;
+  const SKINS = ['#c99a6e', '#b9875c', '#a8754c', '#d2a57a'];
+  const PIECE_LIFT = { ring: 0.02, sink: 0.012 };
+  const RING_R0 = 0.36, RING_R1 = 0.42;
+  const WALLS_BIT = 4;       // bit 2 of city.buildings
+
+  function rngOf(seed) {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6D2B79F5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // Tiny scene-graph DSL for the art: P() is a coloured primitive, grp() a
+  // transform node. bakeParts() flattens the tree.
+  const grp = (x, y, z) => { const g = new THREE.Group(); g.position.set(x || 0, y || 0, z || 0); return g; };
+  function P(geo, hex, x, y, z, dbl) {
+    const m = new THREE.Mesh(geo);
+    m.position.set(x || 0, y || 0, z || 0);
+    m.userData.hex = hex; m.userData.dbl = !!dbl;
+    return m;
+  }
+  const tc = new THREE.Color();
+  function bakeParts(root, soup) {
+    root.updateMatrixWorld(true);
+    root.traverse((o) => {
+      if (!o.isMesh) return;
+      const g = o.geometry.index ? o.geometry.toNonIndexed() : o.geometry.clone();
+      g.applyMatrix4(o.matrixWorld);
+      const p = g.attributes.position.array, n = g.attributes.normal.array;
+      tc.set(o.userData.hex);
+      const push = (i, flip) => {
+        soup.pos.push(p[i], p[i + 1], p[i + 2]);
+        soup.nor.push(flip ? -n[i] : n[i], flip ? -n[i + 1] : n[i + 1], flip ? -n[i + 2] : n[i + 2]);
+        soup.col.push(tc.r, tc.g, tc.b);
+      };
+      for (let t = 0; t < p.length; t += 9) {
+        push(t, false); push(t + 3, false); push(t + 6, false);
+        // An open shell (canopy, cloak, flag) is seen from both sides: add the
+        // reverse winding rather than turning DoubleSide on for everything.
+        if (o.userData.dbl) { push(t, true); push(t + 6, true); push(t + 3, true); }
+      }
+      g.dispose();
+    });
+  }
+  const newSoup = () => ({ pos: [], nor: [], col: [] });
+  function soupGeometry(soup) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(soup.pos, 3));
+    g.setAttribute('normal', new THREE.Float32BufferAttribute(soup.nor, 3));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(soup.col, 3));
+    g.computeBoundingSphere();
+    return g;
+  }
+
+  // ---- figures (geometry and proportions from the approved prototype) ----
+  function figure(o, rng) {
+    const g = grp(), skin = SKINS[Math.floor(rng() * SKINS.length)], pants = o.pants || '#5a4630';
+    const legs = [-1, 1].map((s) => {
+      const l = grp(s * 0.022, 0.11, 0);
+      l.add(P(new THREE.BoxGeometry(0.034, 0.11, 0.04).translate(0, -0.055, 0), pants)); g.add(l); return l;
+    });
+    g.add(P(new THREE.CylinderGeometry(0.046, 0.062, 0.12, 7), o.tunic, 0, 0.17, 0),
+          P(new THREE.CylinderGeometry(0.064, 0.064, 0.016, 7), '#4a3420', 0, 0.124, 0));
+    const head = P(new THREE.IcosahedronGeometry(0.043, 1), skin, 0, 0.27, 0); g.add(head);
+    const arms = [-1, 1].map((s) => {
+      const a = grp(s * 0.068, 0.215, 0);
+      a.add(P(new THREE.BoxGeometry(0.026, 0.1, 0.03).translate(0, -0.05, 0), o.tunic),
+            P(new THREE.IcosahedronGeometry(0.017, 0), skin, 0, -0.105, 0));
+      g.add(a); return a;
+    });
+    return { g, legs, arms, head };
+  }
+  function warriorFig(c, rng) {
+    const f = figure({ tunic: c }, rng);
+    f.head.add(P(new THREE.SphereGeometry(0.049, 8, 5, 0, Math.PI * 2, 0, Math.PI / 2), '#8a6a3a', 0, 0.006, 0));
+    const club = grp(0, -0.105, 0); club.rotation.x = -1.25;
+    club.add(P(new THREE.CylinderGeometry(0.022, 0.011, 0.16, 6).translate(0, 0.07, 0), '#6b4a2e'),
+             P(new THREE.DodecahedronGeometry(0.016, 0), '#5a3d24', 0.012, 0.14, 0));
+    f.arms[0].add(club); f.arms[0].rotation.x = -0.5;
+    const sh = grp(0.025, -0.07, 0.03);
+    sh.add(P(new THREE.CylinderGeometry(0.072, 0.072, 0.014, 12).rotateX(Math.PI / 2), c),
+           P(new THREE.TorusGeometry(0.072, 0.007, 4, 14), '#6b4a2e', 0, 0, 0.002),
+           P(new THREE.IcosahedronGeometry(0.016, 0), '#c9a24a', 0, 0, 0.01));
+    f.arms[1].add(sh); f.arms[1].rotation.x = -0.9;
+    return f;
+  }
+  function slingerFig(c, rng) {
+    const f = figure({ tunic: '#c8b48a', pants: '#6a5638' }, rng);
+    f.g.add(P(new THREE.CylinderGeometry(0.064, 0.05, 0.04, 7), c, 0, 0.2, 0));
+    f.head.add(P(new THREE.TorusGeometry(0.044, 0.008, 4, 12).rotateX(Math.PI / 2), c, 0, 0.015, 0),
+               P(new THREE.SphereGeometry(0.046, 8, 4, 0, Math.PI * 2, 0, Math.PI / 2.4), '#2a1d14', 0, 0.008, -0.004));
+    f.arms[0].rotation.x = -2.75;
+    const sp = grp(0, -0.12, 0);
+    sp.add(P(new THREE.CylinderGeometry(0.0025, 0.0025, 0.11, 3).rotateZ(Math.PI / 2).translate(0.055, 0, 0), '#d8c8a0'),
+           P(new THREE.IcosahedronGeometry(0.012, 0), '#777777', 0.11, 0, 0));
+    f.arms[0].add(sp);
+    f.g.add(P(new THREE.BoxGeometry(0.04, 0.04, 0.03), '#7a5634', 0.07, 0.12, 0.02));   // pouch of stones
+    return f;
+  }
+  function archerFig(c, rng) {
+    const f = figure({ tunic: c, pants: '#4a3c2a' }, rng);
+    f.head.add(P(new THREE.ConeGeometry(0.056, 0.1, 7), '#3f5a35', 0, 0.04, -0.006));
+    const bow = grp(0, -0.11, 0);
+    const arc = P(new THREE.TorusGeometry(0.105, 0.0055, 4, 14, Math.PI), '#7a5232'); arc.rotation.set(0, Math.PI / 2, Math.PI / 2);
+    bow.add(arc, P(new THREE.CylinderGeometry(0.0015, 0.0015, 0.21, 3), '#efe6cf'));
+    bow.rotation.x = Math.PI / 2;
+    f.arms[1].add(bow); f.arms[1].rotation.x = -1.3; f.arms[0].rotation.x = -1.2; f.arms[0].rotation.z = -0.3;
+    const q = grp(-0.03, 0.22, -0.06); q.rotation.x = -0.35;
+    q.add(P(new THREE.CylinderGeometry(0.022, 0.018, 0.13, 6), '#7a5634'));
+    for (let i = 0; i < 3; i++) q.add(P(new THREE.BoxGeometry(0.008, 0.03, 0.002), '#e8e0d0', (i - 1) * 0.01, 0.08, 0));
+    f.g.add(q);
+    return f;
+  }
+  function scoutFig(c, rng) {
+    const f = figure({ tunic: c, pants: '#5a4a30' }, rng);
+    f.g.add(P(new THREE.ConeGeometry(0.08, 0.19, 8, 1, true), '#6a5a3a', 0, 0.18, -0.018, true));    // cloak
+    f.head.add(P(new THREE.CylinderGeometry(0.07, 0.07, 0.008, 12), '#5a4630', 0, 0.03, 0),
+               P(new THREE.CylinderGeometry(0.034, 0.04, 0.045, 8), '#5a4630', 0, 0.055, 0));
+    const fe = P(new THREE.BoxGeometry(0.006, 0.06, 0.012), '#d34a2a', 0.035, 0.07, -0.01); fe.rotation.z = -0.5; f.head.add(fe);
+    f.arms[0].add(P(new THREE.CylinderGeometry(0.005, 0.006, 0.36, 4), '#7a5634', 0, -0.06, 0));       // staff
+    return f;
+  }
+  function builderFig(c, rng) {
+    const f = figure({ tunic: c, pants: '#7a6448' }, rng);
+    f.head.add(P(new THREE.ConeGeometry(0.08, 0.04, 10), '#d8be7a', 0, 0.04, 0));                      // sun hat
+    const hm = grp(0, -0.105, 0); hm.rotation.x = -1.4;
+    hm.add(P(new THREE.CylinderGeometry(0.005, 0.005, 0.11, 4).translate(0, 0.05, 0), '#7a5634'),
+           P(new THREE.BoxGeometry(0.045, 0.022, 0.022), '#666666', 0, 0.1, 0));
+    f.arms[0].add(hm);
+    return f;
+  }
+  function quadruped(o, rng) {
+    const g = grp(), dark = o.dark || '#3a2a1c';
+    g.add(P(new THREE.BoxGeometry(o.w, o.h, o.l), o.color, 0, o.legH + o.h / 2, 0));
+    const lg = new THREE.BoxGeometry(o.lw, o.legH, o.lw).translate(0, -o.legH / 2, 0);
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+      const l = grp(sx * (o.w / 2 - o.lw / 2), o.legH, sz * (o.l / 2 - o.lw)); l.add(P(lg, dark)); g.add(l);
+    }
+    const head = grp(0, o.legH + o.h * (o.neck ? 1.1 : 0.7), o.l / 2 + (o.neck ? 0.015 : 0));
+    if (o.neck) { const n = P(new THREE.BoxGeometry(o.w * 0.6, o.h * 1.1, o.h * 0.6), o.color); n.rotation.x = 0.6; head.add(n); }
+    head.add(P(new THREE.BoxGeometry(o.w * 0.62, o.h * 0.62, o.h * 0.9), o.color, 0, o.neck ? 0.035 : 0, o.h * 0.4));
+    if (o.horns) for (const s of [-1, 1]) { const hn = P(new THREE.ConeGeometry(0.006, 0.03, 4), '#eee4cc', s * 0.022, o.h * 0.35, o.h * 0.25); hn.rotation.z = -s * 1.1; head.add(hn); }
+    if (o.ears) for (const s of [-1, 1]) head.add(P(new THREE.ConeGeometry(0.008, 0.02, 4), dark, s * 0.012, o.h * 0.45, o.h * 0.3));
+    const tail = P(new THREE.BoxGeometry(0.008, o.h * 0.9, 0.008), dark, 0, o.legH + o.h * 0.55, -o.l / 2 - 0.004); tail.rotation.x = 0.3; g.add(tail);
+    g.add(head);
+    return g;
+  }
+  function flagPart(hex, w, h, x, y, z) {
+    const geo = new THREE.PlaneGeometry(w, h, 8, 2).translate(w / 2, 0, 0), pa = geo.attributes.position;
+    for (let i = 0; i < pa.count; i++) { const u = pa.getX(i) / w; pa.setZ(i, Math.sin(u * Math.PI * 2.2) * w * 0.12 * u); }
+    geo.computeVertexNormals();
+    return P(geo, hex, x, y, z, true);
+  }
+  function settlerGroup(c, rng) {
+    const g = grp(), wood = '#7a5232';
+    const wagon = grp(0, 0, -0.08); g.add(wagon);
+    wagon.add(P(new THREE.BoxGeometry(0.13, 0.05, 0.24), wood, 0, 0.075, 0));
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) wagon.add(P(new THREE.CylinderGeometry(0.045, 0.045, 0.014, 10).rotateZ(Math.PI / 2), '#4a3422', sx * 0.074, 0.045, sz * 0.08));
+    wagon.add(P(new THREE.BoxGeometry(0.01, 0.01, 0.18), wood, 0, 0.05, 0.2));                         // drawbar
+    wagon.add(P(new THREE.CylinderGeometry(0.072, 0.072, 0.22, 8, 1, true, 0, Math.PI).rotateX(Math.PI / 2).rotateZ(Math.PI / 2), '#efe6cf', 0, 0.1, 0, true));
+    wagon.add(P(new THREE.CylinderGeometry(0.004, 0.004, 0.2, 4), '#4a3a2a', -0.05, 0.2, -0.1), flagPart(c, 0.08, 0.05, -0.05, 0.27, -0.1));
+    const ox = quadruped({ color: '#c9b48e', dark: '#4a3826', w: 0.07, h: 0.07, l: 0.15, legH: 0.055, lw: 0.017, horns: true }, rng);
+    ox.position.z = 0.27; g.add(ox);
+    const man = figure({ tunic: c, pants: '#5a4630' }, rng); man.g.position.set(0.12, 0, 0.16);
+    man.g.add(P(new THREE.BoxGeometry(0.05, 0.06, 0.035), '#a08060', 0, 0.18, -0.05));                // bundle
+    g.add(man.g);
+    return g;
+  }
+  const dogGroup = (rng) => quadruped({ color: '#8a6a45', dark: '#4a3826', w: 0.035, h: 0.04, l: 0.09, legH: 0.04, lw: 0.012, ears: true }, rng);
+
+  // Back figures first: with no depth writes, draw order is the only sort.
+  const FORM = [[-0.13, -0.08], [0.13, -0.08], [0, 0.11]];
+  function buildUnitArt(type, owner) {
+    const rng = rngOf(9001 + type * 31 + owner * 7), c = ownerHex(owner), root = grp();
+    if (type === 3 || type === 4 || type === 5) {
+      const mk = type === 3 ? warriorFig : type === 4 ? slingerFig : archerFig;
+      for (const [x, z] of FORM) { const f = mk(c, rng); f.g.position.set(x, 0, z); root.add(f.g); }
+    } else if (type === 1) {
+      const logs = grp(0.13, 0, 0.02);
+      for (let i = 0; i < 3; i++) logs.add(P(new THREE.CylinderGeometry(0.018, 0.018, 0.13, 6).rotateZ(Math.PI / 2), '#8a6040', 0, 0.018 + (i === 2 ? 0.03 : 0), i === 2 ? 0 : (i - 0.5) * 0.038));
+      root.add(logs, P(new THREE.BoxGeometry(0.016, 0.07, 0.016), '#7a5a36', 0, 0.035, -0.1));
+      const f = builderFig(c, rng); f.g.position.set(-0.04, 0, 0.04); root.add(f.g);
+    } else if (type === 2) {
+      const d = dogGroup(rng); d.position.set(0.12, 0, -0.04); root.add(d);
+      const f = scoutFig(c, rng); f.g.position.set(-0.03, 0, 0.04); root.add(f.g);
+    } else if (type === 0) {
+      root.add(settlerGroup(c, rng));
+    } else return null;
+    const soup = newSoup(); bakeParts(root, soup);
+    return soupGeometry(soup);
+  }
+
+  // ---- ground-hugging helpers ----
+  // A band of ring from r0 to r1 around (cx, cz), every vertex on the tile's
+  // own ground (surfaceY) so it follows slopes and sits under the fog shell.
+  function groundRingInto(pos, col, tile, cx, cz, r0, r1, rgb, lift, segs) {
+    const v = (a, r) => { const x = cx + Math.cos(a) * r, z = cz + Math.sin(a) * r; pos.push(x, surfaceY(tile, x, z, lift), z); col.push(rgb.r, rgb.g, rgb.b); };
+    for (let i = 0; i < segs; i++) {
+      const a0 = i / segs * Math.PI * 2, a1 = (i + 1) / segs * Math.PI * 2;
+      v(a0, r0); v(a1, r0); v(a0, r1); v(a1, r0); v(a1, r1); v(a0, r1);
+    }
+  }
+  const unitYaw = (p, id) => -0.35 + (((id * 37 + p * 17) % 7) / 6) * 0.7;
+  const tileKey = (q, r) => r * S.cols + q;
+
+  // ---- cities ----
+  const cityTierOf = (pop) => (pop >= 6 ? 2 : pop >= 3 ? 1 : 0);
+  function cityGeometry(c, owner, tile) {
+    const cen = C.hexCenter(c.q, c.r), t = tileCopy(tile), col = ownerHex(owner);
+    const gy = (lx, lz) => C.heightAt(t, cen.x + lx, cen.z + lz);
+    const tier = cityTierOf(c.population | 0), walls = !!((c.buildings | 0) & WALLS_BIT);
+    const rng = rngOf(((c.q * 73856093) ^ (c.r * 19349663) ^ 0x5bd1e995) >>> 0);
+    const roofs = owner === 0 ? ['#456ea8', '#3d6296', '#5079b0'] : owner === 1 ? ['#b5523b', '#a4472f', '#bf5e43'] : ['#8a8a8a', '#7a7a7a'];
+    const wallsC = ['#e6d5b3', '#d9c49b', '#efe3c8', '#cdb28a'], pick = (a) => a[Math.floor(rng() * a.length)];
+    const items = [];    // {z, node}: drawn back to front
+    // palace, bigger with the city
+    const pal = grp(0, gy(0, -0.05) + 0.012, -0.05);
+    pal.add(P(new THREE.BoxGeometry(0.32, 0.1, 0.28), '#e8dcc0', 0, 0.05, 0));
+    if (tier >= 1) {
+      pal.add(P(new THREE.BoxGeometry(0.24, 0.08, 0.2), '#ddcfae', 0, 0.14, 0), P(new THREE.BoxGeometry(0.15, 0.07, 0.12), '#d2c29c', 0, 0.215, 0),
+              P(new THREE.BoxGeometry(0.06, 0.012, 0.06), '#e2bf6a', 0, 0.256, 0));
+      for (let i = -1; i <= 1; i++) pal.add(P(new THREE.CylinderGeometry(0.012, 0.012, 0.1, 6), '#f2e8d2', i * 0.06, 0.05, 0.15));
+      const ob = grp(0.24, 0, 0.12);
+      ob.add(P(new THREE.BoxGeometry(0.035, 0.32, 0.035), '#e3d6b8', 0, 0.16, 0), P(new THREE.ConeGeometry(0.026, 0.05, 4).rotateY(Math.PI / 4), '#e2bf6a', 0, 0.345, 0));
+      pal.add(ob);
+    } else {
+      pal.add(P(new THREE.BoxGeometry(0.2, 0.06, 0.16), '#ddcfae', 0, 0.13, 0), P(new THREE.BoxGeometry(0.22, 0.02, 0.18), '#d2c29c', 0, 0.17, 0));
+    }
+    if (tier >= 2) {
+      for (const sx of [-1, 1]) pal.add(P(new THREE.BoxGeometry(0.1, 0.09, 0.2), '#e0d3b4', sx * 0.2, 0.045, -0.02), P(new THREE.BoxGeometry(0.12, 0.015, 0.22), '#cdbb94', sx * 0.2, 0.097, -0.02));
+      const ob2 = grp(-0.24, 0, 0.12);
+      ob2.add(P(new THREE.BoxGeometry(0.03, 0.26, 0.03), '#e3d6b8', 0, 0.13, 0), P(new THREE.ConeGeometry(0.022, 0.045, 4).rotateY(Math.PI / 4), '#e2bf6a', 0, 0.282, 0));
+      pal.add(ob2);
+    }
+    pal.add(P(new THREE.CylinderGeometry(0.005, 0.005, 0.34, 5), '#4a3a2a', -0.12, 0.34, 0), flagPart(col, 0.14, 0.09, -0.12, 0.48, 0));
+    items.push({ z: -0.05, node: pal });
+    // houses: the first N points of one seeded sequence, so a city that grows
+    // keeps the houses it had
+    const want = Math.min(22, 2 + (c.population | 0) * 2), avoid = [[0, -0.05, 0.3], [0.24, 0.07, 0.12], [-0.24, 0.07, 0.12]], pts = [];
+    for (let tries = 0; pts.length < want && tries < 900; tries++) {
+      const a = rng() * Math.PI * 2, d = Math.sqrt(rng()) * 0.6, lx = Math.cos(a) * d, lz = Math.sin(a) * d;
+      if (pts.concat(avoid).some((q) => Math.hypot(q[0] - lx, q[1] - lz) < (q[2] || 0.17))) continue;
+      pts.push([lx, lz]);
+    }
+    for (const [lx, lz] of pts) {
+      const w = 0.1 + rng() * 0.06, d = 0.09 + rng() * 0.05, h = 0.06 + rng() * 0.05, hg = grp(lx, gy(lx, lz) + 0.005, lz);
+      hg.rotation.y = rng() * Math.PI;
+      hg.add(P(new THREE.BoxGeometry(w, h, d), pick(wallsC), 0, h / 2, 0));
+      if (rng() < 0.7) { const rf = P(new THREE.ConeGeometry(Math.max(w, d) * 0.74, 0.06, 4).rotateY(Math.PI / 4), pick(roofs), 0, h + 0.03, 0); rf.scale.set(w / Math.max(w, d), 1, d / Math.max(w, d)); hg.add(rf); }
+      else hg.add(P(new THREE.BoxGeometry(w * 1.05, 0.012, d * 1.05), pick(roofs), 0, h + 0.006, 0), P(new THREE.BoxGeometry(w * 0.4, 0.03, d * 0.4), pick(wallsC), w * 0.2, h + 0.02, 0));
+      items.push({ z: lz, node: hg });
+    }
+    // walls and towers on the six edges
+    if (walls) {
+      for (let e = 0; e < 6; e++) {
+        const A = C.hexCorner(e, 0.82), B = C.hexCorner((e + 1) % 6, 0.82), mx = (A[0] + B[0]) / 2, mz = (A[1] + B[1]) / 2;
+        // the foot is taken from the lowest ground along the wall, then sunk a
+        // little, so a wall on a slope never hangs in the air
+        const gm = Math.min(gy(A[0], A[1]), gy(B[0], B[1]), gy(mx, mz));
+        const len = Math.hypot(B[0] - A[0], B[1] - A[1]), seg = P(new THREE.BoxGeometry(len + 0.024, 0.14, 0.04), '#cbb995', mx, gm + 0.04, mz);
+        seg.rotation.y = -Math.atan2(B[1] - A[1], B[0] - A[0]);
+        items.push({ z: mz, node: seg, wall: true });
+        const tw = grp(A[0], gy(A[0], A[1]), A[1]);
+        tw.add(P(new THREE.CylinderGeometry(0.04, 0.046, 0.19, 7), '#cbb995', 0, 0.065, 0), P(new THREE.ConeGeometry(0.055, 0.07, 7), col, 0, 0.175, 0));
+        items.push({ z: A[1], node: tw, wall: true });
+      }
+    }
+    items.sort((a, b) => a.z - b.z);
+    // the plaza is the floor: drawn first, on the ground it covers
+    const soup = newSoup(), floor = [];
+    const R = [0, 0.28, 0.56, 0.84], SEG = 18;
+    for (let k = 0; k < 3; k++) for (let i = 0; i < SEG; i++) {
+      const a0 = i / SEG * Math.PI * 2, a1 = (i + 1) / SEG * Math.PI * 2;
+      const v = (a, r) => { const x = Math.cos(a) * r, z = Math.sin(a) * r; floor.push(x, gy(x, z) + 0.012, z); };
+      v(a0, R[k]); v(a1, R[k]); v(a0, R[k + 1]); v(a1, R[k]); v(a1, R[k + 1]); v(a0, R[k + 1]);
+    }
+    tc.set('#bba57d');
+    for (let i = 0; i < floor.length; i += 3) { soup.pos.push(floor[i], floor[i + 1], floor[i + 2]); soup.nor.push(0, 1, 0); soup.col.push(tc.r, tc.g, tc.b); }
+    const floorVerts = soup.pos.length / 3;
+    let wallVerts = 0;
+    for (const it of items) {
+      const before = soup.pos.length;
+      bakeParts(it.node, soup);
+      if (it.wall) wallVerts += (soup.pos.length - before) / 3;
+    }
+    return { geo: soupGeometry(soup), tier, walls: wallVerts > 0, wallVerts, floorVerts, houses: pts.length };
+  }
+
+  // ---- the live set ----
+  function pieceMaterial() {
+    return new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.85, metalness: 0,
+      transparent: true, depthWrite: false });
+  }
+  // Units are OPAQUE: a unit is culled outright (not merely covered) wherever
+  // its tile is not VISIBLE, so it is never present where fog must hide it,
+  // and opaque is the only way a model can sort itself. The cull always reads
+  // the real fog (the test bypass does not reach units). Cities are the
+  // opposite: they stay on remembered ground where the fog shell must dim
+  // them, so they stay transparent with no depth write.
+  function unitMaterial() {
+    return new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.85, metalness: 0,
+      transparent: false, depthWrite: true });
+  }
+  function buildPieces() {
+    disposePieces();
+    S.pieces = { mat: pieceMaterial(), unitMat: unitMaterial(), art: new Map(), meshes: new Map(), cities: new Map(), placed: new Map(),
+      rings: null, discs: null, hidden: new Set(), count: 0 };
+    const pc = S.pieces;
+    pc.rings = new THREE.Mesh(new THREE.BufferGeometry(), markMaterial({ vertexColors: true, opacity: 0.85 }));
+    pc.discs = new THREE.Mesh(new THREE.BufferGeometry(), markMaterial({ vertexColors: true, opacity: 0.16 }));
+    for (const [m, order, name] of [[pc.discs, RENDER_ORDER.unitDiscs, 'unitDiscs'], [pc.rings, RENDER_ORDER.unitRings, 'unitRings']]) {
+      m.frustumCulled = false; m.raycast = () => {}; m.renderOrder = order; m.visible = false;
+      S.scene.add(m); S.layers[name] = m;
+    }
+    updatePieces();
+  }
+  function disposePieces() {
+    const pc = S && S.pieces;
+    if (!pc) return;
+    for (const e of pc.meshes.values()) { S.scene.remove(e.mesh); e.mesh.dispose(); }
+    for (const [k, e] of pc.cities) { S.scene.remove(e.mesh); e.mesh.geometry.dispose(); delete S.layers['city' + k]; }
+    for (const k of pc.meshes.keys()) delete S.layers['units' + k];
+    for (const g of pc.art.values()) if (g) g.dispose();
+    for (const m of [pc.rings, pc.discs]) { S.scene.remove(m); m.geometry.dispose(); m.material.dispose(); }
+    delete S.layers.unitRings; delete S.layers.unitDiscs;
+    pc.mat.dispose(); pc.unitMat.dispose();
+    S.pieces = null;
+  }
+  function unitArt(type, owner) {
+    const pc = S.pieces, k = type + ':' + owner;
+    if (!pc.art.has(k)) pc.art.set(k, buildUnitArt(type, owner));
+    return pc.art.get(k);
+  }
+  function unitMesh(type, owner, need) {
+    const pc = S.pieces, k = type + ':' + owner;
+    let e = pc.meshes.get(k);
+    if (e && e.cap >= need) return e;
+    const cap = Math.max(8, need * 2), geo = unitArt(type, owner);
+    const mesh = new THREE.InstancedMesh(geo, pc.unitMat, cap);
+    mesh.frustumCulled = false; mesh.raycast = () => {}; mesh.renderOrder = RENDER_ORDER.units; mesh.count = 0; mesh.visible = false;
+    mesh.userData.type = type; mesh.userData.owner = owner; mesh.userData.fogCulled = true;
+    S.scene.add(mesh);
+    if (e) { S.scene.remove(e.mesh); e.mesh.dispose(); }
+    e = { mesh, cap, type, owner }; pc.meshes.set(k, e); S.layers['units' + k] = mesh;
+    return e;
+  }
+  const gateOf = () => (S.unfiltered ? () => C.FOG.VISIBLE : fogStateAt);
+
+  // Reconcile the drawn units and cities with the live state. Reads the state;
+  // writes only renderer-owned objects. Called on every sync and fog change.
+  function updatePieces() {
+    if (!S || !S.pieces) return;
+    const pc = S.pieces, st = S.getState() || {}, gate = gateOf(), unitGate = fogStateAt;
+    const players = Array.isArray(st.players) ? st.players : [];
+    const lists = new Map(), onTile = new Map(), ringPos = [], ringCol = [], discPos = [], discCol = [];
+    pc.placed.clear(); pc.count = 0;
+    const rgb = new THREE.Color();
+    players.forEach((pl, p) => {
+      for (const u of ((pl && pl.units) || [])) {
+        if (!u || (u.hp !== undefined && u.hp <= 0) || !(u.unitType >= 0 && u.unitType < UNIT_TYPE_COUNT)) continue;
+        const tile = tileAt(u.q, u.r);
+        if (!tile || unitGate(u.q, u.r) !== C.FOG.VISIBLE) continue;
+        const tk = tileKey(u.q, u.r), n = onTile.get(tk) || 0; onTile.set(tk, n + 1);
+        const cen = C.hexCenter(u.q, u.r), a = (n - 1) * 2.4 + 0.5;
+        const x = cen.x + (n ? Math.cos(a) * 0.34 : 0), z = cen.z + (n ? Math.sin(a) * 0.34 : 0);
+        const y = surfaceY(tileCopy(tile), x, z, 0) - PIECE_LIFT.sink;
+        const k = u.unitType + ':' + p;
+        if (!lists.has(k)) lists.set(k, []);
+        lists.get(k).push({ p, id: u.id, x, y, z, u });
+        rgb.set(ownerHex(p));
+        const t2 = tileCopy(tile);
+        groundRingInto(ringPos, ringCol, t2, x, z, RING_R0, RING_R1, rgb, PIECE_LIFT.ring, 28);
+        groundRingInto(discPos, discCol, t2, x, z, 0, RING_R0 * 0.34, rgb, PIECE_LIFT.ring, 14);
+        groundRingInto(discPos, discCol, t2, x, z, RING_R0 * 0.34, RING_R0 * 0.67, rgb, PIECE_LIFT.ring, 20);
+        groundRingInto(discPos, discCol, t2, x, z, RING_R0 * 0.67, RING_R0, rgb, PIECE_LIFT.ring, 28);
+      }
+    });
+    const dummy = new THREE.Object3D();
+    for (const e of pc.meshes.values()) { e.mesh.count = 0; e.mesh.visible = false; }
+    for (const [k, list] of lists) {
+      const [type, owner] = k.split(':').map(Number), e = unitMesh(type, owner, list.length);
+      list.forEach((it, i) => {
+        dummy.position.set(it.x, it.y, it.z); dummy.rotation.set(0, unitYaw(it.p, it.id), 0); dummy.scale.setScalar(UNIT_SCALE);
+        dummy.updateMatrix(); e.mesh.setMatrixAt(i, dummy.matrix);
+        pc.placed.set(it.p + ':' + it.id, { mesh: e.mesh, index: i, type, owner, q: it.u.q, r: it.u.r, x: it.x, y: it.y, z: it.z, u: it.u, p: it.p });
+      });
+      e.mesh.count = list.length; e.mesh.instanceMatrix.needsUpdate = true;
+      e.mesh.visible = !pc.hidden.has('units'); pc.count += list.length;
+    }
+    for (const m of [[pc.rings, ringPos, ringCol], [pc.discs, discPos, discCol]]) {
+      const g = new THREE.BufferGeometry(), old = m[0].geometry;
+      if (m[1].length) { g.setAttribute('position', new THREE.Float32BufferAttribute(m[1], 3)); g.setAttribute('color', new THREE.Float32BufferAttribute(m[2], 3)); }
+      m[0].geometry = g; old.dispose();
+      m[0].visible = m[1].length > 0 && !pc.hidden.has('rings');
+    }
+    // cities: stay on remembered ground, gone from unexplored ground
+    const seen = new Set();
+    players.forEach((pl, p) => {
+      for (const c of ((pl && pl.cities) || [])) {
+        const tile = c && tileAt(c.q, c.r);
+        if (!tile) continue;
+        const key = p + ':' + c.id; seen.add(key);
+        const sig = [p, c.q, c.r, cityTierOf(c.population | 0), c.population | 0, ((c.buildings | 0) & WALLS_BIT) ? 1 : 0, tile.terrain, tile.feature].join('|');
+        let e = pc.cities.get(key);
+        if (!e || e.sig !== sig) {
+          const built = cityGeometry(c, p, tile);
+          if (!e) {
+            const mesh = new THREE.Mesh(built.geo, pc.mat);
+            mesh.raycast = () => {}; mesh.renderOrder = RENDER_ORDER.cities;
+            const cen = C.hexCenter(c.q, c.r); mesh.position.set(cen.x, 0, cen.z);
+            S.scene.add(mesh); e = { mesh }; pc.cities.set(key, e); S.layers['city' + key] = mesh;
+          } else { e.mesh.geometry.dispose(); e.mesh.geometry = built.geo; }
+          Object.assign(e, built, { sig, q: c.q, r: c.r, p });
+          delete e.geo;
+        }
+        e.mesh.visible = gate(c.q, c.r) !== C.FOG.UNSEEN && !pc.hidden.has('cities');
+      }
+    });
+    for (const [key, e] of pc.cities) if (!seen.has(key)) { S.scene.remove(e.mesh); e.mesh.geometry.dispose(); pc.cities.delete(key); delete S.layers['city' + key]; }
+    updateLabels();
+  }
+  const cityAt = (q, r) => { if (S && S.pieces) for (const e of S.pieces.cities.values()) if (e.q === q && e.r === r) return e; return null; };
+  function geoSignature(g) {
+    if (!g) return '';
+    const p = g.attributes.position.array;
+    let h = 0;
+    for (let i = 0; i < p.length; i++) h = (Math.imul(h, 31) + Math.round(p[i] * 10000)) | 0;
+    return p.length / 3 + ':' + h;
+  }
+  function pieceDrawCalls() {
+    if (!S || !S.pieces) return -1;
+    const pc = S.pieces, keep = new Set([pc.rings, pc.discs]);
+    for (const e of pc.meshes.values()) keep.add(e.mesh);
+    for (const e of pc.cities.values()) keep.add(e.mesh);
+    const saved = S.scene.children.map((o) => [o, o.visible]);
+    for (const [o] of saved) if (!keep.has(o)) o.visible = false;
+    try { S.renderer.render(S.scene, S.camera); return S.renderer.info.render.calls; }
+    finally { for (const [o, v] of saved) o.visible = v; }
+  }
+  const PIECE_READERS = {
+    // Instances actually submitted to the GPU across every unit mesh.
+    unitInstancesDrawn: () => { let n = 0; if (S && S.pieces) for (const e of S.pieces.meshes.values()) if (e.mesh.visible) n += e.mesh.count; return n; },
+    fogCulledMeshes: () => { let n = 0; if (S) S.scene.traverse((x) => { if (x.userData && x.userData.fogCulled === true) n++; }); return n; },
+    unitMeshCount: () => (S && S.pieces ? S.pieces.count : 0),
+    pieceDrawCalls,
+    hasUnitArt: (t) => !!(S && S.pieces && t >= 0 && t < UNIT_TYPE_COUNT && unitArt(t, 0) && unitArt(t, 0).attributes.position.count > 0),
+    unitArtSignature: (t) => (S && S.pieces && t >= 0 && t < UNIT_TYPE_COUNT ? geoSignature(unitArt(t, 0)) : ''),
+    // lowest and highest vertex of a built unit model, in its own space
+    unitArtRange: (t) => {
+      const g = S && S.pieces && unitArt(t, 0), p = g && g.attributes.position;
+      if (!p) return null;
+      let min = Infinity, max = -Infinity;
+      for (let i = 0; i < p.count; i++) { min = Math.min(min, p.getY(i)); max = Math.max(max, p.getY(i)); }
+      return { min, max };
+    },
+    // Where the unit really is: the instance matrix of the mesh drawing it.
+    unitPlacement: (player, id) => {
+      const e = S && S.pieces && S.pieces.placed.get(player + ':' + id);
+      if (!e || !e.mesh.visible || e.mesh.parent !== S.scene || e.index >= e.mesh.count) return null;
+      const m = e.mesh.instanceMatrix.array, i = e.index * 16;
+      return { x: m[i + 12], y: m[i + 13], z: m[i + 14], type: e.type, owner: e.owner, sig: geoSignature(e.mesh.geometry) };
+    },
+    unitVisible: (player, id) => !!PIECE_READERS.unitPlacement(player, id),
+    cityTier: (q, r) => { const e = cityAt(q, r); return e ? e.tier : -1; },
+    cityHasWalls: (q, r) => { const e = cityAt(q, r); return !!e && e.walls; },
+    cityVertexCount: (q, r) => { const e = cityAt(q, r); return e ? e.mesh.geometry.attributes.position.count : -1; },
+    cityHouses: (q, r) => { const e = cityAt(q, r); return e ? e.houses : -1; },
+    cityVisible: (q, r) => { const e = cityAt(q, r); return !!e && e.mesh.visible && e.mesh.parent === S.scene; },
+    // lowest vertex of a built city, in world space: nothing may sink or float
+    cityYRange: (q, r) => {
+      const e = cityAt(q, r), p = e && e.mesh.geometry.attributes.position;
+      if (!p) return null;
+      let min = Infinity, max = -Infinity;
+      for (let i = 0; i < p.count; i++) { min = Math.min(min, p.getY(i)); max = Math.max(max, p.getY(i)); }
+      return { min, max };
+    },
+    ringRange: () => {
+      if (!S || !S.pieces) return null;
+      const p = S.pieces.rings.geometry.attributes.position;
+      if (!p) return { min: NaN, max: NaN, count: 0 };
+      let min = Infinity, max = -Infinity;
+      for (let i = 0; i < p.count; i++) { min = Math.min(min, p.getY(i)); max = Math.max(max, p.getY(i)); }
+      return { min, max, count: p.count };
+    },
+    // Test-only layer switch for pixel diffs: 'units' | 'cities' | 'rings'.
+    setPiecesVisible: (b, name) => {
+      if (!S || !S.pieces) return;
+      const pc = S.pieces;
+      for (const k of (name ? [name] : ['units', 'cities', 'rings'])) { if (b) pc.hidden.delete(k); else pc.hidden.add(k); }
+      updatePieces(); requestRender();
+    },
+  };
 
   // Placeholders that later tasks replace.
   function rebuildMap() {
@@ -1162,6 +1685,7 @@
     buildFogShell();
     refreshFog();
     buildMarks();
+    buildPieces();
     requestRender();
   }
 
@@ -1181,13 +1705,175 @@
     // scenery rule, so this path deliberately does not touch it.
     refreshFogTile(q, r);
     if (S.marks) { buildGrid(); updateMarks(); }
+    updatePieces();
     requestRender();
   }
+
+  // ---- Labels: DOM, never 3D text ----
+  // Names, HP bars, city banners and yield pills are elements in a
+  // pointer-events:none overlay. updateLabels() (called from updatePieces, so
+  // from every state sync and fog change) owns their LIFECYCLE: it creates what
+  // the state shows and REMOVES what it no longer shows. positionLabels()
+  // (after every drawn frame) only moves them, writing transforms and never
+  // reading layout, so a frame costs no forced reflow however many labels exist.
+  // Every reveal goes through tileFacts: a label is never built from a raw tile.
+  const LABEL_FAR_UNITS = 32, LABEL_FAR_YIELDS = 26;     // camera distance past which they would only clutter
+  const LBL_UNIT_NAMES = ['Settler', 'Builder', 'Scout', 'Warrior', 'Slinger', 'Archer'];
+  const AMENITY_CLS = ['ecstatic', 'happy', 'content', 'displeased', 'unhappy', 'unrest'];
+  const PROD_COST = { 1: 80, 2: 50, 3: 30, 4: 40, 5: 35, 6: 60, 64: 60, 65: 65, 66: 80, 67: 90, 68: 100, 69: 90, 70: 80, 71: 150 };
+  // Mirrors computeTileYield / computeCityCenterYield in index.html.
+  function yieldOfFacts(f, isCenter) {
+    const t = f.terrain;
+    let food = [1, 1, 2, 2, 1, 1, 0, 0, 1, 1, 0, 0, 0][t] || 0, prod = [0, 0, 0, 1, 1, 2, 0, 1, 0, 1, 0, 1, 0][t] || 0, gold = t === 1 ? 1 : 0;
+    if (f.feature === 1) prod += 1;
+    const res = f.resource;
+    if (res === 1 || res === 2 || res === 3 || res === 5) food += 1;
+    else if (res === 4 || res === 7 || res === 6) prod += 1;
+    else if (res === 8) gold += 3;
+    else if (res === 9 || res === 10) gold += 2;
+    const imp = f.improvement | 0;
+    if (imp === 1) food += 1; else if (imp >= 2 && imp <= 5) prod += 1;
+    if (isCenter) { if (food < 2) food = 2; if (prod < 1) prod = 1; }
+    return { food, prod, gold };
+  }
+  const hpColor = (pct) => (pct > 0.5 ? '#66bb6a' : pct > 0.25 ? '#ff9800' : '#e74c3c');
+
+  function mkEl(tag, cls, parent) { const e = document.createElement(tag); e.className = cls; if (parent) parent.appendChild(e); return e; }
+  function setText(e, v) { if (e.textContent !== v) e.textContent = v; }
+  function setBar(bar, pct, color) {
+    const w = Math.round(Math.max(0, Math.min(1, pct)) * 100) + '%';
+    if (bar.style.width !== w) bar.style.width = w;
+    if (color && bar.style.background !== color) bar.style.background = color;
+  }
+  function labelEntry(key, kind, build) {
+    let L = S.labels.get(key);
+    if (!L) {
+      const el = mkEl('div', 'lbl lbl-' + kind);
+      L = { key, kind, el, parts: build(el), wx: 0, wy: 0, wz: 0, far: 0, last: '' };
+      S.labelRoot.appendChild(el); S.labels.set(key, L);
+    }
+    return L;
+  }
+  function removeLabel(L) { if (L.el.parentNode) L.el.parentNode.removeChild(L.el); S.labels.delete(L.key); }
+  function clearLabels() { if (S) { for (const L of [...S.labels.values()]) removeLabel(L); } }
+  function setLabelClass(L, cls) { const c = 'lbl lbl-' + L.kind + ' ' + cls; if (L.el.className !== c) L.el.className = c; }
+
+  function updateLabels() {
+    if (!S || !S.labelRoot || !S.pieces) return;
+    const st = S.getState() || {}, players = Array.isArray(st.players) ? st.players : [];
+    const live = new Set();
+    // units: only what tileFacts says stands on a currently visible tile
+    for (const [pk, pl] of S.pieces.placed) {
+      const u = pl.u, tile = tileAt(u.q, u.r);
+      if (!tile) continue;
+      const facts = C.tileFacts(Object.assign({}, tile, { city: null, units: [u] }), fogStateAt(u.q, u.r));
+      if (facts.units.length !== 1) continue;
+      const key = 'unit:' + pk; live.add(key);
+      const L = labelEntry(key, 'unit', (el) => ({ nm: mkEl('span', 'nm', el), hp: mkEl('span', 'hpbar', el) }));
+      L.parts.hpi = L.parts.hpi || mkEl('i', '', L.parts.hp);
+      setLabelClass(L, 'p' + pl.p);
+      setText(L.parts.nm, LBL_UNIT_NAMES[u.unitType] || 'Unit');
+      const damaged = u.hp < 100 && u.hp > 0;
+      L.parts.hp.style.display = damaged ? '' : 'none';
+      if (damaged) setBar(L.parts.hpi, u.hp / 100, hpColor(u.hp / 100));
+      L.wx = pl.x; L.wy = pl.y + 0.95; L.wz = pl.z; L.far = LABEL_FAR_UNITS;
+    }
+    // cities: stay on remembered ground, but only as identity
+    players.forEach((pl, p) => {
+      for (const c of ((pl && pl.cities) || [])) {
+        const tile = c && tileAt(c.q, c.r);
+        if (!tile) continue;
+        const fog = fogStateAt(c.q, c.r);
+        const facts = C.tileFacts(Object.assign({}, tile, { city: Object.assign({}, c, { ownerPlayer: p, owner: p }), units: [] }), fog);
+        const fc = facts.city;
+        if (!fc) continue;
+        const full = fog === C.FOG.VISIBLE;
+        const key = 'city:' + p + ':' + c.id; live.add(key);
+        const L = labelEntry(key, 'city', (el) => {
+          const pop = mkEl('span', 'pop', el), nm = mkEl('span', 'nm', el), am = mkEl('span', 'am', el);
+          const bars = mkEl('span', 'bars', el), prod = mkEl('span', 'bar prod', bars), hp = mkEl('span', 'bar hp', bars);
+          return { pop, nm, am, bars, prod, prodi: mkEl('i', '', prod), hp, hpi: mkEl('i', '', hp) };
+        });
+        const sel = S.selection && S.selection.kind === 'city' && S.selection.q === c.q && S.selection.r === c.r;
+        setLabelClass(L, 'p' + p + (sel ? ' sel' : '') + (full ? '' : ' mem'));
+        setText(L.parts.nm, fc.name + (fc.isCapital ? ' ★' : ''));
+        L.parts.pop.style.display = full ? '' : 'none';
+        L.parts.bars.style.display = full ? '' : 'none';
+        L.parts.am.style.display = 'none';
+        if (full) {
+          setText(L.parts.pop, String(fc.population | 0));
+          const cost = PROD_COST[fc.production] || 0;
+          L.parts.prod.style.display = cost > 0 ? '' : 'none';
+          if (cost > 0) setBar(L.parts.prodi, (fc.prodStockpile || 0) / cost, '#ff9800');
+          const dmg = fc.hp < 200;
+          L.parts.hp.style.display = dmg ? '' : 'none';
+          if (dmg) setBar(L.parts.hpi, fc.hp / 200, hpColor(fc.hp / 200));
+          let cls = '';
+          try { cls = S.amenityOf ? S.amenityOf(fc, p) : ''; } catch (e) { cls = ''; }
+          L.parts.am.style.display = AMENITY_CLS.includes(cls) ? '' : 'none';
+          L.parts.am.className = 'am am-' + cls;
+        }
+        const cen = C.hexCenter(c.q, c.r);
+        L.wx = cen.x; L.wz = cen.z; L.wy = surfaceY(tileCopy(tile), cen.x, cen.z, 0) + 1.25; L.far = 0;
+      }
+    });
+    // yield pills: terrain is read from tileFacts, so an unexplored tile has none
+    for (const yt of S.yieldTiles) {
+      const tile = tileAt(yt.q, yt.r);
+      if (!tile) continue;
+      const facts = C.tileFacts(Object.assign({}, tile, { city: null, units: [] }), fogStateAt(yt.q, yt.r));
+      if (facts.terrain === null) continue;
+      const y = yieldOfFacts(facts, !!yt.isCenter), parts = [];
+      if (y.food) parts.push([y.food + 'F', 'f']);
+      if (y.prod) parts.push([y.prod + 'P', 'p']);
+      if (y.gold) parts.push([y.gold + 'G', 'g']);
+      if (!parts.length) continue;
+      const key = 'yield:' + yt.q + ',' + yt.r; live.add(key);
+      const L = labelEntry(key, 'yield', () => ({}));
+      const txt = parts.map((x) => x[0]).join(' ') + (yt.locked ? ' \u{1F512}' : '');
+      setLabelClass(L, yt.locked ? 'locked' : '');
+      if (L.parts.txt !== txt) { L.el.textContent = ''; for (const [t, k] of parts) mkEl('b', 'y' + k, L.el).textContent = t; if (yt.locked) mkEl('u', 'lock', L.el).textContent = '\u{1F512}'; L.parts.txt = txt; }
+      const cen = C.hexCenter(yt.q, yt.r);
+      L.wx = cen.x; L.wz = cen.z; L.wy = surfaceY(tileCopy(tile), cen.x, cen.z, 0) + 0.05; L.far = LABEL_FAR_YIELDS;
+    }
+    for (const L of [...S.labels.values()]) if (!live.has(L.key)) removeLabel(L);   // lifecycle: gone from the state, gone from the DOM
+    positionLabels();
+  }
+
+  const _lv = typeof THREE !== 'undefined' ? new THREE.Vector3() : null;
+  function positionLabels() {
+    if (!S || !S.labelRoot || !S.vw) return;
+    S.camera.updateMatrixWorld();
+    const dist = S.camera.position.distanceTo(S.controls.target), w = S.vw, h = S.vh;
+    for (const L of S.labels.values()) {
+      let on = !(L.far && dist > L.far), tx = 0, ty = 0;
+      if (on) {
+        _lv.set(L.wx, L.wy, L.wz).project(S.camera);
+        tx = (_lv.x * 0.5 + 0.5) * w; ty = (-_lv.y * 0.5 + 0.5) * h;
+        on = _lv.z > -1 && _lv.z < 1 && tx > -60 && tx < w + 60 && ty > -30 && ty < h + 30;
+      }
+      const v = on ? 'translate(' + tx.toFixed(1) + 'px,' + ty.toFixed(1) + 'px) translate(-50%,-100%)' : '';
+      if (v === L.last) continue;
+      L.last = v; L.on = on;
+      if (on) { L.el.style.transform = v; L.el.style.visibility = 'visible'; } else L.el.style.visibility = 'hidden';
+    }
+  }
+  function setYieldTiles(tiles) {
+    if (!S) return;
+    S.yieldTiles = Array.isArray(tiles) ? tiles.filter((t) => t && Number.isInteger(t.q) && Number.isInteger(t.r)).map((t) => ({ q: t.q, r: t.r, locked: !!t.locked, isCenter: !!t.isCenter })) : [];
+    updateLabels(); requestRender();
+  }
+  const labelFor = (kind, id, player) => {
+    if (!S) return null;
+    const L = S.labels.get(kind + ':' + (kind === 'yield' ? id : (player === undefined ? '0' : player) + ':' + id));
+    return L ? L.el : null;
+  };
+
   // State changed: fog is derived from it, so re-read it here too rather than
   // trusting every call site to remember.
   // Ownership lives on tiles, so a state refresh re-reads the marks too.
-  function syncState() { if (S) indexState(S.getState()); refreshFog(); updateMarks(); requestRender(); }
-  function setSelection(sel) { if (S) { S.selection = sel || null; updateMarks(); } }
+  function syncState() { if (S) indexState(S.getState()); refreshFog(); updateMarks(); updatePieces(); requestRender(); }
+  function setSelection(sel) { if (S) { S.selection = sel || null; updateMarks(); updateLabels(); } }
   function setHover(q, r) { if (S) { S.hover = Number.isInteger(q) && Number.isInteger(r) ? { q, r } : null; updateMarks(); } }
   function playAnimation(anim) { if (S && anim) { S.anims.push(anim); requestRender(); } }
 
@@ -1195,7 +1881,7 @@
   // that could reveal game state filters through it, as well as sitting under
   // the unexplored shell. Ordering alone is not enough and filtering alone is
   // not enough — a leak needs both to fail.
-  window.R3D = { init, rebuildMap, rebuildTile, syncState, setSelection, setHover, playAnimation, registerFogHideable, applyFogToScenery,
+  window.R3D = { init, rebuildMap, rebuildTile, syncState, setYieldTiles, setSelection, setHover, playAnimation, registerFogHideable, applyFogToScenery,
     refreshFog, fogAt: (q, r) => (S ? fogStateAt(q, r) : C.FOG.UNSEEN), panToHex, centerOn,
     getCameraView, setQuality, resize, requestRender, dispose };
 
@@ -1203,7 +1889,21 @@
     drawCalls: () => (S ? S.renderer.info.render.calls : 0),
     triangles: () => (S ? S.renderer.info.render.triangles : 0),
     sceneCount: () => { let n = 0; if (S) S.scene.traverse(() => { n++; }); return n; },
-    labelCount: () => 0,
+    // labels: DOM elements held (lifecycle) vs those currently shown (camera/distance/screen)
+    labelElements: () => (S ? S.labels.size : 0),
+    labelCount: () => (S ? [...S.labels.values()].filter((L) => L.on).length : 0),
+    expectedLabelCount: () => {
+      if (!S) return 0;
+      const st = S.getState() || {}; let n = 0;
+      (st.players || []).forEach((pl, p) => {
+        for (const u of (pl.units || [])) if (u.hp > 0 && fogStateAt(u.q, u.r) === C.FOG.VISIBLE) n++;
+        for (const c of (pl.cities || [])) if (fogStateAt(c.q, c.r) !== C.FOG.UNSEEN) n++;
+      });
+      return n + [...S.labels.keys()].filter((k) => k.startsWith('yield:')).length;
+    },
+    labelFor: (kind, id, player) => labelFor(kind, id, player),
+    yieldLabelOn: (q, r) => labelFor('yield', q + ',' + r),
+    labelsInDom: () => (S && S.labelRoot ? S.labelRoot.querySelectorAll('.lbl').length : 0),
     frames: () => (S ? S.frames : 0),
     canvasWidth: () => (S ? S.renderer.domElement.width : 0),
     setCameraDistance: (d) => {
@@ -1330,6 +2030,7 @@
     gridDrawCalls: () => layerDrawCalls(['grid']),
     overlayDrawCalls: () => layerDrawCalls(['overlays']),
     markDrawCalls: () => layerDrawCalls(MARK_NAMES),
+    ...PIECE_READERS,
     gridOpacity: () => (S && S.marks ? S.marks.grid.material.opacity : NaN),
     gridSegments: () => (S && S.marks ? S.marks.gridSegments : -1),
     gridHasEdge: (q1, r1, q2, r2) => {
@@ -1441,6 +2142,12 @@
       let n = 0;
       S.scene.traverse((x) => {
         if (!(x.isMesh || x.isLine || x.isPoints || x.isSprite) || x.renderOrder <= 0) return;
+        // Either the layer is see-through and writes no depth (fog covers it),
+        // or it is culled by fog outright (units: proven by instance counts).
+        // A flag alone proves nothing: it must be a real unit mesh, owned by
+        // the unit cull (type set, registered in S.pieces.meshes).
+        if (x.userData && x.userData.fogCulled === true && x.userData.type !== undefined && S.pieces
+            && [...S.pieces.meshes.values()].some((e) => e.mesh === x)) return;
         for (const m of [].concat(x.material)) if (m && (m.depthWrite !== false || m.transparent !== true)) n++;
       });
       return n;
@@ -1488,6 +2195,6 @@
   // and transparency hold on their own. It is not part of the page's surface:
   // it is defined only when the test harness has declared itself first.
   if (window.R3D_TEST === true) {
-    window.__r3d.setMarksUnfiltered = (b) => { if (S) { S.unfiltered = !!b; updateMarks(); } };
+    window.__r3d.setMarksUnfiltered = (b) => { if (S) { S.unfiltered = !!b; updateMarks(); updatePieces(); } };
   }
 })();
