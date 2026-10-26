@@ -18,11 +18,12 @@ const LM = {
   OCEAN:  {q: 0,  r: 10},                 // deep ocean
   COAST:  {q: 2,  r: 10},                 // coast, borders ocean at (1,10)
   HILL:   {q: 8,  r: 6},                  // Grassland Hills (terrain 3)
-  RIVER:  {q: 10, r: 8, edges: [1, 4]},   // river on top + bottom edges (reciprocated on neighbors)
+  RIVER:  {q: 10, r: 8, edges: [1, 2]},   // top + upper-left edges: NOT symmetric under the d..d+1 bug (reciprocated on neighbors)
   SEEN:   {q: 6,  r: 5},                  // within sight of player 0
   UNSEEN: {q: 28, r: 3},                  // far from every player-0 city/unit
   CITY_A: {q: 6,  r: 5, name: 'Alpha', player: 0},
   CITY_B: {q: 25, r: 14, name: 'Beta', player: 1},
+  CITY_HILLS: {q: 15, r: 12, name: 'Gamma', player: 0},   // a city on hills: flattening must show here
   UNIT_SETTLER: {player: 0, id: 0, q: 7,  r: 6},
   UNIT_BUILDER: {player: 0, id: 1, q: 6,  r: 6},
   UNIT_WARRIOR: {player: 0, id: 2, q: 5,  r: 5},
@@ -52,6 +53,7 @@ function buildFixture() {
     if (t.terrain > 1 && C.hexDist(t.q, t.r, a.q, a.r) <= 1) t.terrain = flatTerrain[(t.q + t.r) % 2];
   }
   at(LM.HILL.q, LM.HILL.r).terrain = 3;
+  at(LM.CITY_HILLS.q, LM.CITY_HILLS.r).terrain = 3;
   // River: set edges on RIVER tile and the reciprocal edge on each neighbour.
   const rv = at(LM.RIVER.q, LM.RIVER.r);
   rv.terrain = 2;
@@ -67,7 +69,7 @@ function buildFixture() {
     prodStockpile: 0, production: 0, buildings: 0, foundedTurn: 1, isCapital: true, lockedTiles: []});
   const players = [
     {units: [unit(LM.UNIT_SETTLER, UNIT_TYPE.settler, 100), unit(LM.UNIT_BUILDER, UNIT_TYPE.builder, 100),
-             unit(LM.UNIT_WARRIOR, UNIT_TYPE.warrior, 100)], cities: [city(LM.CITY_A, 0)]},
+             unit(LM.UNIT_WARRIOR, UNIT_TYPE.warrior, 100)], cities: [city(LM.CITY_A, 0), city(LM.CITY_HILLS, 1)]},
     {units: [unit(LM.UNIT_ENEMY_WARRIOR, UNIT_TYPE.warrior, 100), unit(LM.UNIT_ENEMY_ARCHER, UNIT_TYPE.archer, 100),
              unit(LM.UNIT_ENEMY_SCOUT, UNIT_TYPE.scout, 100)], cities: [city(LM.CITY_B, 0)]},
   ];
@@ -129,10 +131,19 @@ TESTS.push({name: 'failed init leaves the live renderer intact', fn: async () =>
   const before = __r3d.frames(); R3D.requestRender(); await wait(100);
   assert(__r3d.frames() > before, 'renderer died after a failed init');
 }});
-TESTS.push({name: 'the loop idles when nothing animates', fn: async () => {
+TESTS.push({name: 'the loop idles when nothing animates (reduced motion, water off)', fn: async () => {
+  __r3d.setReducedMotion(true);
+  try {
+    await wait(200);
+    const before = __r3d.frames(); await wait(300);
+    assert(__r3d.frames() - before <= 2, 'idle renderer should not redraw every frame');
+  } finally { __r3d.setReducedMotion(false); }
+}});
+TESTS.push({name: 'ambient water redraws at a modest rate, well under every frame', fn: async () => {
   await wait(200);
-  const before = __r3d.frames(); await wait(300);
-  assert(__r3d.frames() - before <= 2, 'idle renderer should not redraw every frame');
+  const before = __r3d.frames(); await wait(1000);
+  const n = __r3d.frames() - before;
+  assert(n >= 8 && n <= 30, 'ambient frames per second: ' + n);
 }});
 TESTS.push({name: 'requestRender draws one frame', fn: async () => {
   await wait(100);
@@ -170,6 +181,99 @@ TESTS.push({name: 'a throwing animation is dropped and rendering continues', fn:
     assert(__r3d.frames() > before, 'renderer wedged after a throwing animation');
     assert(__r3d.animCount() === 0, 'throwing animation still registered: ' + __r3d.animCount());
   } finally { console.error = origErr; }
+}});
+
+// ── Task 6: terrain chunks, water, rivers ──
+TESTS.push({name: 'the map is a few dozen chunks, not 640 meshes', fn: () =>
+  assert(__r3d.chunkCount() > 20 && __r3d.chunkCount() < 80, 'chunks: ' + __r3d.chunkCount())});
+TESTS.push({name: 'the renderer never writes into game state', fn: () => {
+  assert(fixture.tiles.every(t => !('hasCity' in t)), 'a tile carries hasCity');
+}});
+TESTS.push({name: 'a city tile builds flatter than the same tile without its city', fn: () => {
+  const c = LM.CITY_HILLS, range = () => { const y = __r3d.tileYRange(c.q, c.r); return y.max - y.min; };
+  assert(tileOf(c).terrain === 3, 'fixture city must stand on hills');
+  const flat = range();
+  const cities = fixture.players[0].cities, i = cities.findIndex(x => x.name === c.name), gone = cities.splice(i, 1)[0];
+  try { R3D.rebuildTile(c.q, c.r); var bumpy = range(); }
+  finally { cities.splice(i, 0, gone); R3D.rebuildTile(c.q, c.r); }
+  assert(bumpy > 0.1, 'hills tile should have relief, got ' + bumpy);
+  assert(flat < bumpy * 0.5, 'city tile ' + flat + ' vs ' + bumpy);
+}});
+TESTS.push({name: 'a skirt closes the step at a shoreline but not between equal land', fn: () => {
+  const coast = __r3d.tileYRange(LM.COAST.q, LM.COAST.r), land = __r3d.tileYRange(LM.HILL.q, LM.HILL.r);
+  // ocean base -0.35, skirt drops to just below it
+  assert(coast.min < R3DCore.tileBase({terrain: 0}) - 0.04, 'no skirt at shoreline, min y ' + coast.min);
+  assert(land.min > 0, 'land tile with land neighbours must have no skirt, min y ' + land.min);
+}});
+TESTS.push({name: 'rebuildTile reads the live tile, not a cached object', fn: () => {
+  const orig = fixture.tiles, q = 20, r = 12;
+  try {
+    fixture.tiles = orig.map(t => Object.assign({}, t));     // what a state refresh does
+    fixture.tiles[r * 32 + q].terrain = 0;
+    R3D.rebuildTile(q, r);
+    const y = __r3d.tileYRange(q, r);
+    assert(y.max < 0, 'chunk was built from a stale tile, max y ' + y.max);
+  } finally { fixture.tiles = orig; R3D.rebuildTile(q, r); }
+  assert(__r3d.tileYRange(q, r).max > 0, 'did not restore');
+}});
+TESTS.push({name: 'changing one tile rebuilds only its own chunk', fn: () => {
+  const mine = __r3d.chunkVersion(4, 4), other = __r3d.chunkVersion(28, 18);
+  fixture.tiles[4 * 32 + 4].improvement = 2;   // index = r*32 + q
+  R3D.rebuildTile(4, 4);
+  assert(__r3d.chunkVersion(4, 4) === mine + 1, 'owning chunk must rebuild');
+  assert(__r3d.chunkVersion(28, 18) === other, 'other chunks must not');
+}});
+TESTS.push({name: 'tiles in the same 4x4 block share a chunk, neighbours do not', fn: () => {
+  const a = __r3d.chunkVersion(5, 5);
+  R3D.rebuildTile(4, 4);
+  assert(__r3d.chunkVersion(5, 5) === a + 1, 'same block must share');
+  const b = __r3d.chunkVersion(8, 4);
+  R3D.rebuildTile(4, 4);
+  assert(__r3d.chunkVersion(8, 4) === b, 'next block must not rebuild');
+}});
+TESTS.push({name: 'chunks are frustum culled', fn: async () => {
+  R3D.centerOn(2, 2); await wait(400);
+  assert(__r3d.visibleChunks() < __r3d.chunkCount(), 'visible ' + __r3d.visibleChunks());
+  assert(__r3d.visibleChunks() >= 1, 'nothing visible');
+}});
+TESTS.push({name: 'rivers are drawn on the edges the bitmask names', fn: () => {
+  assert(__r3d.riverDrawCalls() >= 1);
+  const want = R3DCore.riverEdges(tileOf(LM.RIVER));
+  assert(want.length === 2);
+  assert(__r3d.riverSegmentsOn(LM.RIVER.q, LM.RIVER.r) === want.length,
+    __r3d.riverSegmentsOn(LM.RIVER.q, LM.RIVER.r) + ' vs ' + want.length);
+  assert(__r3d.riverSegmentsOn(LM.HILL.q, LM.HILL.r) === 0, 'river on a dry tile');
+}});
+TESTS.push({name: 'river ribbon vertices lie on the boundary shared with neighbour d', fn: () => {
+  const ca = R3DCore.hexCenter(LM.RIVER.q, LM.RIVER.r), quads = __r3d.riverQuads(LM.RIVER.q, LM.RIVER.r);
+  assert(quads.length === LM.RIVER.edges.length, 'quads ' + quads.length);
+  for (const d of LM.RIVER.edges) {
+    const [nq, nr] = R3DCore.neighbor(LM.RIVER.q, LM.RIVER.r, d), cb = R3DCore.hexCenter(nq, nr);
+    const mx = (ca.x + cb.x) / 2, mz = (ca.z + cb.z) / 2;      // midpoint of the shared edge
+    const hit = quads.some(qd => {
+      const cx = qd.reduce((a, v) => a + v[0], 0) / 4, cz = qd.reduce((a, v) => a + v[1], 0) / 4;
+      return Math.hypot(cx - mx, cz - mz) < 0.01;
+    });
+    assert(hit, 'no ribbon centred on the edge shared with neighbour ' + d);
+    // and every vertex stays within a ribbon width of the line between the centres
+    const L = Math.hypot(cb.x - ca.x, cb.z - ca.z), ux = (cb.x - ca.x) / L, uz = (cb.z - ca.z) / L;
+    for (const qd of quads) {
+      const cx = qd.reduce((a, v) => a + v[0], 0) / 4, cz = qd.reduce((a, v) => a + v[1], 0) / 4;
+      if (Math.hypot(cx - mx, cz - mz) > 0.01) continue;
+      // edge runs perpendicular to the centre line: along-line offset of each vertex ~ +-width/2
+      for (const v of qd) assert(Math.abs((v[0] - mx) * ux + (v[1] - mz) * uz) < 0.1, 'vertex off the shared edge');
+    }
+  }
+}});
+TESTS.push({name: 'all rivers share a draw call or two', fn: () =>
+  assert(__r3d.riverDrawCalls() <= 2, 'calls ' + __r3d.riverDrawCalls())});
+TESTS.push({name: 'the water plane sits above the seabed', fn: () =>
+  assert(__r3d.waterLevel() > R3DCore.tileBase({terrain: 0}))});
+TESTS.push({name: 'the water plane is above the coast floor and below land', fn: () =>
+  assert(__r3d.waterLevel() > R3DCore.tileBase({terrain: 1}) && __r3d.waterLevel() < R3DCore.tileBase({terrain: 2}))});
+TESTS.push({name: 'chunk and river counts fit the draw-call budget', fn: async () => {
+  R3D.requestRender(); await wait(150);
+  assert(__r3d.drawCalls() < 300, 'draw calls ' + __r3d.drawCalls());
 }});
 
 async function runAll() {

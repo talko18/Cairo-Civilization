@@ -1,8 +1,12 @@
 // Cairo Civ — 3D renderer core (pure logic, no three.js dependency).
 // Loads in the browser as window.R3DCore and in Node via module.exports.
 // World units: one hex has circumradius 1. Flat-top hexes, odd-q offset
-// coordinates, odd columns shifted DOWN. Vertex 0 is due east; edge i runs
-// from vertex i to vertex (i+1)%6. x grows east, z grows south (down the map).
+// coordinates, odd columns shifted DOWN. Corner 0 is due east and corners
+// advance clockwise on screen (x grows east, z grows south, down the map), so
+// corner->corner (i -> i+1) runs on the lower-right side first. Edges are NOT
+// named by corner index: edge d is the one shared with neighbour direction d
+// (0 = upper-right, 1 = top, 2 = upper-left, 3 = lower-left, 4 = bottom,
+// 5 = lower-right), and it spans corners (5-d) and (6-d)%6.
 (function () {
   'use strict';
   const SQ3 = Math.sqrt(3);
@@ -18,23 +22,24 @@
   }
 
   // Ported verbatim from index.html (EDGE_NEIGHBOR_EVEN / EDGE_NEIGHBOR_ODD).
-  // Indexed by edge (0-5): edge i connects vertex i to vertex (i+1)%6.
-  // Each entry is the [dq, dr] offset of the neighbor across that edge.
+  // Indexed by neighbour direction d (0-5); the labels name a direction on
+  // screen, not a corner index. Each entry is the [dq, dr] offset of the
+  // neighbor across that edge.
   const EDGE_NEIGHBOR_EVEN = [
-    [+1, -1], // edge 0 (v0->v1): upper-right
-    [ 0, -1], // edge 1 (v1->v2): top
-    [-1, -1], // edge 2 (v2->v3): upper-left
-    [-1,  0], // edge 3 (v3->v4): lower-left
-    [ 0, +1], // edge 4 (v4->v5): bottom
-    [+1,  0], // edge 5 (v5->v0): lower-right
+    [+1, -1], // dir 0: upper-right
+    [ 0, -1], // dir 1: top
+    [-1, -1], // dir 2: upper-left
+    [-1,  0], // dir 3: lower-left
+    [ 0, +1], // dir 4: bottom
+    [+1,  0], // dir 5: lower-right
   ];
   const EDGE_NEIGHBOR_ODD = [
-    [+1,  0], // edge 0 (v0->v1): upper-right
-    [ 0, -1], // edge 1 (v1->v2): top
-    [-1,  0], // edge 2 (v2->v3): upper-left
-    [-1, +1], // edge 3 (v3->v4): lower-left
-    [ 0, +1], // edge 4 (v4->v5): bottom
-    [+1, +1], // edge 5 (v5->v0): lower-right
+    [+1,  0], // dir 0: upper-right
+    [ 0, -1], // dir 1: top
+    [-1,  0], // dir 2: upper-left
+    [-1, +1], // dir 3: lower-left
+    [ 0, +1], // dir 4: bottom
+    [+1, +1], // dir 5: lower-right
   ];
 
   function neighbor(q, r, edge) {
@@ -119,6 +124,10 @@
     else h = amp * fall * (n - 0.35);
     if (t === 6 || t === 7) h += 0.025 * fall * Math.sin(x * 7 + z * 2.5 + n * 3);
     if (tile.feature === 4) h -= 0.09 * smooth(0.36, 0, Math.hypot(lx, lz));
+    // A city stands here: level the ground so buildings sit flat. Real tiles
+    // carry no such field (cities live in the city list), so the caller passes
+    // a COPY of the tile with hasCity set. Never write it onto shared state.
+    if (tile.hasCity) h *= 0.2;
     return tileBase(tile) + h;
   }
 

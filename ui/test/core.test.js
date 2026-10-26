@@ -252,3 +252,17 @@ test('every overlay category skips an unseen tile', () => {
     assert.strictEqual(list.filter(o => o.q === 3).length, 1, `${cat} lost a visible tile`);
   }
 });
+
+test('a city tile is flattened to a fifth of its elevation', () => {
+  const t = {terrain: 3, q: 4, r: 4}, c = C.hexCenter(4, 4);
+  const x = c.x + 0.2, z = c.z + 0.1, base = C.tileBase(t);
+  const raw = C.heightAt(t, x, z) - base;
+  assert.ok(Math.abs(raw) > 0.05, 'fixture point must have real relief');
+  const flat = C.heightAt({...t, hasCity: true}, x, z) - base;
+  assert.ok(Math.abs(flat - raw * 0.2) < 1e-9, `flat ${flat} vs ${raw * 0.2}`);
+  // still exactly tileBase at corners, so seams are unaffected
+  const [dx, dz] = C.hexCorner(2);
+  assert.ok(Math.abs(C.heightAt({...t, hasCity: true}, c.x + dx, c.z + dz) - base) < 1e-6);
+  // without the flag nothing changes
+  assert.strictEqual(C.heightAt({...t, hasCity: false}, x, z), C.heightAt(t, x, z));
+});
