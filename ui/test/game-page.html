@@ -1,0 +1,430 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Game tests</title>
+<style>body{margin:0;background:#222;color:#ddd;font:12px monospace} iframe{position:absolute;left:0;top:0;width:1200px;height:760px;border:0;background:#fff}</style>
+</head>
+<body>
+<script>
+// The real index.html in an iframe, served by run-game.mjs with a recorded game state.
+// Each test boots its own game when it changes things; read-only tests share one.
+// State (G, selected, ...) is declared with let/const, so it is reached with W.eval.
+const TESTS = [];
+const test = (name, fn) => TESTS.push({name, fn});
+const assert = (c, m) => { if (!c) throw new Error(m || 'assertion failed'); };
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+let current = null;
+function boot(qs) {
+  if (current) { current.remove(); current = null; }
+  return new Promise((resolve, reject) => {
+    const f = document.createElement('iframe');
+    f.src = '/?' + (qs || 'x') + '&_=' + Math.random();
+    document.body.appendChild(f);
+    current = f;
+    const t0 = Date.now();
+    (function poll() {
+      let ready = false;
+      try {
+        const W = f.contentWindow;
+        ready = W.eval('typeof r3dReady !== "undefined" && (r3dReady || document.getElementById("map-fallback").style.display === "flex")');
+      } catch (e) { /* not loaded yet */ }
+      if (ready) return resolve(f.contentWindow);
+      if (Date.now() - t0 > 40000) return reject(new Error('the game did not start'));
+      setTimeout(poll, 100);
+    })();
+  });
+}
+
+// ---- helpers over a booted game window W ----
+const ev = (W, expr) => W.eval(expr);
+const draw = (W, n) => { for (let i = 0; i < (n || 1); i++) { W.R3D.requestRender(); W.__r3d.step(W.performance.now() + i); } };
+const area = (W) => W.document.getElementById('map-area');
+const pe = (W, type, x, y, extra) => new W.PointerEvent(type, Object.assign({bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, pointerType: 'mouse'}, extra));
+const pointAt = (W, q, r) => { const P = W.__r3d.project(q, r); assert(P, 'no screen position for ' + q + ',' + r); return P; };
+// a click as a real browser sends it: pointerdown on the map, pointerup on the window
+const clickHex = (W, q, r) => { const P = pointAt(W, q, r); W.document.getElementById('map-canvas').dispatchEvent(pe(W, 'pointerdown', P.x, P.y)); W.dispatchEvent(pe(W, 'pointerup', P.x, P.y)); };
+const key = (W, k, type) => W.document.dispatchEvent(new W.KeyboardEvent(type || 'keydown', {key: k, bubbles: true, cancelable: true}));
+const sel = (W) => JSON.parse(ev(W, 'JSON.stringify(selected && {type: selected.type, id: selected.id, q: selected.q, r: selected.r, player: selected.player})'));
+const cam = (W) => W.R3D.getCameraView();
+// Replace R3D.<name> with a recorder that still calls through.
+function spy(W, name) {
+  const orig = W.R3D[name], calls = [];
+  W.R3D[name] = function () { const a = [...arguments]; const rec = {args: a, fogAtDest: null, ret: undefined};
+    if (name === 'playAnimation' && a[0] && Number.isInteger(a[0].toQ)) rec.fogAtDest = W.R3D.fogAt(a[0].toQ, a[0].toR);
+    calls.push(rec); rec.ret = orig.apply(this, a); return rec.ret; };
+  calls.restore = () => { W.R3D[name] = orig; };
+  return calls;
+}
+const hexOfWorld = (W, x, z) => W.R3DCore.worldToHex(x, z, 32, 20);
+const hasKeys = (o, ...ks) => ks.every((k) => k in o);
+
+// ───────────────────────── source ─────────────────────────
+test('the 2D map renderer is gone from index.html', async () => {
+  const src = await (await fetch('/index.html')).text();
+  assert(!/function drawMap\s*\(/.test(src), 'drawMap must be deleted');
+  assert(!/function drawUnit\s*\(/.test(src), 'drawUnit must be deleted');
+  assert(/function drawMinimap\s*\(/.test(src), 'the minimap stays 2D');
+  for (const dead of ['pixelToHex', 'startAnimation', 'animLoop', 'animT', 'camX', 'camY', 'ctx2d', 'activeAnimations', 'resizeCanvas'])
+    assert(!new RegExp('\\b' + dead + '\\b').test(src), dead + ' is still referenced');
+  assert(!/\blet zoom\b/.test(src), 'the zoom global is still there');
+  assert(!/'Arrow(Up|Down|Left|Right)'/.test(src), "the page's own arrow-key pan is still there: the renderer claims arrows");
+  assert(/wasd:\s*false/.test(src), 'WASD must stay off: it collides with A (attack) and S (skip)');
+});
+
+// ───────────────────────── boot ─────────────────────────
+test('the game boots on the 3D renderer and the map canvas is WebGL, not 2D', async () => {
+  const W = await boot();
+  assert(ev(W, 'r3dReady') === true, 'renderer not ready');
+  assert(ev(W, 'document.getElementById("map-fallback").style.display') !== 'flex', 'fallback message shown with WebGL available');
+  assert(ev(W, 'canvas.getContext("2d")') === null, 'the map canvas has a 2D context: R3D cannot own it');
+  assert(W.__r3d.labelCount() > 0, 'no unit or city labels drawn');
+});
+
+test('without WebGL the map area says so, and the rest of the game still works', async () => {
+  const W = await boot('nowebgl');
+  assert(ev(W, 'r3dReady') === false, 'renderer claims to be ready without WebGL');
+  const fb = W.document.getElementById('map-fallback');
+  assert(fb.style.display === 'flex' && /WebGL/.test(fb.textContent), 'no clear message: ' + JSON.stringify(fb.textContent));
+  assert(ev(W, 'document.getElementById("sidebar-body").children.length') > 0, 'sidebar did not render');
+  // every map call is a safe no-op
+  ev(W, 'redrawMap(); resyncMap(); syncMap3d(); zoomAtCenter(1); updateMinimapViewport(); updateZoomLabel(); panToHex(3,3); centerCamera(true); startMove(); cancelMode();');
+});
+
+// ───────────────────────── input ─────────────────────────
+test('a click reaches handleClick through real pointer events, and a drag is not a click', async () => {
+  const W = await boot();
+  clickHex(W, 11, 10);
+  const s = sel(W);
+  assert(s && s.type === 'unit' && s.id === 1 && s.player === 0, 'clicking the warrior selected ' + JSON.stringify(s));
+  clickHex(W, 8, 9);
+  assert(sel(W) === null, 'clicking empty ground did not clear the selection');
+  clickHex(W, 11, 10);
+  const P = pointAt(W, 8, 9), c = W.document.getElementById('map-canvas');
+  c.dispatchEvent(pe(W, 'pointerdown', P.x, P.y)); W.dispatchEvent(pe(W, 'pointermove', P.x + 30, P.y)); W.dispatchEvent(pe(W, 'pointerup', P.x + 30, P.y));
+  assert(sel(W) && sel(W).type === 'unit', 'a drag counted as a click and cleared the selection');
+});
+
+test('the map shows the grabbing cursor class while a button is held', async () => {
+  const W = await boot();
+  const P = pointAt(W, 11, 9);
+  W.document.getElementById('map-canvas').dispatchEvent(pe(W, 'pointerdown', P.x, P.y));
+  assert(area(W).classList.contains('dragging'), 'no dragging class while the button is down');
+  W.dispatchEvent(pe(W, 'pointerup', P.x, P.y));
+  assert(!area(W).classList.contains('dragging'), 'dragging class stuck after release');
+});
+
+test('hovering shows the tile tooltip and leaving hides it', async () => {
+  const W = await boot();
+  const P = pointAt(W, 11, 9), tip = W.document.getElementById('tile-tip');
+  W.document.getElementById('map-canvas').dispatchEvent(pe(W, 'pointermove', P.x, P.y));
+  assert(tip.style.display === 'block' && /\(11,9\)/.test(tip.textContent), 'tooltip: ' + tip.style.display + ' ' + tip.textContent);
+  assert(/Grassland|Plains|Hills|Desert|Tundra|Snow|Coast|Ocean|Mountain/.test(tip.textContent), 'tooltip has no terrain name');
+  area(W).dispatchEvent(new W.MouseEvent('mouseleave', {bubbles: false}));
+  assert(tip.style.display === 'none', 'tooltip stayed after the pointer left');
+});
+
+test('arrow keys pan once per press; WASD is off, so A is attack and S is skip', async () => {
+  const W = await boot();
+  clickHex(W, 11, 10); draw(W);
+  const x0 = cam(W).x;
+  W.dispatchEvent(new W.KeyboardEvent('keydown', {key: 'ArrowRight', bubbles: true, cancelable: true}));
+  for (let i = 0; i < 6; i++) { W.__r3d.step(W.performance.now() + 100 * (i + 1)); }
+  W.dispatchEvent(new W.KeyboardEvent('keyup', {key: 'ArrowRight', bubbles: true}));
+  assert(cam(W).x > x0 + 0.05, 'ArrowRight did not pan: ' + x0 + ' -> ' + cam(W).x);
+  const x1 = cam(W).x;
+  key(W, 'a');
+  assert(ev(W, 'actionMode') === 'attack', 'A did not start an attack: WASD is stealing it (' + ev(W, 'actionMode') + ')');
+  key(W, 'Escape');
+  for (let i = 0; i < 6; i++) W.__r3d.step(W.performance.now() + 1000 + 100 * i);
+  assert(Math.abs(cam(W).x - x1) < 0.2, 'a letter key panned the camera');
+  const mp = ev(W, 'G.players[0].units.find(u => u.id === 1).mp');
+  key(W, 's');
+  assert(ev(W, 'G.players[0].units.find(u => u.id === 1).mp') === 0 && mp > 0, 'S did not skip the unit');
+});
+
+test('Tab cycles units and pans through R3D.panToHex', async () => {
+  const W = await boot();
+  const calls = spy(W, 'panToHex');
+  key(W, 'Tab');
+  assert(calls.length === 1 && calls[0].args[0] === 11 && calls[0].args[1] === 10, 'panToHex calls: ' + JSON.stringify(calls.map((c) => c.args)));
+  assert(sel(W) && sel(W).id === 1, 'Tab did not select the unit');
+  ev(W, "selectFromSidebar('city', 0, 0)");
+  assert(calls.length === 2, 'sidebar selection did not pan');
+});
+
+// ───────────────────────── selection and overlays ─────────────────────────
+test('selecting a unit draws its ring; move, attack and ranged range light the right tiles', async () => {
+  const W = await boot();
+  clickHex(W, 11, 10); draw(W);
+  const ring = W.__r3d.ringCentre('sel'), c = W.R3DCore.hexCenter(11, 10);
+  assert(ring && Math.hypot(ring.x - c.x, ring.z - c.z) < 0.3, 'selection ring is not on the unit: ' + JSON.stringify(ring));
+  key(W, 'm'); draw(W);
+  assert(ev(W, 'actionMode') === 'move' && W.__r3d.litTiles() >= 6, 'move range lit ' + W.__r3d.litTiles() + ' tiles');
+  for (const t of W.__r3d.litList()) {
+    const h = hexOfWorld(W, t.x, t.z);
+    assert(W.R3DCore.hexDist(11, 10, h.q, h.r) <= 2, 'a move highlight is beyond the unit range at ' + h.q + ',' + h.r);
+    assert(t.color === W.R3DCore.OV.move, 'move colour');
+    assert(![0, 1, 12].includes(ev(W, 'getTile(' + h.q + ',' + h.r + ').terrain')), 'a move highlight on water or mountain at ' + h.q + ',' + h.r);
+  }
+  key(W, 'Escape'); draw(W);
+  assert(W.__r3d.litTiles() === 0, 'cancelling move left highlights behind');
+  // an enemy next to us: attack mode lights exactly that tile, in the attack colour
+  ev(W, 'G.players[1].units.push({id: 77, unitType: 3, q: 12, r: 10, hp: 80, mp: 2, charges: 0, fortify: 0}); resyncMap();');
+  key(W, 'a'); draw(W);
+  const atk = W.__r3d.litList();
+  assert(atk.length === 1 && atk[0].color === W.R3DCore.OV.atk, 'attack range: ' + JSON.stringify(atk));
+  const h = hexOfWorld(W, atk[0].x, atk[0].z);
+  assert(h.q === 12 && h.r === 10, 'attack highlight on the wrong tile ' + h.q + ',' + h.r);
+  key(W, 'Escape');
+  // ranged: an archer reaches two tiles
+  ev(W, 'G.players[1].units.push({id: 78, unitType: 3, q: 13, r: 9, hp: 80, mp: 2, charges: 0, fortify: 0}); selected = {...G.players[0].units.find(u => u.id === 1), type: "unit", player: 0, unitType: 5}; resyncMap(); startRanged();');
+  draw(W);
+  const rng = W.__r3d.litList();
+  assert(rng.length >= 1 && rng.every((t) => t.color === W.R3DCore.OV.rng), 'ranged range colour: ' + JSON.stringify(rng.map((t) => t.color)));
+  const far = rng.map((t) => hexOfWorld(W, t.x, t.z)).find((q) => q.q === 13 && q.r === 9);
+  assert(far, 'ranged highlight missed the target two tiles away');
+});
+
+test('selecting a city shows worked, locked and unworked tiles and their yield pills', async () => {
+  const W = await boot();
+  ev(W, "selectFromSidebar('city', 0, 0)"); draw(W);
+  const worked = JSON.parse(ev(W, 'JSON.stringify(getWorkedTiles(G.players[0].cities[0]))'));
+  const locked = worked.filter((t) => t.locked), auto = worked.filter((t) => !t.locked);
+  assert(locked.length === 1 && locked[0].q === 11 && locked[0].r === 9, 'fixture: expected one locked tile at 11,9');
+  for (const t of worked) assert(W.__r3d.yieldLabelOn(t.q, t.r), 'no yield pill on worked tile ' + t.q + ',' + t.r);
+  assert(/\u{1F512}/u.test(W.__r3d.yieldLabelOn(11, 9).textContent), 'the locked tile has no lock icon: ' + W.__r3d.yieldLabelOn(11, 9).textContent);
+  const lit = W.__r3d.litList().map((t) => Object.assign({}, hexOfWorld(W, t.x, t.z), {color: t.color}));
+  const colour = (q, r) => (lit.find((t) => t.q === q && t.r === r) || {}).color;
+  assert(colour(11, 9) === W.R3DCore.OV.lock, 'locked tile is not drawn in the lock colour');
+  assert(auto.length > 0 && auto.every((t) => colour(t.q, t.r) === W.R3DCore.OV.work), 'auto tiles are not in the work colour');
+  assert(lit.some((t) => t.color === W.R3DCore.OV.dim), 'no dim overlay on unworked territory');
+  // the yield pill shows what the tooltip would
+  const y = ev(W, 'JSON.stringify(computeCityCenterYield(getTile(11, 10)))'), yy = JSON.parse(y);
+  const txt = W.__r3d.yieldLabelOn(11, 10).textContent;
+  assert(txt.includes(yy.food + 'F') && txt.includes(yy.prod + 'P'), 'city-centre pill "' + txt + '" vs ' + y);
+  // deselecting removes pills and highlights
+  key(W, 'Escape'); draw(W);
+  assert(!W.__r3d.yieldLabelOn(11, 10) && W.__r3d.litTiles() === 0, 'deselecting left pills or highlights behind');
+});
+
+test('the city shows its amenity dot (amenityOf is wired)', async () => {
+  const W = await boot();
+  draw(W);
+  const el = W.__r3d.labelFor('city', 0, 0);
+  assert(el, 'no city label');
+  const am = el.querySelector('.am');
+  assert(am && am.style.display !== 'none' && /^am am-(ecstatic|happy|content|displeased|unhappy|unrest)$/.test(am.className), 'amenity dot: ' + (am && am.className + '/' + am.style.display));
+});
+
+// ───────────────────────── camera, zoom, minimap, panel ─────────────────────────
+test('zoom buttons, + / - keys and the wheel zoom the camera and the label follows', async () => {
+  const W = await boot();
+  draw(W);
+  const lbl = () => parseInt(W.document.getElementById('zoom-lbl').textContent, 10);
+  assert(lbl() === 100, 'default label ' + lbl());
+  const s0 = cam(W).span;
+  W.document.querySelector('#zoom-controls button:first-child').click(); draw(W);
+  assert(cam(W).span < s0 * 0.9 && lbl() > 110, '+ button: span ' + s0 + ' -> ' + cam(W).span + ', label ' + lbl());
+  W.document.querySelector('#zoom-controls button:last-child').click(); draw(W);
+  assert(Math.abs(cam(W).span - s0) < s0 * 0.02 && lbl() === 100, '- button did not undo +: ' + cam(W).span + ' label ' + lbl());
+  key(W, '+'); draw(W);
+  assert(cam(W).span < s0 * 0.9, '+ key did not zoom in');
+  key(W, '-'); key(W, '-'); draw(W);
+  assert(cam(W).span > s0 * 1.1 && lbl() < 90, '- key did not zoom out');
+  const s1 = cam(W).span, P = pointAt(W, 11, 10);
+  W.document.getElementById('map-canvas').dispatchEvent(new W.WheelEvent('wheel', {deltaY: -300, clientX: P.x, clientY: P.y, bubbles: true, cancelable: true}));
+  for (let i = 0; i < 8; i++) W.__r3d.step(W.performance.now() + 60 * i);
+  assert(cam(W).span < s1, 'the wheel did not zoom in');
+});
+
+test('the minimap viewport follows the 3D camera, and a minimap click recentres it', async () => {
+  const W = await boot();
+  const vp = W.document.getElementById('minimap-viewport');
+  W.R3D.centerOn(4, 4); draw(W);
+  const a = parseFloat(vp.style.left);
+  W.R3D.centerOn(28, 16); draw(W);
+  const b = parseFloat(vp.style.left);
+  assert(Number.isFinite(a) && Number.isFinite(b) && b > a + 30, 'viewport left did not follow the camera: ' + a + ' -> ' + b);
+  const w0 = parseFloat(vp.style.width);
+  W.R3D.zoomBy(2); draw(W);
+  assert(parseFloat(vp.style.width) < w0 * 0.7, 'viewport did not shrink when zooming in: ' + w0 + ' -> ' + vp.style.width);
+  const mm = W.document.getElementById('minimap-canvas').getBoundingClientRect();
+  const hx = 20, hy = 12;
+  W.document.getElementById('minimap-container').dispatchEvent(new W.MouseEvent('click', {clientX: mm.left + (hx + 0.5) * 6, clientY: mm.top + (hy + 0.25) * 6, bubbles: true}));
+  const c = W.R3DCore.hexCenter(hx, hy);
+  assert(Math.hypot(cam(W).x - c.x, cam(W).z - c.z) < 1.8, 'minimap click centred ' + JSON.stringify(cam(W)) + ' not on ' + JSON.stringify(c));
+});
+
+test('opening and closing the right panel resizes the renderer to #map-area', async () => {
+  const W = await boot();
+  const width = () => W.__r3d.canvasWidth(), areaW = () => area(W).clientWidth;
+  const before = width();
+  assert(before === areaW(), 'precondition: canvas ' + before + ' vs area ' + areaW());
+  ev(W, "openPanel('tech')");
+  await wait(250);
+  assert(width() < before && width() === areaW(), 'panel open: canvas ' + width() + ', area ' + areaW() + ', was ' + before);
+  ev(W, 'closePanel()');
+  await wait(250);
+  assert(width() === before, 'panel closed: canvas ' + width() + ' did not return to ' + before);
+});
+
+test('the quality menu changes shadows, props and resolution, and remembers the choice', async () => {
+  let W = await boot();
+  const box = (k) => W.document.querySelector('#quality-menu input[data-q="' + k + '"]');
+  const flip = (k, on) => { box(k).checked = on; box(k).dispatchEvent(new W.Event('change', {bubbles: true})); };
+  assert(W.__r3d.shadowsEnabled() && W.__r3d.propsVisible() && W.__r3d.decorMeshCount() > 0, 'precondition: everything on');
+  W.document.getElementById('quality-btn').click();
+  assert(W.document.getElementById('quality-menu').classList.contains('open'), 'Quality button did not open the menu');
+  key(W, 'Escape');
+  assert(!W.document.getElementById('quality-menu').classList.contains('open'), 'Escape did not close the menu');
+  flip('shadows', false);
+  assert(W.__r3d.shadowsEnabled() === false, 'shadows still on');
+  assert(W.__r3d.propsVisible() === true, 'turning shadows off hid the props');
+  flip('props', false);
+  assert(W.__r3d.propsVisible() === false, 'props still visible');
+  // real scenery stays: features, resources, improvements are information, not decoration
+  assert(W.__r3d.sceneryMeshCount() > W.__r3d.decorMeshCount(), 'props off must not hide every scenery mesh');
+  Object.defineProperty(W, 'devicePixelRatio', {value: 2, configurable: true});
+  flip('fullRes', true);
+  assert(W.__r3d.pixelRatio() === 2, 'full resolution did not raise the pixel ratio: ' + W.__r3d.pixelRatio());
+  flip('fullRes', false);
+  assert(W.__r3d.pixelRatio() === 1, 'pixel ratio did not drop back');
+  flip('fullRes', true);
+  // it survives a rebuild of the scenery (a terrain change) and a fresh page load
+  ev(W, 'R3D.rebuildTile(12, 10)');
+  assert(W.__r3d.propsVisible() === false, 'a scenery rebuild brought the props back');
+  W = await boot();
+  assert(W.__r3d.shadowsEnabled() === false && W.__r3d.propsVisible() === false, 'saved quality was not restored on load');
+  assert(!box('shadows').checked && !box('props').checked && box('fullRes').checked, 'the menu does not show the saved state');
+  W.localStorage.removeItem('cairoCivQuality');
+});
+
+// ───────────────────────── state flow ─────────────────────────
+test('switching the viewing player re-derives the fog the renderer draws', async () => {
+  const W = await boot();
+  draw(W);
+  assert(W.R3D.fogAt(11, 10) === 0 && W.R3D.fogAt(18, 4) !== 0, 'precondition: player 0 sees its own city, not the enemy one');
+  ev(W, 'setMyPlayer(1)');
+  assert(W.R3D.fogAt(18, 4) === 0 && W.R3D.fogAt(11, 10) !== 0, 'the renderer kept player 0 fog after switching to player 1');
+  ev(W, 'setMyPlayer(0)');
+  assert(W.R3D.fogAt(11, 10) === 0, 'and back');
+});
+
+test('a state refresh rebuilds the map only when terrain changed', async () => {
+  const W = await boot();
+  const rebuild = spy(W, 'rebuildMap'), sync = spy(W, 'syncState');
+  const base = JSON.parse(ev(W, 'JSON.stringify(G)'));
+  const serve = (state) => { W.fetch = async () => ({ok: true, json: async () => JSON.parse(JSON.stringify(state))}); };
+  serve(base); await W.refreshState();
+  assert(rebuild.length === 0 && sync.length >= 1, 'an unchanged refresh rebuilt the map ' + rebuild.length + 'x (sync ' + sync.length + 'x)');
+  const changed = JSON.parse(JSON.stringify(base));
+  changed.tiles.find((t) => t.q === 13 && t.r === 11).improvement = 1;
+  serve(changed); await W.refreshState();
+  assert(rebuild.length === 1, 'a terrain change rebuilt the map ' + rebuild.length + 'x');
+  serve(changed); await W.refreshState();
+  assert(rebuild.length === 1, 'the same terrain again rebuilt the map a second time');
+  const moved = JSON.parse(JSON.stringify(changed)); moved.players[0].units.find((u) => u.id === 1).q = 12;
+  serve(moved); await W.refreshState();
+  assert(rebuild.length === 1 && sync.length >= 3, 'a unit moving rebuilt terrain');
+});
+
+test('optimistic moves play hex-coordinate effects once the fog has caught up with the move', async () => {
+  const W = await boot();
+  const play = spy(W, 'playAnimation');
+  // (15,10) is 4 from the city and from everything else: unseen now, in the unit's sight once it stands there
+  assert(W.R3D.fogAt(15, 10) !== 0, 'precondition: the destination is out of sight');
+  ev(W, "applyOptimistic({type: 'MoveUnit', unitId: 1, destQ: 15, destR: 10})");
+  const types = play.map((c) => c.args[0].type).sort().join();
+  assert(types === 'dustParticle,dustParticle,dustParticle,unitWalk', 'effects: ' + types);
+  for (const c of play) {
+    const a = c.args[0];
+    assert(Number.isInteger(a.q) && Number.isInteger(a.r), a.type + ' has no hex q/r');
+    assert(!hasKeys(a, 'x', 'y', 'fromX', 'fromY', 'toX', 'toY'), a.type + ' still carries pixel coordinates');
+  }
+  const walk = play.find((c) => c.args[0].type === 'unitWalk');
+  assert(walk.args[0].q === 11 && walk.args[0].r === 10 && walk.args[0].toQ === 15 && walk.args[0].toR === 10, 'walk is not from 11,10 to 15,10');
+  assert(walk.fogAtDest === 0, 'the walk was created before the destination was visible (fog ' + walk.fogAtDest + '): it would be dropped');
+  assert(walk.ret === true, 'the renderer refused the walk');
+  assert(ev(W, 'G.players[0].units.find(u => u.id === 1).q') === 15, 'optimistic state did not move the unit');
+});
+
+test('optimistic attacks and shots play the full set of effects in hex coordinates', async () => {
+  const W = await boot();
+  ev(W, 'G.players[1].units.push({id: 77, unitType: 3, q: 12, r: 10, hp: 80, mp: 2, charges: 0, fortify: 0}); resyncMap();');
+  let play = spy(W, 'playAnimation');
+  ev(W, "applyOptimistic({type: 'AttackUnit', unitId: 1, targetQ: 12, targetR: 10})");
+  assert(play.map((c) => c.args[0].type).sort().join() === 'clashSparks,floatingText,meleeCharge,screenFlash,unitShake', 'melee effects: ' + play.map((c) => c.args[0].type).sort().join());
+  for (const c of play) { const a = c.args[0]; assert(a.type === 'screenFlash' || (Number.isInteger(a.q) && Number.isInteger(a.r)), a.type + ' lacks hex q/r'); assert(!hasKeys(a, 'x', 'fromX', 'baseX'), a.type + ' has pixel fields'); }
+  const charge = play.find((c) => c.args[0].type === 'meleeCharge').args[0];
+  assert(charge.toQ === 12 && charge.toR === 10 && charge.player === 0 && charge.unitId === 1, 'charge: ' + JSON.stringify(charge));
+  assert(play.find((c) => c.args[0].type === 'unitShake').args[0].unitId === 77, 'the defender did not shake');
+  assert(play.filter((c) => c.ret === true).length >= 4, 'the renderer refused most of the melee effects: ' + play.map((c) => c.args[0].type + ':' + c.ret).join());
+  play.restore();
+  ev(W, 'G.players[0].units.find(u => u.id === 1).mp = 2');
+  play = spy(W, 'playAnimation');
+  ev(W, "applyOptimistic({type: 'RangedAttack', unitId: 1, targetQ: 12, targetR: 10})");
+  assert(play.map((c) => c.args[0].type).sort().join() === 'archerFire,floatingText,projectile,rangedImpact,unitShake', 'ranged effects: ' + play.map((c) => c.args[0].type).sort().join());
+  const shot = play.find((c) => c.args[0].type === 'projectile').args[0];
+  assert(shot.q === 11 && shot.r === 10 && shot.toQ === 12 && shot.toR === 10, 'projectile endpoints ' + JSON.stringify(shot));
+});
+
+test('founding a city rebuilds that one tile, plays its effects, and a later refresh does not rebuild again', async () => {
+  const W = await boot();
+  ev(W, 'G.players[0].units.push({id: 5, unitType: 0, q: 13, r: 9, hp: 100, mp: 2, charges: 0, fortify: 0}); resyncMap();');
+  const tile = spy(W, 'rebuildTile'), map = spy(W, 'rebuildMap'), play = spy(W, 'playAnimation');
+  ev(W, "applyOptimistic({type: 'FoundCity', settlerId: 5, name: 'Giza'})");
+  assert(tile.length === 1 && tile[0].args[0] === 13 && tile[0].args[1] === 9, 'rebuildTile calls: ' + JSON.stringify(tile.map((c) => c.args)));
+  assert(map.length === 0, 'founding rebuilt the whole map');
+  assert(play.map((c) => c.args[0].type).sort().join() === 'cityFound,floatingText', 'founding effects: ' + play.map((c) => c.args[0].type).join());
+  draw(W);
+  assert(W.__r3d.labelFor('city', 1, 0), 'the new city has no banner');
+  ev(W, 'syncMap3d()');
+  assert(map.length === 0, 'the next sync rebuilt a map the renderer already had');
+  ev(W, "applyOptimistic({type: 'BuildImprovement', builderId: 1, q: 12, r: 11, improvement: 1})");
+  assert(tile.length === 2 && tile[1].args[0] === 12 && tile[1].args[1] === 11, 'building an improvement did not rebuild its tile once');
+  assert(ev(W, 'getTile(12, 11).improvement') === 1, 'optimistic improvement missing');
+});
+
+test('turn-report floating numbers are created in hex coordinates', async () => {
+  const W = await boot();
+  const play = spy(W, 'playAnimation');
+  ev(W, "showTurnReport(2, [{sec: 'Empire', cls: 'info', icon: 'i', text: 'gold', q: 11, r: 10, float: {text: '+5', color: '#fff'}}, {sec: 'Empire', cls: 'info', icon: 'i', text: 'nothing here'}])");
+  assert(play.length === 1, 'expected one floating number, got ' + play.length);
+  const a = play[0].args[0];
+  assert(a.type === 'floatingText' && a.q === 11 && a.r === 10 && a.text === '+5' && !hasKeys(a, 'x', 'y'), JSON.stringify(a));
+  assert(play[0].ret === true, 'the renderer refused a floating number on a visible tile');
+});
+
+test('the renderer never writes to the game state', async () => {
+  const W = await boot();
+  // the reference is what the server sent, not G at some moment: the renderer is already running when the page finishes loading
+  const sent = async () => JSON.stringify(await (await W.fetch('/api/state')).json());
+  const snap = () => ev(W, 'JSON.stringify(G)');
+  const before = await sent();
+  assert(snap() === before, 'the renderer changed the game state while the page was loading');
+  clickHex(W, 11, 10); key(W, 'm'); draw(W, 2);
+  W.document.getElementById('map-canvas').dispatchEvent(pe(W, 'pointermove', pointAt(W, 11, 9).x, pointAt(W, 11, 9).y));
+  ev(W, "R3D.playAnimation({type:'unitWalk', q: 11, r: 10, toQ: 12, toR: 10, player: 0, unitId: 1}); R3D.syncState(); R3D.refreshFog(); R3D.zoomBy(1.5); R3D.centerOn(5, 5); R3D.rebuildMap();");
+  draw(W, 3);
+  key(W, 'Escape');
+  assert(snap() === before, 'game state differs after rendering, selecting, hovering, animating and rebuilding');
+});
+
+// ───────────────────────── runner ─────────────────────────
+async function runAll() {
+  const failures = []; let passed = 0;
+  // ?filter=<regex> runs only the tests whose name matches (used when proving a test fails on a broken build)
+  const f = new URLSearchParams(location.search).get('filter'), only = f ? new RegExp(f, 'i') : null;
+  for (const t of TESTS) {
+    if (only && !only.test(t.name)) continue;
+    try { await t.fn(); passed++; }
+    catch (e) { failures.push(t.name + ': ' + (e && e.message || e)); }
+  }
+  document.title = 'GAME-RESULT ' + JSON.stringify({passed, failed: failures.length, failures});
+}
+runAll().catch((e) => { document.title = 'GAME-RESULT ' + JSON.stringify({passed: 0, failed: 1, failures: ['page: ' + e]}); });
+</script>
+</body>
+</html>

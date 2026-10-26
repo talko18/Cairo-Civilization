@@ -1578,8 +1578,14 @@ const cvRect = () => testCanvas.getBoundingClientRect();
 const cx = () => cvRect().left + cvRect().width / 2, cy = () => cvRect().top + cvRect().height / 2;
 const UNSEEN_Q = LM.UNSEEN.q, UNSEEN_R = LM.UNSEEN.r;
 const sameHex = (a, b) => a && b && a.q === b.q && a.r === b.r;
-const mev = (type, el, x, y, extra) => el.dispatchEvent(new MouseEvent(type,
-  Object.assign({bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0}, extra)));
+// Pointer events, as a real browser sends them: OrbitControls cancels pointerdown, which suppresses
+// the compatibility mousedown/mouseup/mousemove, so the renderer must listen for the pointer ones.
+// (mouseleave is not suppressed and stays a MouseEvent.)
+const mev = (type, el, x, y, extra) => {
+  const t = type === 'mouseleave' ? type : type.replace('mouse', 'pointer');
+  const Ev = t.startsWith('pointer') ? PointerEvent : MouseEvent;
+  return el.dispatchEvent(new Ev(t, Object.assign({bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, pointerType: 'mouse'}, extra)));
+};
 TESTS.push({name: 'picking the screen centre returns the tile under it', fn: () => {
   fogOff(); R3D.centerOn(10, 10);
   const h = R3D.hexAtScreen(cx(), cy());
@@ -2241,6 +2247,75 @@ TESTS.push({name: 'an effect needs BOTH ends in sight: nothing is drawn from or 
     assert(framesDiffer(dark, empty) === 0, 'an effect still shows over hidden ground: ' + framesDiffer(dark, empty) + ' px');
     FOGM.state[i] = was; R3D.refreshFog();
   } finally { drain(); fogOff(); R3D.syncState(); }
+}});
+
+// ── Task 14: zoom and camera-change notification (the page's zoom buttons and minimap rely on these) ──
+TESTS.push({name: 'zoomBy dollies the view: x2 halves the span, x0.5 restores it, limits hold', fn: () => {
+  __r3d.setCameraDistance(20); const s0 = R3D.getCameraView().span;
+  R3D.zoomBy(2); const s1 = R3D.getCameraView().span;
+  assert(Math.abs(s1 - s0 / 2) < s0 * 0.01, 'x2: ' + s0 + ' -> ' + s1);
+  R3D.zoomBy(0.5); const s2 = R3D.getCameraView().span;
+  assert(Math.abs(s2 - s0) < s0 * 0.01, 'x0.5 did not restore: ' + s2);
+  const c = __r3d.controls();
+  R3D.zoomBy(1e6); assert(c.object.position.distanceTo(c.target) >= c.minDistance - 1e-6, 'zoomed through minDistance');
+  R3D.zoomBy(1e-6); assert(c.object.position.distanceTo(c.target) <= c.maxDistance + 1e-6, 'zoomed past maxDistance');
+  const before = R3D.getCameraView().span;
+  for (const bad of [0, -1, NaN, Infinity, 'x', undefined]) R3D.zoomBy(bad);
+  assert(R3D.getCameraView().span === before, 'a bad factor moved the camera');
+  __r3d.setCameraDistance(20);
+}});
+TESTS.push({name: 'onCameraChange fires when the view moves or zooms and is quiet when it does not', fn: () => {
+  const seen = [];
+  assert(R3D.init({canvas: testCanvas, getState: () => fixture, fogAt: harnessFogAt, onCameraChange: (v) => seen.push(v)}) === true);
+  try {
+    let t = performance.now();
+    const frame = () => { t += 20; R3D.requestRender(); __r3d.step(t); };
+    frame(); const n0 = seen.length;                        // first frame reports the initial view
+    frame(); frame();
+    assert(seen.length === n0, 'fired with nothing moving');
+    R3D.centerOn(4, 4); frame();
+    assert(seen.length === n0 + 1, 'no notification after centerOn');
+    const moved = seen[seen.length - 1];
+    assert(Math.abs(moved.x - R3DCore.hexCenter(4, 4).x) < 0.5, 'reported x is not the new centre: ' + moved.x);
+    R3D.zoomBy(1.5); frame();
+    assert(seen.length === n0 + 2 && seen[seen.length - 1].span < moved.span, 'no notification, or wrong span, after zoomBy');
+  } finally { R3D.init({canvas: testCanvas, getState: () => fixture, fogAt: harnessFogAt}); R3D.syncState(); }
+}});
+
+// ── Task 14: quality settings (the page's Quality menu drives R3D.setQuality) ──
+TESTS.push({name: 'setQuality: shadows off drops the whole shadow pipeline and back on restores it', fn: () => {
+  try {
+    R3D.setQuality({shadows: false});
+    assert(__r3d.shadowsEnabled() === false, 'shadows still enabled');
+    R3D.setQuality({shadows: true});
+    assert(__r3d.shadowsEnabled() === true, 'shadows did not come back');
+  } finally { R3D.setQuality({shadows: true, props: true, fullRes: false}); }
+}});
+TESTS.push({name: 'setQuality: props off hides only decorative scatter, and a scenery rebuild keeps it hidden', fn: () => {
+  try {
+    assert(__r3d.decorMeshCount() > 0 && __r3d.propsVisible(), 'precondition: decorative props exist and are shown');
+    const all = __r3d.sceneryMeshCount();
+    R3D.setQuality({props: false});
+    assert(__r3d.propsVisible() === false, 'props still visible');
+    assert(__r3d.sceneryMeshCount() === all && all > __r3d.decorMeshCount(), 'non-decorative scenery went with the props');
+    R3D.rebuildTile(LM.HILL.q, LM.HILL.r);
+    assert(__r3d.propsVisible() === false, 'a scenery rebuild brought the props back');
+    R3D.setQuality({props: true});
+    assert(__r3d.propsVisible() === true, 'props did not come back');
+  } finally { R3D.setQuality({shadows: true, props: true, fullRes: false}); }
+}});
+TESTS.push({name: 'setQuality: fullRes raises the pixel ratio (capped at 2) and off returns to 1', fn: () => {
+  const had = Object.getOwnPropertyDescriptor(window, 'devicePixelRatio');
+  try {
+    Object.defineProperty(window, 'devicePixelRatio', {value: 3, configurable: true});
+    R3D.setQuality({fullRes: true});
+    assert(__r3d.pixelRatio() === 2, 'ratio ' + __r3d.pixelRatio());
+    R3D.setQuality({fullRes: false});
+    assert(__r3d.pixelRatio() === 1, 'ratio ' + __r3d.pixelRatio());
+  } finally {
+    if (had) Object.defineProperty(window, 'devicePixelRatio', had); else delete window.devicePixelRatio;
+    R3D.setQuality({shadows: true, props: true, fullRes: false});
+  }
 }});
 
 async function runAll() {

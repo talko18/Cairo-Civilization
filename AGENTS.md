@@ -8,7 +8,7 @@ Cairo Civ is a **Civilization VI-inspired turn-based strategy game** built as a 
 - **Smart contract:** Cairo 2.15.0 / Scarb / snforge (StarkNet Foundry v0.56.0)
 - **Local devnet:** Katana (from Dojo/Starknet Foundry)
 - **Frontend server:** Node.js + Express (`starknet.js` v6.23.1 for RPC)
-- **Frontend UI:** Single-file HTML5 Canvas app (`ui/index.html`, ~3,430 lines) + scenario replay (`ui/scenarios.js`, ~510 lines)
+- **Frontend UI:** Single-file DOM app (`ui/index.html`) with a three.js r128 map renderer (`ui/render3d.js` + `ui/render3d-core.js`, loaded from cdnjs/jsDelivr) + scenario replay (`ui/scenarios.js`)
 
 ---
 
@@ -203,10 +203,13 @@ Single-file HTML/CSS/JS app (~3,430 lines) with two main screens: a **lobby** an
 
 **Game state:** Stored in global `G` object (mirrors server JSON). Tile index in `tileIdx` for O(1) lookup.
 
-**Camera system:**
-- `camX, camY` — screen-space offset
-- `zoom` — scale factor (default 1.8, range 0.6–3.5)
-- Arrow keys pan, scroll wheel zooms (centered on cursor), +/- keys zoom center
+**Map renderer (`ui/render3d.js`):** the map is a 3D scene; `index.html` only talks to it through `R3D.*` and never lets it write `G`.
+- `syncMap3d()` / `resyncMap()` after game state changes, `redrawMap()` after selection or action-mode changes (it pushes `R3D.setSelection` / `setYieldTiles`), `R3D.rebuildTile(q, r)` when ONE tile's terrain changed (it reindexes all tiles: never in a loop), `R3D.rebuildMap()` otherwise. `refreshState()` rebuilds the map only when the terrain signature changed.
+- Yield rules and production costs live once, in `render3d-core.js` (`R3DCore.tileYield`, `R3DCore.PROD_ITEM_COST`).
+- If WebGL or the CDN scripts are unavailable, `#map-fallback` explains it; every `R3D.*` call is a safe no-op.
+- Graphics quality (shadows, small props, full resolution) is the **Quality** menu in the top bar, remembered in `localStorage`.
+
+**Camera system:** owned by the renderer. Drag pans, right-drag rotates, wheel zooms, arrow keys pan (WASD is deliberately off: A is attack, S is skip), +/- keys and the zoom buttons call `R3D.zoomBy`. `onCameraChange` keeps the minimap rectangle and the zoom label current. Input uses pointer events (OrbitControls cancels `pointerdown`, which suppresses `mousedown`/`mouseup`/`mousemove` in a real browser).
 
 **Client-side action validation:**
 - `validateAction(action)` mirrors contract `act_*` validation rules in JavaScript. Returns `{valid, reason}`.
@@ -226,13 +229,10 @@ Single-file HTML/CSS/JS app (~3,430 lines) with two main screens: a **lobby** an
 - When all players have submitted, the contract resolves the round and `refreshState()` loads the new turn state.
 - "Submit Turn" button label (E key shortcut) triggers `endTurn()`.
 
-**Animation system:**
-- `activeAnimations[]` — array of animation objects with `{type, startTime, duration, ...params}`
-- `animLoop(now)` — requestAnimationFrame loop, redraws map each frame, removes completed anims
-- Animation types: `unitWalk` (bobbing slide), `meleeCharge` (3-phase charge→clash→recoil), `archerFire` + `projectile` (arrow arc), `clashSparks`, `unitShake`, `rangedImpact`, `screenFlash`, `floatingText`, `dustParticle`, `cityFound`
-- `animT(anim, now)` returns progress 0–1, supports `delay` property
+**Animations:** created in `applyOptimistic` and `showTurnReport` as `R3D.playAnimation({type, q, r, toQ, toR, player, unitId, delay, duration, ...})` in **hex** coordinates, after the new state has been synced (the renderer ignores effects unless both ends are on visible ground).
+- Types: `unitWalk` (bobbing slide), `meleeCharge` (3-phase charge→clash→recoil), `archerFire` + `projectile` (arrow arc), `clashSparks`, `unitShake`, `rangedImpact`, `screenFlash`, `floatingText`, `dustParticle`, `cityFound`
 
-**Minimap:** Bottom-right, 192x120 canvas. Click to pan. Shows terrain, territory, cities, units, viewport rectangle.
+**Minimap:** Bottom-right, 192x120 flat 2D canvas (`drawMinimap`). Click to pan. Shows terrain, territory, cities, units, and the 3D camera's viewport rectangle.
 
 **Key keyboard shortcuts:** M=Move, A=Attack, R=Ranged, F=Fortify, S=Skip, B=Found City, T=Tech, P=Production, E=Submit Turn, Tab=Next Unit, Arrows=Pan, +/-=Zoom, Esc=Cancel
 
@@ -363,7 +363,7 @@ Test files:
 
 7. **No save/load:** Game state lives only in Katana memory. Restarting Katana loses the game.
 
-8. **Tile `pixelToHex` brute-force:** Iterates all 640 tiles per mouse move. Fine for 32x20 but would need optimization for larger maps.
+8. **Software WebGL is slow:** headless or GPU-less browsers render the 3D map at a few frames per second. The test pages (`ui/test/harness.html`, `ui/test/game-page.html`) need minutes; `node test/run-browser.mjs` has a 90 s deadline that yields an empty result under load.
 
 9. **No turn timer:** The design docs describe a 5-minute turn timer with `claim_timeout`, but this is not implemented. Adding it risks leaving the game in an unrecoverable state if a player disconnects (no one can claim timeout in hotseat mode). Deferred to multiplayer phase.
 

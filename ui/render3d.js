@@ -436,7 +436,17 @@
       meshes.push(m);
     }
     S.scenery = meshes;
+    applyPropsQuality();
     if (S.sceneryHide) applyFogToScenery();
+  }
+
+  // The quality menu's "props" switch: decorative ground scatter only (grass
+  // tufts, rocks). Features, resources, improvements, mountains and cities are
+  // game information and are never hidden by it.
+  const DECOR_SHAPES = new Set(['tuft', 'rock']);
+  function applyPropsQuality() {
+    if (!S) return;
+    for (const m of S.scenery) m.visible = S.quality.props !== false || !DECOR_SHAPES.has(m.userData.shape);
   }
 
   // tileList[i] is the tile index (r * cols + q) instance i stands on. The
@@ -1020,6 +1030,7 @@
       fogAt: opts.fogAt || (() => C.FOG.UNSEEN),
       onTileClick: opts.onTileClick || null,
       onTileHover: opts.onTileHover || null,
+      onCameraChange: opts.onCameraChange || null, lastView: null,
       keys: new Set(), wasd: opts.wasd === true, keyT: 0, drag: null, hoverHex: null, input: null,
       needsRender: true, frames: 0, raf: 0, fly: null, anims: [], hoverTile: null, fx: null, fxCount: 0, flashNext: 0, fxT: null,
       labelRoot: opts.labels || document.getElementById('labels') || null, amenityOf: opts.amenityOf || null,
@@ -1085,9 +1096,33 @@
       S.renderer.render(S.scene, S.camera);
       S.frames++;
       positionLabels();
+      notifyCamera();
       return true;
     }
     return false;
+  }
+
+  // Tell the page when the view (centre or zoom) actually moved, once per drawn
+  // frame at most. The page keeps its minimap rectangle and zoom label on it,
+  // so a wheel turn, a drag, a key pan, a fly-to and a resize all reach it
+  // through this one path.
+  function notifyCamera() {
+    if (!S.onCameraChange) return;
+    const v = getCameraView(), l = S.lastView;
+    if (l && l.x === v.x && l.z === v.z && l.span === v.span) return;
+    S.lastView = v;
+    fire(S.onCameraChange, v);
+  }
+
+  // Dolly toward (factor > 1) or away from (factor < 1) the point the camera
+  // looks at, inside the same distance limits the wheel obeys.
+  function zoomBy(factor) {
+    if (!S || !Number.isFinite(factor) || factor <= 0) return;
+    const t = S.controls.target, off = S.camera.position.clone().sub(t);
+    const d = Math.min(S.controls.maxDistance, Math.max(S.controls.minDistance, off.length() / factor));
+    off.setLength(d);
+    S.camera.position.copy(t).add(off);
+    S.needsRender = true;
   }
 
   // Shift target and camera together so the view keeps its shape.
@@ -1225,11 +1260,15 @@
   function bindInput(area) {
     const I = S.input = { area, on: [] };
     const add = (target, type, fn, opt) => { target.addEventListener(type, fn, opt); I.on.push([target, type, fn, opt]); };
-    add(area, 'mousedown', (e) => {
+    // POINTER events, not mouse events. OrbitControls cancels pointerdown, and a
+    // cancelled pointerdown suppresses the browser's compatibility mousedown /
+    // mouseup / mousemove for the whole gesture, so listening for those would
+    // never see a click or a drag in a real browser.
+    add(area, 'pointerdown', (e) => {
       if (e.button !== 0) return;
       S.drag = { x: e.clientX, y: e.clientY, moved: false };
     });
-    add(window, 'mousemove', (e) => {
+    add(window, 'pointermove', (e) => {
       if (S.drag) {
         if (Math.abs(e.clientX - S.drag.x) + Math.abs(e.clientY - S.drag.y) > DRAG_PX) S.drag.moved = true;
         return;
@@ -1242,13 +1281,14 @@
       fire(S.onTileHover, hex, factsAt(hex.q, hex.r), { x: e.clientX, y: e.clientY });
     });
     add(area, 'mouseleave', () => { hoverOff(); });
-    add(window, 'mouseup', (e) => {
+    add(window, 'pointerup', (e) => {
       if (e.button !== 0) return;     // another button's release is not the end of this gesture
       const d = S.drag; S.drag = null;
       if (!d || d.moved) return;
       const hex = pickHex(e.clientX, e.clientY);
       if (hex) fire(S.onTileClick, hex);
     });
+    add(window, 'pointercancel', () => { S.drag = null; });
     // Arrows pan. WASD is opt-in: the game binds A (attack) and S (skip).
     const KEYS = { ArrowUp: 'f', ArrowDown: 'b', ArrowLeft: 'l', ArrowRight: 'r' };
     if (S.wasd) Object.assign(KEYS, { w: 'f', s: 'b', a: 'l', d: 'r', W: 'f', S: 'b', A: 'l', D: 'r' });
@@ -1302,6 +1342,7 @@
     Object.assign(S.quality, q);
     S.renderer.shadowMap.enabled = !!S.quality.shadows;
     S.sun.castShadow = !!S.quality.shadows;
+    applyPropsQuality();
     S.scene.traverse((o) => { if (o.material) [].concat(o.material).forEach((m) => { m.needsUpdate = true; }); });
     resize();
   }
@@ -1890,22 +1931,7 @@
   const LABEL_FAR_UNITS = 32, LABEL_FAR_YIELDS = 26;     // camera distance past which they would only clutter
   const LBL_UNIT_NAMES = ['Settler', 'Builder', 'Scout', 'Warrior', 'Slinger', 'Archer'];
   const AMENITY_CLS = ['ecstatic', 'happy', 'content', 'displeased', 'unhappy', 'unrest'];
-  const PROD_COST = { 1: 80, 2: 50, 3: 30, 4: 40, 5: 35, 6: 60, 64: 60, 65: 65, 66: 80, 67: 90, 68: 100, 69: 90, 70: 80, 71: 150 };
-  // Mirrors computeTileYield / computeCityCenterYield in index.html.
-  function yieldOfFacts(f, isCenter) {
-    const t = f.terrain;
-    let food = [1, 1, 2, 2, 1, 1, 0, 0, 1, 1, 0, 0, 0][t] || 0, prod = [0, 0, 0, 1, 1, 2, 0, 1, 0, 1, 0, 1, 0][t] || 0, gold = t === 1 ? 1 : 0;
-    if (f.feature === 1) prod += 1;
-    const res = f.resource;
-    if (res === 1 || res === 2 || res === 3 || res === 5) food += 1;
-    else if (res === 4 || res === 7 || res === 6) prod += 1;
-    else if (res === 8) gold += 3;
-    else if (res === 9 || res === 10) gold += 2;
-    const imp = f.improvement | 0;
-    if (imp === 1) food += 1; else if (imp >= 2 && imp <= 5) prod += 1;
-    if (isCenter) { if (food < 2) food = 2; if (prod < 1) prod = 1; }
-    return { food, prod, gold };
-  }
+  const yieldOfFacts = C.tileYield, PROD_COST = C.PROD_ITEM_COST;   // one copy, in render3d-core.js
   const hpColor = (pct) => (pct > 0.5 ? '#66bb6a' : pct > 0.25 ? '#ff9800' : '#e74c3c');
 
   function mkEl(tag, cls, parent) { const e = document.createElement(tag); e.className = cls; if (parent) parent.appendChild(e); return e; }
@@ -2337,7 +2363,7 @@
   // not enough — a leak needs both to fail.
   window.R3D = { init, rebuildMap, rebuildTile, syncState, setYieldTiles, setSelection, setHover, playAnimation, registerFogHideable, applyFogToScenery,
     refreshFog, fogAt: (q, r) => (S ? fogStateAt(q, r) : C.FOG.UNSEEN), panToHex, centerOn,
-    hexAtScreen: pickHex, getCameraView, setQuality, resize, requestRender, dispose };
+    hexAtScreen: pickHex, getCameraView, zoomBy, setQuality, resize, requestRender, dispose };
 
   window.__r3d = {
     drawCalls: () => (S ? S.renderer.info.render.calls : 0),
@@ -2429,6 +2455,12 @@
     hasResourceArt: (res) => !!RESOURCE_ART[res] && !!(S && S.sceneryGeo[RESOURCE_ART[res].shape]) && RES_SHAPES.has(RESOURCE_ART[res].shape),
     hasImprovementArt: (imp) => !!IMPROVEMENT_ART[imp] && IMPROVEMENT_ART[imp].every((sh) => !!(S && S.sceneryGeo[sh])),
     sceneryMeshCount: () => (S ? S.scenery.length : 0),
+    // true while ANY part of the shadow pipeline is still on: off means the map renderer and the sun are both off
+    shadowsEnabled: () => !!S && (S.renderer.shadowMap.enabled || S.sun.castShadow),
+    // true when every decorative-prop mesh is drawn; false when any is hidden
+    propsVisible: () => { const d = S ? S.scenery.filter((m) => DECOR_SHAPES.has(m.userData.shape)) : []; return d.length > 0 && d.every((m) => m.visible); },
+    decorMeshCount: () => (S ? S.scenery.filter((m) => DECOR_SHAPES.has(m.userData.shape)).length : 0),
+    pixelRatio: () => (S ? S.renderer.getPixelRatio() : 0),
     instanceCount: () => { let n = 0; if (S) for (const m of S.scenery) n += m.count; return n; },
     instancesWithoutTile: () => {
       let bad = 0;

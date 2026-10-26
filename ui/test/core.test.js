@@ -277,3 +277,52 @@ test('a city tile is flattened to a fifth of its elevation', () => {
   // without the flag nothing changes
   assert.strictEqual(C.heightAt({...t, hasCity: false}, x, z), C.heightAt(t, x, z));
 });
+
+// ---- Shared game rules: one copy ----
+const fs = require('node:fs');
+const read = (f) => fs.readFileSync(require('node:path').join(__dirname, '..', f), 'utf8');
+
+test('tileYield applies terrain, feature, resource and improvement', () => {
+  const y = (o, c) => C.tileYield(Object.assign({terrain: 2, feature: 0, resource: 0, improvement: 0}, o), c);
+  assert.deepStrictEqual(y({}), {food: 2, prod: 0, gold: 0});                      // grassland
+  assert.deepStrictEqual(y({terrain: 1}), {food: 1, prod: 0, gold: 1});            // coast
+  assert.deepStrictEqual(y({terrain: 5}), {food: 1, prod: 2, gold: 0});            // plains hills
+  assert.deepStrictEqual(y({feature: 1}), {food: 2, prod: 1, gold: 0});            // woods
+  assert.deepStrictEqual(y({resource: 1}), {food: 3, prod: 0, gold: 0});           // wheat
+  assert.deepStrictEqual(y({resource: 6}), {food: 2, prod: 1, gold: 0});           // horses
+  assert.deepStrictEqual(y({resource: 8}), {food: 2, prod: 0, gold: 3});           // silver
+  assert.deepStrictEqual(y({resource: 10}), {food: 2, prod: 0, gold: 2});          // dyes
+  assert.deepStrictEqual(y({improvement: 1}), {food: 3, prod: 0, gold: 0});        // farm
+  assert.deepStrictEqual(y({improvement: 5}), {food: 2, prod: 1, gold: 0});        // lumber mill
+  assert.deepStrictEqual(y({terrain: 12}), {food: 0, prod: 0, gold: 0});           // mountain
+});
+
+test('a city centre never yields under 2 food and 1 production', () => {
+  const m = {terrain: 12, feature: 0, resource: 0, improvement: 0};
+  assert.deepStrictEqual(C.tileYield(m, false), {food: 0, prod: 0, gold: 0});
+  assert.deepStrictEqual(C.tileYield(m, true), {food: 2, prod: 1, gold: 0});
+  const g = {terrain: 3, feature: 0, resource: 1, improvement: 0};
+  assert.deepStrictEqual(C.tileYield(g, true), C.tileYield(g, false));             // already above the floor
+});
+
+test('production costs are the contract costs', () => {
+  assert.deepStrictEqual(C.PROD_ITEM_COST, {1: 80, 2: 50, 3: 30, 4: 40, 5: 35, 6: 60,
+    64: 60, 65: 65, 66: 80, 67: 90, 68: 100, 69: 90, 70: 80, 71: 150});
+});
+
+test('index.html and render3d.js carry no private copy of the yield rules', () => {
+  const page = read('index.html'), r3d = read('render3d.js');
+  assert.ok(/R3DCore\.tileYield/.test(page), 'index.html must call R3DCore.tileYield');
+  assert.ok(/R3DCore\.PROD_ITEM_COST/.test(page), 'index.html must read R3DCore.PROD_ITEM_COST');
+  assert.ok(!/const PROD_ITEM_COST\s*=\s*\{/.test(page), 'index.html defines its own cost table');
+  assert.ok(!/const FOOD\s*=/.test(page), 'index.html defines its own food table');
+  assert.ok(!/PROD_COST\s*=\s*\{/.test(r3d), 'render3d.js defines its own cost table');
+  assert.ok(!/function yieldOfFacts/.test(r3d), 'render3d.js defines its own yield function');
+});
+
+test('locked-tile highlight is blue and auto-worked is green, as on the 2D map', () => {
+  const blue = (h) => (h & 0xff) > ((h >> 8) & 0xff) && (h & 0xff) > ((h >> 16) & 0xff);
+  const green = (h) => ((h >> 8) & 0xff) > ((h >> 16) & 0xff) && ((h >> 8) & 0xff) > (h & 0xff);
+  assert.ok(blue(C.OV.lock), 'lock colour 0x' + C.OV.lock.toString(16) + ' is not blue');
+  assert.ok(green(C.OV.work), 'work colour 0x' + C.OV.work.toString(16) + ' is not green');
+});

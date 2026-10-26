@@ -230,7 +230,7 @@
 
   // ---- Overlays and camera ----
   const OV = { move: 0x4fc3f7, atk: 0xe53935, rng: 0xff9800, work: 0x66bb6a,
-    lock: 0xfdd835, dim: 0x000000, hover: 0xffffff };
+    lock: 0x3498db, dim: 0x000000, hover: 0xffffff };
 
   // One entry per tile, highest-priority category wins. Every tile passes
   // through fogAt: lighting an unexplored tile would reveal that ground exists.
@@ -259,7 +259,35 @@
     return { x: Math.min(maxX + M, Math.max(-M, x)), z: Math.min(maxZ + M, Math.max(-M, z)) };
   }
 
-  const api = { hexCenter, hexCorner, neighbor, hexDist, worldToHex,
+  // ---- Game constants shared with the page ----
+  // The single copy of the tile-yield rules and production costs. index.html
+  // and render3d.js both read these, so the pills on the map and the numbers
+  // in the tooltip cannot drift apart. Mirrors city.cairo / constants.cairo.
+  const PROD_ITEM_COST = {
+    1: 80, 2: 50, 3: 30, 4: 40, 5: 35, 6: 60,
+    64: 60, 65: 65, 66: 80, 67: 90, 68: 100, 69: 90, 70: 80, 71: 150,
+  };
+  const FOOD_BY_TERRAIN = [1, 1, 2, 2, 1, 1, 0, 0, 1, 1, 0, 0, 0];   // Ocean..Mountain
+  const PROD_BY_TERRAIN = [0, 0, 0, 1, 1, 2, 0, 1, 0, 1, 0, 1, 0];
+  const GOLD_BY_TERRAIN = [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  // Works on a tile or on the facts the fog gate returns: both carry terrain,
+  // feature, resource and improvement. isCenter applies the city-centre floor.
+  function tileYield(f, isCenter) {
+    const t = f.terrain;
+    let food = FOOD_BY_TERRAIN[t] || 0, prod = PROD_BY_TERRAIN[t] || 0, gold = GOLD_BY_TERRAIN[t] || 0;
+    if (f.feature === 1) prod += 1;                                  // woods
+    const res = f.resource;
+    if (res === 1 || res === 2 || res === 3 || res === 5) food += 1; // wheat, rice, cattle, fish
+    else if (res === 4 || res === 7 || res === 6) prod += 1;         // stone, iron, horses
+    else if (res === 8) gold += 3;                                   // silver
+    else if (res === 9 || res === 10) gold += 2;                     // silk, dyes
+    const imp = f.improvement | 0;
+    if (imp === 1) food += 1; else if (imp >= 2 && imp <= 5) prod += 1;
+    if (isCenter) { if (food < 2) food = 2; if (prod < 1) prod = 1; }
+    return { food, prod, gold };
+  }
+
+  const api = { PROD_ITEM_COST, tileYield, hexCenter, hexCorner, neighbor, hexDist, worldToHex,
     tileBase, tileAmp, heightAt, colorAt, subdivisions, riverEdges,
     FOG, fogOf, tileFacts, OV, overlayList, clampTarget };
   if (typeof window !== 'undefined') window.R3DCore = api;
