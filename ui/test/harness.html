@@ -21,6 +21,8 @@ const LM = {
   RIVER:  {q: 10, r: 8, edges: [1, 2]},   // top + upper-left edges: NOT symmetric under the d..d+1 bug (reciprocated on neighbors)
   SEEN:   {q: 6,  r: 5},                  // within sight of player 0
   UNSEEN: {q: 28, r: 3},                  // far from every player-0 city/unit
+  FOG_SEEN:       {q: 5,  r: 6},          // in sight AND carrying props (SEEN is a city tile, which has none)
+  FOG_REMEMBERED: {q: 6,  r: 9},          // explored but out of sight: 3 hexes from the nearest unit
   CITY_A: {q: 6,  r: 5, name: 'Alpha', player: 0},
   CITY_B: {q: 25, r: 14, name: 'Beta', player: 1},
   CITY_HILLS: {q: 15, r: 12, name: 'Gamma', player: 0},   // a city on hills: flattening must show here
@@ -132,13 +134,64 @@ TESTS.push({name: 'fixture landmarks have their stated properties', fn: () => {
 const fixture = FIXTURE;
 const wait = (ms) => new Promise(res => setTimeout(res, ms));
 const assert = (c, m) => { if (!c) throw new Error(m || 'assertion failed'); };
+
+// ── Fog model (harness-owned) ──
+// Tiles carry no fog fields: the game keeps two Sets of tile indices and hands
+// the renderer a fogAt(q, r) lookup, so the harness stands in for those Sets.
+// It is OFF (everything visible) for every Task 5-7 assertion — those predate
+// fog and several of them require that nothing is hidden — and the Task 8
+// block switches it on through fogOn().
+const FOGM = {on: false, state: new Int8Array(COLS * ROWS)};
+(function buildFogModel() {
+  const src = FIXTURE.players[0].units.concat(FIXTURE.players[0].cities);
+  for (let r = 0; r < ROWS; r++) for (let q = 0; q < COLS; q++) {
+    const d = Math.min(...src.map(s => R3DCore.hexDist(q, r, s.q, s.r)));
+    FOGM.state[r * COLS + q] = R3DCore.fogOf(d <= 5, d <= 2, true);
+  }
+})();
+const harnessFogAt = (q, r) => (FOGM.on ? FOGM.state[r * COLS + q] : R3DCore.FOG.VISIBLE);
+const fogOn = () => { FOGM.on = true; R3D.refreshFog(); };
+// Every tile unexplored for the duration of fn: the pixel assertions need a
+// frame in which anything lit at all is a leak.
+const allFog = (fn) => {
+  const saved = FOGM.state.slice(), wasOn = FOGM.on;
+  FOGM.state.fill(R3DCore.FOG.UNSEEN); FOGM.on = true;
+  R3D.refreshFog();
+  try { return fn(); } finally { FOGM.state.set(saved); FOGM.on = wasOn; R3D.refreshFog(); }
+};
+// How many pixels of the drawn frame change when the ground is taken away.
+// This is the fog's whole job stated literally — if the fog hides the ground,
+// removing the ground changes nothing — and unlike a brightness threshold it
+// cannot be fooled by a cliff that happens to be in shadow (the first version
+// of this check was, and counted zero on a leak that was plainly visible).
+const FRAME = {x: 0, y: 0, w: 800, h: 500};
+// The ground is taken away by turning off its COLOUR only (it still writes
+// depth). Deleting it outright also removes the depth test that culls the
+// shell's far-side faces, and the shell is a stack of 99.5%-opaque layers
+// whose last-drawn face wins, so the frame changes for reasons unrelated to
+// whether the ground shows (that false alarm is what failed two views).
+const groundPixels = () => {
+  const a = __r3d.renderAndSample(FRAME.x, FRAME.y, FRAME.w, FRAME.h);
+  __r3d.setTerrainVisible(false);
+  const b = __r3d.renderAndSample(FRAME.x, FRAME.y, FRAME.w, FRAME.h);
+  __r3d.setTerrainVisible(true);
+  let n = 0, worst = null;
+  for (let i = 0; i < a.length; i += 4) {
+    const d = Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]);
+    if (d <= 8) continue;              // ignore dithering on the 0.5% the fog lets through
+    n++;
+    if (!worst || d > worst.d) worst = {d, ground: [a[i], a[i + 1], a[i + 2]], without: [b[i], b[i + 1], b[i + 2]],
+      at: [(i / 4) % FRAME.w, Math.floor((i / 4) / FRAME.w)]};
+  }
+  return {n, worst, total: FRAME.w * FRAME.h};
+};
 const testCanvas = document.createElement('canvas');
 testCanvas.width = 800; testCanvas.height = 500;
 document.body.appendChild(testCanvas);
 
 // ── Task 5: renderer bootstrap ──
 TESTS.push({name: 'init succeeds with WebGL', fn: () =>
-  assert(R3D.init({canvas: testCanvas, getState: () => fixture, fogAt: () => 2}) === true)});
+  assert(R3D.init({canvas: testCanvas, getState: () => fixture, fogAt: harnessFogAt}) === true)});
 TESTS.push({name: 'init returns false without WebGL', fn: () => {
   const dead = document.createElement('canvas');
   dead.getContext = () => null;
@@ -378,6 +431,243 @@ TESTS.push({name: 'scenery adds a few dozen draw calls, not thousands', fn: asyn
   R3D.centerOn(16, 10); __r3d.setCameraDistance(14); R3D.requestRender(); await wait(200);
   assert(__r3d.sceneryMeshCount() > 10 && __r3d.sceneryMeshCount() < 150, 'meshes ' + __r3d.sceneryMeshCount());
   assert(__r3d.drawCalls() < 300, 'draw calls ' + __r3d.drawCalls());
+}});
+
+// ── Task 8: fog of war ──
+// Shape assertions read the shell's base buffer, so they hold whether or not
+// the tile is currently fogged; state assertions switch the model on first.
+TESTS.push({name: 'the fog landmarks are what the fog tests assume', fn: () => {
+  const F = R3DCore.FOG, at = (p) => FOGM.state[p.r * COLS + p.q];
+  assert(at(LM.FOG_SEEN) === F.VISIBLE, 'FOG_SEEN is not in sight: ' + at(LM.FOG_SEEN));
+  assert(at(LM.FOG_REMEMBERED) === F.REMEMBERED, 'FOG_REMEMBERED is not remembered: ' + at(LM.FOG_REMEMBERED));
+  assert(at(LM.UNSEEN) === F.UNSEEN, 'UNSEEN is not unexplored: ' + at(LM.UNSEEN));
+  assert(__r3d.instancesOnTile(LM.UNSEEN.q, LM.UNSEEN.r) > 0, 'UNSEEN carries no props, so hiding them would prove nothing');
+  assert(__r3d.instancesOnTile(LM.FOG_SEEN.q, LM.FOG_SEEN.r) > 0, 'FOG_SEEN carries no props');
+}});
+TESTS.push({name: 'the fog shell is built from the same triangles as the ground', fn: () => {
+  for (const k of ['HILL', 'OCEAN', 'COAST', 'WOODS', 'MOUNTAIN', 'FOG_SEEN']) {
+    const p = LM[k], N = R3DCore.subdivisions(tileOf(p)), got = __r3d.fogShellTopTriangles(p.q, p.r);
+    assert(got === 6 * N * N, k + ': shell has ' + got + ' top triangles, the ground has ' + (6 * N * N));
+  }
+}});
+TESTS.push({name: 'every shell vertex sits just above the surface it covers', fn: () => {
+  const lift = [];
+  for (const k of ['HILL', 'WOODS', 'MOUNTAIN', 'CITY_HILLS', 'OCEAN', 'COAST']) {
+    const p = LM[k], tile = Object.assign({}, tileOf(p), k === 'CITY_HILLS' ? {hasCity: true} : {});
+    const verts = __r3d.fogShellVertices(p.q, p.r, 'top');
+    assert(verts.length > 20, k + ': shell has ' + verts.length + ' top vertices');
+    for (const v of verts) {
+      let g = R3DCore.heightAt(tile, v[0], v[2]);
+      if (tile.terrain <= 1) g = Math.max(g, __r3d.waterLevel() + 0.038);   // highest wave crest
+      const d = v[1] - g;
+      assert(d > 0 && d < 0.08, k + ': shell vertex sits ' + d.toFixed(3) + ' above its surface');
+      lift.push(d);
+    }
+  }
+  // One constant lift everywhere: a shell that merely drifts near the ground fails here.
+  assert(Math.max(...lift) - Math.min(...lift) < 1e-4, 'shell lift is not constant');
+}});
+TESTS.push({name: 'the fog shell follows terrain height, not a flat plane', fn: () => {
+  const h = LM.HILL, base = __r3d.tileInfo(h.q, h.r).base, y = __r3d.fogShellHeightAt(h.q, h.r, 'centre');
+  assert(y > base + 0.1, 'shell must rise over the hill: ' + y + ' vs base ' + base);
+}});
+TESTS.push({name: 'the shell rides above water, not on the seabed', fn: () => {
+  const o = LM.OCEAN, y = __r3d.fogShellHeightAt(o.q, o.r, 'centre');
+  assert(y > __r3d.waterLevel(), 'shell centre ' + y + ' vs water ' + __r3d.waterLevel());
+  for (const k of ['OCEAN', 'COAST', 'FISH']) {
+    const p = LM[k];
+    for (const v of __r3d.fogShellVertices(p.q, p.r, 'top'))
+      assert(v[1] > __r3d.waterLevel() + 0.038, k + ': shell vertex at y ' + v[1].toFixed(3) + ' is under the wave crest');
+  }
+}});
+TESTS.push({name: 'the shell has a skirt closing the gap at its rim', fn: () => {
+  const c = LM.COAST;
+  assert(__r3d.fogShellMinY(c.q, c.r) < __r3d.tileInfo(c.q, c.r).base,
+    'no skirt at the coast: min y ' + __r3d.fogShellMinY(c.q, c.r));
+  for (const k of ['COAST', 'HILL', 'OCEAN']) {
+    const p = LM[k], top = __r3d.fogShellVertices(p.q, p.r, 'top');
+    const drop = Math.min.apply(null, top.map(v => v[1])) - __r3d.fogShellMinY(p.q, p.r);
+    assert(drop > 0.5, k + ': skirt hangs only ' + drop.toFixed(3) + ' below the rim');
+  }
+}});
+TESTS.push({name: 'each fog layer covers exactly the tiles in its own state', fn: () => {
+  fogOn();
+  const F = R3DCore.FOG;
+  for (const [p, want] of [[LM.FOG_SEEN, F.VISIBLE], [LM.FOG_REMEMBERED, F.REMEMBERED], [LM.UNSEEN, F.UNSEEN]]) {
+    const where = p.q + ',' + p.r;
+    assert(__r3d.fogOf(p.q, p.r) === want, 'fog state at ' + where + ': ' + __r3d.fogOf(p.q, p.r));
+    assert(__r3d.fogShellState('remembered', p.q, p.r) === (want === F.REMEMBERED ? 'live' : 'collapsed'),
+      'remembered shell at ' + where + ' is ' + __r3d.fogShellState('remembered', p.q, p.r));
+    assert(__r3d.fogShellState('unseen', p.q, p.r) === (want === F.UNSEEN ? 'live' : 'collapsed'),
+      'unseen shell at ' + where + ' is ' + __r3d.fogShellState('unseen', p.q, p.r));
+    assert(__r3d.fogShellCovers(p.q, p.r) === (want !== F.VISIBLE), 'fogShellCovers at ' + where);
+  }
+}});
+TESTS.push({name: 'a fog lookup the renderer cannot read fails closed', fn: () => {
+  fogOn();
+  const p = LM.FOG_SEEN, i = p.r * COLS + p.q, was = FOGM.state[i];
+  try {
+    FOGM.state[i] = 7;                       // neither 0, 1 nor 2
+    R3D.refreshFog();
+    assert(__r3d.fogOf(p.q, p.r) === R3DCore.FOG.UNSEEN, 'an unreadable fog value revealed the tile');
+    assert(__r3d.fogShellState('unseen', p.q, p.r) === 'live', 'nothing was drawn over it');
+  } finally { FOGM.state[i] = was; R3D.refreshFog(); }
+}});
+TESTS.push({name: 'unexplored tiles hide their scenery', fn: () => {
+  R3D.applyFogToScenery(() => false);     // drop whatever rule an earlier test left behind
+  fogOn();
+  assert(__r3d.visibleInstancesOn(LM.UNSEEN.q, LM.UNSEEN.r) === 0,
+    'unexplored props still standing: ' + __r3d.visibleInstancesOn(LM.UNSEEN.q, LM.UNSEEN.r));
+  assert(__r3d.visibleInstancesOn(LM.FOG_SEEN.q, LM.FOG_SEEN.r) > 0, 'fog hid props on ground in sight');
+  const m = LM.FOG_REMEMBERED;   // remembered ground keeps what was built on it
+  assert(__r3d.visibleInstancesOn(m.q, m.r) === __r3d.instancesOnTile(m.q, m.r), 'remembered ground lost its props');
+}});
+TESTS.push({name: 'exploring a tile brings its scenery back', fn: () => {
+  fogOn();
+  const p = LM.UNSEEN, i = p.r * COLS + p.q, was = FOGM.state[i];
+  try {
+    FOGM.state[i] = R3DCore.FOG.VISIBLE;
+    R3D.refreshFog();
+    assert(__r3d.visibleInstancesOn(p.q, p.r) === __r3d.instancesOnTile(p.q, p.r), 'props did not come back');
+  } finally { FOGM.state[i] = was; R3D.refreshFog(); }
+  assert(__r3d.visibleInstancesOn(p.q, p.r) === 0, 'props stayed up after the tile went dark again');
+}});
+TESTS.push({name: 'unexplored fog draws after every overlay', fn: () =>
+  assert(__r3d.renderOrderOf('fogUnseen') > __r3d.renderOrderOf('overlays'),
+    __r3d.renderOrderOf('fogUnseen') + ' vs ' + __r3d.renderOrderOf('overlays'))});
+TESTS.push({name: 'remembered fog draws before overlays so ranges stay readable', fn: () =>
+  assert(__r3d.renderOrderOf('fogRemembered') < __r3d.renderOrderOf('overlays'),
+    __r3d.renderOrderOf('fogRemembered') + ' vs ' + __r3d.renderOrderOf('overlays'))});
+TESTS.push({name: 'nothing drawable sits at or above the unexplored fog', fn: () =>
+  assert(__r3d.drawablesAtOrAboveUnseenFog() === 0,
+    __r3d.drawablesAtOrAboveUnseenFog() + ' objects draw over the fog')});
+TESTS.push({name: 'an overlay list built on the renderer fog gate never lights unexplored ground', fn: () => {
+  fogOn();
+  const sel = {kind: 'unit', q: LM.FOG_SEEN.q, r: LM.FOG_SEEN.r, attackTiles: [], rangedTiles: [],
+    moveTiles: [LM.FOG_SEEN, LM.FOG_REMEMBERED, LM.UNSEEN], workedTiles: [], lockedTiles: []};
+  const lit = R3DCore.overlayList(sel, R3D.fogAt);
+  assert(lit.length === 2, 'lit ' + lit.length + ' of 3 tiles');
+  assert(!lit.some(t => t.q === LM.UNSEEN.q && t.r === LM.UNSEEN.r), 'an overlay lit unexplored ground');
+}});
+TESTS.push({name: 'a fog change touches only tiles that changed', fn: () => {
+  fogOn();
+  const key = __r3d.fogGeometryKey(), before = __r3d.fogWrites();
+  const i = 7 * COLS + 7, was = FOGM.state[i];
+  assert(was === R3DCore.FOG.VISIBLE, 'precondition: (7,7) must start in sight');
+  FOGM.state[i] = R3DCore.FOG.REMEMBERED;          // one tile slips out of sight
+  try {
+    R3D.refreshFog();
+    assert(__r3d.fogWrites() - before === 1, 'wrote ' + (__r3d.fogWrites() - before) + ' tiles, expected 1');
+    assert(__r3d.fogShellState('remembered', 7, 7) === 'live', 'the remembered shell did not follow');
+    assert(__r3d.fogShellState('unseen', 7, 7) === 'collapsed', 'a tile is covered by both layers at once');
+    assert(__r3d.fogGeometryKey() === key, 'the fog geometry was rebuilt instead of rewritten');
+  } finally { FOGM.state[i] = was; R3D.refreshFog(); }
+  assert(__r3d.fogShellState('remembered', 7, 7) === 'collapsed', 'the shell did not lift again');
+}});
+TESTS.push({name: 'a terrain change carries the shell with the ground', fn: () => {
+  fogOn();
+  const q = 20, r = 12, orig = fixture.tiles;          // out of sight of player 0
+  const before = __r3d.fogShellHeightAt(q, r, 'centre');
+  const layer = __r3d.fogOf(q, r) === R3DCore.FOG.REMEMBERED ? 'remembered' : 'unseen';
+  assert(__r3d.fogShellCovers(q, r), 'precondition: (20,12) must be fogged, so a layer is drawn over it');
+  try {
+    fixture.tiles = orig.map(t => Object.assign({}, t));   // what a state refresh does
+    fixture.tiles[r * COLS + q].terrain = 0;               // the land becomes ocean
+    R3D.rebuildTile(q, r);
+    const y = __r3d.fogShellHeightAt(q, r, 'centre');
+    assert(Math.abs(y - before) > 0.05, 'shell did not move with the ground: ' + y + ' vs ' + before);
+    assert(y > __r3d.waterLevel(), 'shell sank to the new seabed: ' + y);
+    // Ocean subdivides more coarsely than land: the whole tile must be rebuilt
+    // at the new level, not half-overwritten at the old one.
+    const N = R3DCore.subdivisions(fixture.tiles[r * COLS + q]);
+    assert(__r3d.fogShellTopTriangles(q, r) === 6 * N * N,
+      'shell kept the old subdivision level: ' + __r3d.fogShellTopTriangles(q, r) + ' vs ' + (6 * N * N));
+    assert(__r3d.fogShellState(layer, q, r) === 'live', 'the drawn shell no longer matches what was built');
+  } finally { fixture.tiles = orig; R3D.rebuildTile(q, r); }
+  assert(Math.abs(__r3d.fogShellHeightAt(q, r, 'centre') - before) < 1e-6, 'shell did not come back');
+}});
+TESTS.push({name: 'founding a city levels the shell with the ground under it', fn: () => {
+  fogOn();
+  // On remembered ground, so the patched vertices are on screen while they change.
+  const p = LM.FOG_REMEMBERED, cities = fixture.players[0].cities;
+  const before = __r3d.fogShellHeightAt(p.q, p.r, 'centre');
+  assert(__r3d.fogShellState('remembered', p.q, p.r) === 'live', 'precondition: shell drawn over this tile');
+  cities.push({id: 9, name: 'Delta', q: p.q, r: p.r, population: 1, hp: 200, foodStockpile: 0,
+    prodStockpile: 0, production: 0, buildings: 0, foundedTurn: 1, isCapital: false, lockedTiles: []});
+  try {
+    R3D.rebuildTile(p.q, p.r);
+    const y = __r3d.fogShellHeightAt(p.q, p.r, 'centre');
+    const want = R3DCore.heightAt(Object.assign({}, tileOf(p), {hasCity: true}),
+      R3DCore.hexCenter(p.q, p.r).x, R3DCore.hexCenter(p.q, p.r).z);
+    assert(before - y > 0.1, 'shell stayed up over the levelled city ground: ' + before + ' -> ' + y);
+    assert(Math.abs(y - want) < 0.08, 'shell is not on the city ground: ' + y + ' vs ' + want);
+    assert(__r3d.fogShellState('remembered', p.q, p.r) === 'live', 'the drawn shell no longer matches what was built');
+  } finally { cities.pop(); R3D.rebuildTile(p.q, p.r); }
+  assert(Math.abs(__r3d.fogShellHeightAt(p.q, p.r, 'centre') - before) < 1e-6, 'shell did not come back');
+}});
+TESTS.push({name: 'fog costs two draw calls and stays inside the budget', fn: async () => {
+  fogOn();
+  R3D.centerOn(16, 10); __r3d.setCameraDistance(14); R3D.requestRender(); await wait(200);
+  assert(__r3d.fogDrawCalls() === 2, 'fog meshes: ' + __r3d.fogDrawCalls());
+  assert(__r3d.drawCalls() < 300, 'draw calls ' + __r3d.drawCalls());
+}});
+
+// ── Task 8 fix round: the map edge, and pixel pins for what geometry alone cannot show ──
+TESTS.push({name: 'the shell skirt reaches below the terrain cliff at every map edge', fn: () => {
+  const floor = __r3d.terrainSkirtFloor();
+  assert(floor < -1, 'terrain skirt floor is ' + floor);
+  for (const p of [{q: 0, r: 10}, {q: COLS - 1, r: 10}, {q: 16, r: 0}, {q: 16, r: ROWS - 1}]) {
+    const ground = __r3d.tileYRange(p.q, p.r).min, shell = __r3d.fogShellMinY(p.q, p.r);
+    assert(Math.abs(ground - floor) < 1e-5, 'precondition (' + p.q + ',' + p.r + '): ground ends at ' + ground);
+    assert(shell <= floor, '(' + p.q + ',' + p.r + '): fog skirt stops at ' + shell.toFixed(3) +
+      ', the terrain cliff runs to ' + ground.toFixed(3));
+  }
+}});
+// Leak 8 (the cliff under an unexplored map edge) and leak 7 (the terrain
+// skirt z-fighting through the fog at a coast) are both invisible to any
+// assertion about geometry alone, so these draw frames and compare pixels.
+// The water plane is hidden: the open sea past the map edge is backdrop, not
+// the map's own ground, and the question here is only whether the ground
+// shows. The geometry assertion above covers the same property with the
+// water on. A few dozen pixels survive on the seam between each shell's top
+// and its skirt — rasterisation cracks — while a real leak runs to thousands.
+const GRAZE = 1.29;     // the steepest angle the polar clamp allows
+for (const view of [
+  {name: 'a grazing map edge', q: COLS - 1, r: 10, az: Math.PI / 2},
+  {name: 'a grazing coast', q: LM.COAST.q, r: LM.COAST.r, az: -Math.PI / 2},
+  {name: 'grazing hill country', q: LM.HILL.q, r: LM.HILL.r, az: -Math.PI / 2},
+  {name: 'the whole map from above', q: 16, r: 10, az: 0, dist: 55, polar: 0.5},
+]) {
+  TESTS.push({name: 'unexplored ground shows no pixel of itself at ' + view.name, fn: () => {
+    __r3d.setWaterVisible(false);
+    try {
+      allFog(() => {
+        __r3d.lookAt(view.q, view.r, view.dist || 7, view.polar || GRAZE, view.az);
+        const got = groundPixels();
+        assert(got.n <= 200, got.n + ' pixels of ' + got.total + ' change when the ground is removed: ' +
+          JSON.stringify(got.worst));
+      });
+    } finally { __r3d.setWaterVisible(true); }
+  }});
+}
+TESTS.push({name: 'every layer above the terrain is transparent and writes no depth', fn: () =>
+  assert(__r3d.depthWritingLayersAboveTerrain() === 0,
+    __r3d.depthWritingLayersAboveTerrain() + ' layers above the terrain write depth and would punch through the fog')});
+TESTS.push({name: 'the patch path rewrites both shells, not just the one on show', fn: () => {
+  fogOn();
+  const HILLS = [3, 5, 7, 9, 11];
+  const t = fixture.tiles.find((x) => FOGM.state[x.r * COLS + x.q] === R3DCore.FOG.UNSEEN && HILLS.indexOf(x.terrain) >= 0);
+  assert(t, 'fixture has no unexplored hills tile to found a city on');
+  const cities = fixture.players[0].cities, before = __r3d.fogShellHeightAt(t.q, t.r, 'centre');
+  assert(__r3d.fogShellState('unseen', t.q, t.r) === 'live', 'precondition: the unseen shell is the one on show here');
+  cities.push({id: 9, name: 'Delta', q: t.q, r: t.r, population: 1, hp: 200, foodStockpile: 0,
+    prodStockpile: 0, production: 0, buildings: 0, foundedTurn: 1, isCapital: false, lockedTiles: []});
+  try {
+    R3D.rebuildTile(t.q, t.r);
+    assert(before - __r3d.fogShellHeightAt(t.q, t.r, 'centre') > 0.1, 'precondition: a city must level this ground');
+    assert(__r3d.fogShellState('unseen', t.q, t.r) === 'live', 'the unseen shell kept the ground the city levelled');
+    assert(__r3d.fogShellState('remembered', t.q, t.r) === 'collapsed', 'the remembered shell appeared on unexplored ground');
+  } finally { cities.pop(); R3D.rebuildTile(t.q, t.r); }
 }});
 
 async function runAll() {

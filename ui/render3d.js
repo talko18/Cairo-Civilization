@@ -20,10 +20,17 @@
   // ---- Terrain: merged chunks, water plane, river ribbons ----
   const CHUNK = 4;               // tiles per chunk side
   const WATER_LEVEL = 0.15;      // above coast floor (0.0), below land (0.25)
+  // Wave amplitudes used by updateWater. Their sum is the highest crest the
+  // sea ever reaches, which is what anything riding on the water must clear.
+  const WAVE_A = 0.022, WAVE_B = 0.016, WAVE_CREST = WAVE_A + WAVE_B;
   const RIVER_W = 0.14;          // ribbon width in world units
   const AMBIENT_MS = 50;         // idle water tick (~20 fps); most frames stay unrendered
   const SKIRT_LAND = [0x6e / 255, 0x57 / 255, 0x3c / 255];
   const SKIRT_SEA = [0x16 / 255, 0x3a / 255, 0x52 / 255];
+  // How far the terrain's own skirt hangs: to SKIRT_EDGE_Y where the map ends,
+  // and SKIRT_STEP under the lower neighbour's base inland. The fog shell
+  // reads SKIRT_EDGE_Y so its skirt cannot stop short of this cliff.
+  const SKIRT_EDGE_Y = -1.2, SKIRT_STEP = 0.05;
 
   const tileAt = (q, r) => (q < 0 || r < 0 || q >= S.cols || r >= S.rows) ? null : (S.tileIdx.get(r * S.cols + q) || null);
   const chunkKey = (q, r) => Math.floor(r / CHUNK) * S.chunksX + Math.floor(q / CHUNK);
@@ -76,7 +83,7 @@
       const [nq, nr] = C.neighbor(tile.q, tile.r, d), nb = tileAt(nq, nr);
       const nbBase = nb ? C.tileBase(nb) : null;
       if (nb && nbBase >= base - 0.001) continue;
-      const yb = nb ? nbBase - 0.05 : -1.2;
+      const yb = nb ? nbBase - SKIRT_STEP : SKIRT_EDGE_Y;
       const [ax, az] = C.hexCorner(5 - d), [bx, bz] = C.hexCorner((6 - d) % 6);
       const x1 = cen.x + ax, z1 = cen.z + az, x2 = cen.x + bx, z2 = cen.z + bz;
       const ox = (ax + bx) / 2, oz = (az + bz) / 2;     // outward direction
@@ -147,7 +154,7 @@
     const p = w.geo.attributes.position.array, b = w.base;
     for (let i = 0; i < p.length; i += 3) {
       const x = b[i], z = b[i + 2];
-      p[i + 1] = 0.022 * Math.sin(x * 1.6 + t * 1.3) + 0.016 * Math.sin(z * 2.1 - t * 1.1 + x * 0.4);
+      p[i + 1] = WAVE_A * Math.sin(x * 1.6 + t * 1.3) + WAVE_B * Math.sin(z * 2.1 - t * 1.1 + x * 0.4);
     }
     w.geo.attributes.position.needsUpdate = true;
   }
@@ -484,6 +491,221 @@
   const RES_SHAPES = new Set(Object.values(RESOURCE_ART).map((a) => a.shape));
   const IMP_SHAPES = new Set([].concat(...Object.values(IMPROVEMENT_ART)));
 
+  // ---- Fog of war ----
+  // Decision 12. In 2D a dark hex hides everything in it; in 3D it hides
+  // nothing. Terrain has height, so a hill rises straight through a flat sheet
+  // and shows both its shape and its colour — and its colour is its terrain
+  // type. Fog is therefore a SHELL over the ground, built from the same
+  // triangles at the same C.subdivisions(tile), lifted just clear of it, with
+  // a skirt hanging off the rim to close the slot that lift leaves. Two
+  // shells, one per fog state, so a tile is covered by exactly one of them;
+  // two draw calls for the whole map.
+  //
+  // Built once. A fog change collapses or restores one tile's vertex range in
+  // the existing buffer and touches only tiles whose state changed — fog moves
+  // on nearly every unit step, so it must never rebuild geometry (Decision 9).
+  // Only a TERRAIN change rebuilds the shell.
+  const FOG_BIAS = 0.045;     // lift above the surface; much less and it z-fights
+  const FOG_SKIRT = 1.0;      // least the rim wall hangs down behind the shell
+  // ...but never above the terrain's own cliff. Where the map ends, the ground
+  // drops to SKIRT_EDGE_Y, which is deeper than FOG_SKIRT reaches from a rim
+  // at sea level: the fog skirt stopped short and half a unit of unexplored
+  // coastline stood below it, telling the player where land ended and sea
+  // began. Both numbers come from the same constant so they cannot drift.
+  const FOG_SKIRT_FLOOR = SKIRT_EDGE_Y - 0.1;
+  const FOG_REMEMBERED_COLOR = 0x0d1a2c, FOG_UNSEEN_COLOR = 0x05070d;
+
+  // Transparent layers do not write depth, so sitting physically lower than
+  // the fog does not put a layer behind it: draw order alone decides.
+  // Unexplored fog draws after every overlay, ring and highlight as a
+  // backstop; remembered fog draws before them so range highlights stay
+  // readable on ground the player has already seen. Later layers take their
+  // order from this table (and must stay below fogUnseen).
+  // 'labels' is a reserved slot, not a layer: labels are DOM elements over the
+  // canvas (Decision 5). It is here so nothing else claims 5.
+  const RENDER_ORDER = { terrain: 0, grid: 1, territory: 1, fogRemembered: 2,
+    overlays: 3, rings: 4, labels: 5, fogUnseen: 6 };
+
+  // The surface the player actually sees, which is not always the terrain
+  // mesh: on water tiles the mesh is the seabed, well below the water plane,
+  // so a shell built from it sits UNDER the sea and leaves unexplored ocean
+  // and coast in plain view. Water clamps to just above the highest crest.
+  function fogSurfaceY(tile, x, z) {
+    let y = C.heightAt(tile, x, z);
+    if (tile.terrain <= 1) y = Math.max(y, WATER_LEVEL + WAVE_CREST);
+    return y + FOG_BIAS;
+  }
+
+  // The same wedge triangles tileGeometryInto builds, at the same subdivision
+  // level, plus a rim skirt. Winding is irrelevant: the shells are DoubleSide.
+  function fogTileInto(src, pos) {
+    // heightAt reads hasCity from its argument: a private copy, never the
+    // shared tile, and the same copy the ground was built from so the shell
+    // follows a city's levelled ground instead of floating over it.
+    const tile = Object.assign({}, src, { hasCity: S.cityTiles.has(src.r * S.cols + src.q) });
+    const cen = C.hexCenter(tile.q, tile.r), N = C.subdivisions(tile);
+    const start = pos.length / 3;
+    const v = (lx, lz) => { const x = cen.x + lx, z = cen.z + lz; pos.push(x, fogSurfaceY(tile, x, z), z); };
+    for (let e = 0; e < 6; e++) {
+      const A = C.hexCorner(e), B = C.hexCorner((e + 1) % 6);
+      const P = (i, j) => [(A[0] * i + B[0] * j) / N, (A[1] * i + B[1] * j) / N];
+      for (let i = 0; i < N; i++) for (let j = 0; j < N - i; j++) {
+        const a = P(i, j), b = P(i + 1, j), c = P(i, j + 1);
+        v(a[0], a[1]); v(b[0], b[1]); v(c[0], c[1]);
+        if (j < N - 1 - i) { const d = P(i + 1, j + 1); v(b[0], b[1]); v(d[0], d[1]); v(c[0], c[1]); }
+      }
+    }
+    const topCount = pos.length / 3 - start;
+    // The lift leaves a slot around the rim that a low camera looks straight
+    // into — at coasts it showed the yellow beach around every unexplored
+    // tile. A wall hanging off the rim closes it; inland it is buried in the
+    // neighbouring ground, at a coast or cliff it reads as the edge of the
+    // unknown.
+    for (let e = 0; e < 6; e++) {
+      const A = C.hexCorner(e), B = C.hexCorner((e + 1) % 6);
+      const ax = cen.x + A[0], az = cen.z + A[1], ay = fogSurfaceY(tile, ax, az);
+      const bx = cen.x + B[0], bz = cen.z + B[1], by = fogSurfaceY(tile, bx, bz);
+      const ya = Math.min(ay - FOG_SKIRT, FOG_SKIRT_FLOOR), yb = Math.min(by - FOG_SKIRT, FOG_SKIRT_FLOOR);
+      pos.push(ax, ay, az, bx, by, bz, bx, yb, bz);
+      pos.push(ax, ay, az, bx, yb, bz, ax, ya, az);
+    }
+    return { start, count: pos.length / 3 - start, topCount };
+  }
+
+  function buildFogShell() {
+    disposeFog();
+    const pos = [], ranges = new Map();
+    const tiles = Array.from(S.tileIdx.values()).sort((a, b) => (a.r * S.cols + a.q) - (b.r * S.cols + b.q));
+    for (const t of tiles) ranges.set(t.r * S.cols + t.q, fogTileInto(t, pos));
+    const base = Float32Array.from(pos);
+    const layer = (color, opacity, order, name) => {
+      const g = new THREE.BufferGeometry();
+      // Starts fully collapsed: nothing is hidden until the fog says so.
+      g.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(base.length), 3));
+      // The rim skirt shares its plane with the terrain skirt Task 6 hangs off
+      // the same two corners, and a coplanar surface drawn later loses the
+      // depth test in patches: at an unexplored coast the brown cliff showed
+      // straight through the fog. The offset biases the fog's depth toward the
+      // camera so it always wins where the two planes meet. It writes no
+      // depth, so nothing else is affected.
+      const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity,
+        depthWrite: false, side: THREE.DoubleSide,
+        polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+      const mesh = new THREE.Mesh(g, mat);
+      mesh.frustumCulled = false;      // collapsed tiles sit at the origin and ruin the bounds
+      mesh.raycast = () => {};         // picking must reach the ground through the fog
+      mesh.renderOrder = order;
+      S.scene.add(mesh);
+      S.layers[name] = mesh;
+      return { mesh, mat, geo: g, attr: g.attributes.position, arr: g.attributes.position.array };
+    };
+    S.fog = { base, ranges, writes: 0,
+      state: new Int8Array(S.cols * S.rows).fill(-1),   // -1: nothing written yet
+      remembered: layer(FOG_REMEMBERED_COLOR, 0.6, RENDER_ORDER.fogRemembered, 'fogRemembered'),
+      unseen: layer(FOG_UNSEEN_COLOR, 0.995, RENDER_ORDER.fogUnseen, 'fogUnseen') };
+  }
+
+  function disposeFog() {
+    if (!S || !S.fog) return;
+    for (const k of ['remembered', 'unseen']) {
+      const l = S.fog[k];
+      S.scene.remove(l.mesh); l.geo.dispose(); l.mat.dispose();
+    }
+    delete S.layers.fogRemembered; delete S.layers.fogUnseen;
+    S.fog = null;
+  }
+
+  // Raise or collapse one tile's range of one shell. Restoring copies the
+  // built surface back float for float; collapsing zeroes it, which leaves
+  // degenerate triangles at the origin that draw nothing.
+  function writeShell(layer, rg, on) {
+    const o = rg.start * 3, n = rg.count * 3;
+    if (on) layer.arr.set(S.fog.base.subarray(o, o + n), o);
+    else layer.arr.fill(0, o, o + n);
+  }
+
+  // The gate every fog decision passes through. Fails closed: a lookup that
+  // returns anything unexpected is treated as never explored.
+  function fogStateAt(q, r) {
+    const v = S ? S.fogAt(q, r) : C.FOG.UNSEEN;
+    if (v === C.FOG.VISIBLE) return C.FOG.VISIBLE;
+    if (v === C.FOG.REMEMBERED) return C.FOG.REMEMBERED;
+    return C.FOG.UNSEEN;
+  }
+
+  // One stable reference, so refreshFog can tell its own rule from another's.
+  function fogHidesScenery(q, r) { return fogStateAt(q, r) === C.FOG.UNSEEN; }
+
+  // Writes the shells to match the current fog. Returns how many tiles moved.
+  function applyFogShell() {
+    const f = S.fog;
+    let changed = 0;
+    for (const [idx, rg] of f.ranges) {
+      const q = idx % S.cols, r = (idx - q) / S.cols, v = fogStateAt(q, r);
+      if (f.state[idx] === v) continue;
+      f.state[idx] = v;
+      writeShell(f.remembered, rg, v === C.FOG.REMEMBERED);
+      writeShell(f.unseen, rg, v === C.FOG.UNSEEN);
+      f.writes++;
+      changed++;
+    }
+    if (changed) { f.remembered.attr.needsUpdate = true; f.unseen.attr.needsUpdate = true; }
+    return changed;
+  }
+
+  // One tile's ground changed shape (a city founded, a feature cleared), so
+  // the shell over it is stale. Patch that tile's vertices in place while it
+  // still has the same number of them — a full rebuild is a whole-map height
+  // pass (~230k vertices, measured at ~65ms). Clearing a feature changes the
+  // tile's subdivision level, and then its range changes length and only a
+  // rebuild will do.
+  function refreshFogTile(q, r) {
+    if (!S) return;
+    const t = S.fog && tileAt(q, r), rg = S.fog && S.fog.ranges.get(r * S.cols + q);
+    const pos = [];
+    if (!t || !rg || fogTileInto(t, pos).count !== rg.count) {
+      buildFogShell();
+    } else {
+      S.fog.base.set(pos, rg.start * 3);
+      const v = S.fog.state[r * S.cols + q];
+      writeShell(S.fog.remembered, rg, v === C.FOG.REMEMBERED);
+      writeShell(S.fog.unseen, rg, v === C.FOG.UNSEEN);
+      S.fog.remembered.attr.needsUpdate = true;
+      S.fog.unseen.attr.needsUpdate = true;
+    }
+    applyFogShell();
+  }
+
+  // Fog changed (a unit moved, a turn resolved, the fog toggle flipped).
+  function refreshFog() {
+    if (!S || !S.fog) return;
+    const changed = applyFogShell();
+    // Fog hides objects, not just ground: trees, rocks and improvements stand
+    // straight up through a ground layer unless their instances are culled.
+    if (changed || S.sceneryHide !== fogHidesScenery) applyFogToScenery(fogHidesScenery);
+    S.hoverTile = null;      // the tooltip must re-read its tile under the new fog
+    if (changed) requestRender();
+  }
+
+  // Test-only reader over the live buffer: 'live' means this tile's range
+  // matches the built surface float for float, 'collapsed' means every float
+  // is zero. Anything else ('mixed') is a half-written shell, which would
+  // leave the tile partly uncovered.
+  function fogShellState(layer, q, r) {
+    const f = S && S.fog, l = f && f[layer], rg = f && f.ranges.get(r * S.cols + q);
+    if (!l || !rg) return 'none';
+    const o = rg.start * 3, n = rg.count * 3;
+    let live = true, collapsed = true;
+    for (let i = o; i < o + n; i++) {
+      if (l.arr[i] !== f.base[i]) live = false;
+      if (l.arr[i] !== 0) collapsed = false;
+      if (!live && !collapsed) return 'mixed';
+    }
+    return live ? 'live' : 'collapsed';
+  }
+
+  function fogRange(q, r) { return (S && S.fog) ? (S.fog.ranges.get(r * S.cols + q) || null) : null; }
+
   function visibleChunkCount() {
     if (!S) return 0;
     S.camera.updateMatrixWorld();
@@ -549,10 +771,14 @@
     S = {
       canvas: opts.canvas, renderer, scene, camera, controls, sun, cols, rows,
       getState: opts.getState || (() => null),
-      fogAt: opts.fogAt || (() => 2),   // stored for later tasks; unused for now
+      // fogAt(q, r) -> 0 visible | 1 remembered | 2 unexplored. The default
+      // fails closed: a renderer wired up without it shows an unexplored map,
+      // which is loud, rather than the whole board, which is a silent leak.
+      fogAt: opts.fogAt || (() => C.FOG.UNSEEN),
       onTileClick: opts.onTileClick || null,
       onTileHover: opts.onTileHover || null,
-      needsRender: true, frames: 0, raf: 0, fly: null, anims: [],
+      needsRender: true, frames: 0, raf: 0, fly: null, anims: [], hoverTile: null,
+      fog: null, layers: {},
       quality: { shadows: true, props: true, fullRes: false },
       tileIdx: new Map(), cityTiles: new Set(), chunks: [], chunksX: Math.ceil(cols / CHUNK), chunksY: Math.ceil(rows / CHUNK),
       scenery: [], fogHideable: [], sceneryMats: new Map(), sceneryGeo: makeSceneryGeo(), sceneryHide: null,
@@ -666,6 +892,7 @@
     S.controls.dispose();
     disposeTerrain();
     disposeScenery();
+    disposeFog();
     for (const g of Object.values(S.sceneryGeo)) g.dispose();
     S.terrainMat.dispose();
     S.renderer.dispose();
@@ -683,6 +910,8 @@
     buildWater();
     buildRivers();
     buildScenery();
+    buildFogShell();
+    refreshFog();
     requestRender();
   }
 
@@ -697,13 +926,24 @@
     // untouched tile exactly and only the changed tile's props differ.
     disposeScenery();
     buildScenery();
+    // The ground this tile's shell was built from just changed shape, so the
+    // shell has to follow it. buildScenery has already re-applied the current
+    // scenery rule, so this path deliberately does not touch it.
+    refreshFogTile(q, r);
     requestRender();
   }
-  function syncState() { requestRender(); }
+  // State changed: fog is derived from it, so re-read it here too rather than
+  // trusting every call site to remember.
+  function syncState() { refreshFog(); requestRender(); }
   function setSelection(sel) { if (S) S.selection = sel; requestRender(); }
   function playAnimation(anim) { if (S && anim) { S.anims.push(anim); requestRender(); } }
 
-  window.R3D = { init, rebuildMap, rebuildTile, syncState, setSelection, playAnimation, registerFogHideable, applyFogToScenery, panToHex, centerOn,
+  // fogAt is the renderer's own gate on top of the game's lookup: every layer
+  // that could reveal game state filters through it, as well as sitting under
+  // the unexplored shell. Ordering alone is not enough and filtering alone is
+  // not enough — a leak needs both to fail.
+  window.R3D = { init, rebuildMap, rebuildTile, syncState, setSelection, playAnimation, registerFogHideable, applyFogToScenery,
+    refreshFog, fogAt: (q, r) => (S ? fogStateAt(q, r) : C.FOG.UNSEEN), panToHex, centerOn,
     getCameraView, setQuality, resize, requestRender, dispose };
 
   window.__r3d = {
@@ -831,5 +1071,115 @@
       return h;
     },
     riverSegmentsOn: (q, r) => (S ? (S.riverOwners.get(r * S.cols + q) || 0) : 0),
+
+    // ---- fog readers (the real built buffers, not bookkeeping) ----
+    tileInfo: (q, r) => {
+      const t = S && tileAt(q, r);
+      return t ? { q, r, terrain: t.terrain, base: C.tileBase(t), water: t.terrain <= 1,
+        subdivisions: C.subdivisions(t), hasCity: S.cityTiles.has(r * S.cols + q) } : null;
+    },
+    fogOf: (q, r) => (S ? fogStateAt(q, r) : -1),
+    fogWrites: () => (S && S.fog ? S.fog.writes : -1),
+    fogDrawCalls: () => (S && S.fog ? ['remembered', 'unseen'].filter((k) => S.fog[k].mesh.parent === S.scene).length : 0),
+    fogGeometryKey: () => (S && S.fog ? S.fog.remembered.geo.uuid + '|' + S.fog.unseen.geo.uuid + '|' + S.fog.base.length : ''),
+    renderOrderOf: (name) => {
+      const live = S && S.layers[name];      // the real mesh once its task builds it
+      return live ? live.renderOrder : (name in RENDER_ORDER ? RENDER_ORDER[name] : NaN);
+    },
+    drawablesAtOrAboveUnseenFog: () => {
+      if (!S || !S.fog) return -1;
+      const top = S.fog.unseen.mesh;
+      let n = 0;
+      S.scene.traverse((x) => {
+        if (x !== top && (x.isMesh || x.isLine || x.isPoints || x.isSprite) && x.renderOrder >= top.renderOrder) n++;
+      });
+      return n;
+    },
+    fogShellState,
+    fogShellCovers: (q, r) => fogShellState('remembered', q, r) === 'live' || fogShellState('unseen', q, r) === 'live',
+    fogShellVertices: (q, r, part) => {
+      const rg = fogRange(q, r);
+      if (!rg) return [];
+      const b = S.fog.base, out = [];
+      const from = part === 'skirt' ? rg.start + rg.topCount : rg.start;
+      const to = part === 'top' ? rg.start + rg.topCount : rg.start + rg.count;
+      for (let i = from; i < to; i++) out.push([b[i * 3], b[i * 3 + 1], b[i * 3 + 2]]);
+      return out;
+    },
+    fogShellTopTriangles: (q, r) => { const rg = fogRange(q, r); return rg ? rg.topCount / 3 : -1; },
+    fogShellMinY: (q, r) => {
+      const rg = fogRange(q, r);
+      if (!rg) return NaN;
+      const b = S.fog.base;
+      let min = Infinity;
+      for (let i = rg.start; i < rg.start + rg.count; i++) min = Math.min(min, b[i * 3 + 1]);
+      return min;
+    },
+    // 'centre' takes the vertex nearest the hex centre (which the fan always
+    // has), 'rim' the farthest; both from the top surface only.
+    fogShellHeightAt: (q, r, where) => {
+      const rg = fogRange(q, r);
+      if (!rg) return NaN;
+      const c = C.hexCenter(q, r), b = S.fog.base, rim = where === 'rim';
+      let y = NaN, bd = rim ? -1 : Infinity;
+      for (let i = rg.start; i < rg.start + rg.topCount; i++) {
+        const d = Math.hypot(b[i * 3] - c.x, b[i * 3 + 2] - c.z);
+        if (rim ? d > bd : d < bd) { bd = d; y = b[i * 3 + 1]; }
+      }
+      return y;
+    },
+    terrainSkirtFloor: () => SKIRT_EDGE_Y,
+    // Every drawable above the terrain band (renderOrder > 0) must be
+    // transparent and must not write depth. renderOrder only sorts
+    // transparent objects against each other: an OPAQUE overlay draws in the
+    // opaque pass, writes depth, and — since the shell floats a mere 0.045
+    // over the ground — passes the depth test and shows straight through the
+    // fog, whatever its renderOrder says. That was leak 3.
+    depthWritingLayersAboveTerrain: () => {
+      if (!S) return -1;
+      let n = 0;
+      S.scene.traverse((x) => {
+        if (!(x.isMesh || x.isLine || x.isPoints || x.isSprite) || x.renderOrder <= 0) return;
+        for (const m of [].concat(x.material)) if (m && (m.depthWrite !== false || m.transparent !== true)) n++;
+      });
+      return n;
+    },
+    // Test-only camera placement: aim at a tile, orbit to (dist, polar, az).
+    lookAt: (q, r, dist, polar, az, ty) => {
+      if (!S) return;
+      const c = C.hexCenter(q, r), t = S.controls.target;
+      t.set(c.x, ty === undefined ? 0.2 : ty, c.z);
+      S.camera.position.set(c.x + dist * Math.sin(polar) * Math.sin(az),
+        t.y + dist * Math.cos(polar), c.z + dist * Math.sin(polar) * Math.cos(az));
+      S.controls.update();
+      requestRender();
+    },
+    setWaterVisible: (b) => { if (S && S.water) { S.water.mesh.visible = !!b; requestRender(); } },
+    setTerrainVisible: (b) => {
+      if (!S) return;
+      // The ground stays in the scene, still writing depth, and only stops
+      // writing colour. Hiding it outright also removes the depth test that
+      // keeps the fog shell's far-side faces from being drawn, so the frame
+      // changes for reasons that have nothing to do with the ground showing.
+      const meshes = S.chunks.filter(Boolean).map((ch) => ch.mesh);
+      if (S.river) meshes.push(S.river.mesh);
+      for (const m of meshes) for (const mat of [].concat(m.material)) { mat.colorWrite = !!b; }
+      requestRender();
+    },
+    // Draws a frame and reads it back before it is presented, so assertions
+    // can look at pixels. Rows run bottom-up, RGBA. No assertion can see a
+    // leak the geometry allows but the depth test hides, so some have to.
+    renderAndSample: (x, y, w, h) => {
+      if (!S) return null;
+      S.renderer.render(S.scene, S.camera);
+      const gl = S.renderer.getContext(), px = new Uint8Array(w * h * 4);
+      gl.readPixels(x, y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      return px;
+    },
+    visibleInstancesOn: (q, r) => {
+      let n = 0;
+      if (S) eachInstance((m, i, t, base, arr) => { if (t === r * S.cols + q && arr[i * 16] !== 0) n++; });
+      return n;
+    },
   };
 })();
