@@ -1573,6 +1573,350 @@ TESTS.push({name: 'labels never write into game state', fn: () => {
   assert(stateSnapshot() === before, 'labels changed the game state');
 }});
 
+// ── Task 12: picking, camera and tooltip ──
+const cvRect = () => testCanvas.getBoundingClientRect();
+const cx = () => cvRect().left + cvRect().width / 2, cy = () => cvRect().top + cvRect().height / 2;
+const UNSEEN_Q = LM.UNSEEN.q, UNSEEN_R = LM.UNSEEN.r;
+const sameHex = (a, b) => a && b && a.q === b.q && a.r === b.r;
+const mev = (type, el, x, y, extra) => el.dispatchEvent(new MouseEvent(type,
+  Object.assign({bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0}, extra)));
+TESTS.push({name: 'picking the screen centre returns the tile under it', fn: () => {
+  fogOff(); R3D.centerOn(10, 10);
+  const h = R3D.hexAtScreen(cx(), cy());
+  assert(h && h.q === 10 && h.r === 10, 'got ' + JSON.stringify(h));
+}});
+TESTS.push({name: 'picking returns exactly the tile whose centre was projected (flat, hills, oblique)', fn: () => {
+  fogOff();
+  const views = [() => R3D.centerOn(9, 7), () => __r3d.lookAt(9, 7, 12, 1.15, 0.5), () => __r3d.lookAt(9, 7, 9, 0.7, -1.2)];
+  let checked = 0, occluded = 0, sawHill = false;
+  for (const v of views) {
+    v();
+    for (let q = 4; q <= 14; q++) for (let r = 3; r <= 11; r++) {
+      const p = __r3d.project(q, r);
+      if (!p || p.x < cvRect().left + 2 || p.x > cvRect().right - 2 || p.y < cvRect().top + 2 || p.y > cvRect().bottom - 2) continue;
+      const h = R3D.hexAtScreen(p.x, p.y), raised = (t) => t >= 3 && t !== 4 && t !== 6 && t !== 8 && t !== 10 || t === 12;
+      checked++;
+      if (!sameHex(h, {q, r})) {
+        // The only legitimate miss: a hill or mountain in front is what the pixel really shows.
+        assert(h && raised(tileOf(h).terrain), 'aimed at ' + q + ',' + r + ' got ' + JSON.stringify(h));
+        occluded++;
+      } else if (raised(tileOf({q, r}).terrain)) sawHill = true;
+    }
+  }
+  assert(checked > 150, 'only checked ' + checked);
+  assert(occluded < checked * 0.15, occluded + ' of ' + checked + ' picks hit something in front');
+  assert(sawHill, 'no hill tile was checked: the height correction is unproven');
+}});
+TESTS.push({name: 'picking near a shared edge goes to the nearer tile', fn: () => {
+  fogOff(); R3D.centerOn(10, 8);
+  const a = __r3d.project(10, 8), b = __r3d.project(11, 8), at = (t) => R3D.hexAtScreen(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+  assert(sameHex(at(0.3), {q: 10, r: 8}), 'near side: ' + JSON.stringify(at(0.3)));
+  assert(sameHex(at(0.7), {q: 11, r: 8}), 'far side: ' + JSON.stringify(at(0.7)));
+}});
+TESTS.push({name: 'picking past the map edge, the sky and outside the canvas returns null, not a crash', fn: () => {
+  fogOff();
+  R3D.centerOn(0, 0);
+  const rc = cvRect();
+  assert(R3D.hexAtScreen(rc.left + 2, rc.top + 2) === null, 'empty ocean past the grid selects nothing');
+  assert(R3D.hexAtScreen(rc.left + 2, rc.bottom - 2) === null || typeof R3D.hexAtScreen(rc.left + 2, rc.bottom - 2).q === 'number');
+  R3D.centerOn(31, 19);
+  assert(R3D.hexAtScreen(rc.right - 2, rc.bottom - 2) === null, 'past the far corner selects nothing');
+  for (const bad of [[-50, -50], [rc.right + 40, cy()], [cx(), rc.bottom + 40], [NaN, 3], [3, Infinity], [undefined, undefined], [null, null]])
+    assert(R3D.hexAtScreen(bad[0], bad[1]) === null, 'off-canvas/invalid input ' + bad + ' picked something');
+  // Just outside the canvas is a different element (a panel): the ray would still hit real map, so only the bounds check says null.
+  R3D.centerOn(16, 10); __r3d.lookAt(16, 10, 14, 1.0, 0);
+  for (const [x, y] of [[rc.left + 3, cy()], [rc.right - 3, cy()], [cx(), rc.bottom - 3]])
+    assert(R3D.hexAtScreen(x, y) !== null, 'precondition: inside the canvas at ' + x + ',' + y + ' is map');
+  for (const [x, y] of [[rc.left - 3, cy()], [rc.right + 3, cy()], [cx(), rc.bottom + 3], [cx(), rc.top - 3]])
+    assert(R3D.hexAtScreen(x, y) === null, 'a point outside the canvas at ' + x + ',' + y + ' picked a tile');
+  // Near the horizon the top of the screen looks at the sky.
+  __r3d.lookAt(16, 10, 6, 1.5, 0.3);
+  assert(R3D.hexAtScreen(cx(), rc.top + 1) === null, 'the sky selected a tile');
+  assert(R3D.hexAtScreen(cx(), cy()) !== null, 'precondition: the middle of that view is map');
+  // Sweep the whole canvas from three views: nothing throws, nothing out of the grid comes back.
+  for (const v of [() => R3D.centerOn(0, 0), () => R3D.centerOn(31, 19), () => __r3d.lookAt(16, 10, 6, 1.5, 2.5)]) {
+    v();
+    for (let x = rc.left; x <= rc.right; x += 40) for (let y = rc.top; y <= rc.bottom; y += 25) {
+      const h = R3D.hexAtScreen(x, y);
+      assert(h === null || (Number.isInteger(h.q) && Number.isInteger(h.r) && h.q >= 0 && h.q < COLS && h.r >= 0 && h.r < ROWS), 'out-of-grid pick ' + JSON.stringify(h));
+    }
+  }
+}});
+TESTS.push({name: 'picking does not scan all 640 tiles', fn: () => {
+  fogOff(); R3D.centerOn(10, 10);
+  const before = __r3d.tileProbes(); R3D.hexAtScreen(cx(), cy());
+  const used = __r3d.tileProbes() - before;
+  assert(used > 0, 'the probe counter never moved: it measures nothing');
+  assert(used < 20, 'use maths, not a linear scan: ' + used + ' probes');
+  const b2 = __r3d.tileProbes();
+  for (let i = 0; i < 40; i++) R3D.hexAtScreen(cvRect().left + 20 * i, cvRect().top + 10 * i);
+  assert(__r3d.tileProbes() - b2 < 40 * 5, 'a sweep of 40 picks probed ' + (__r3d.tileProbes() - b2));
+}});
+TESTS.push({name: 'picking never mutates the game state', fn: () => {
+  const before = stateSnapshot();
+  R3D.centerOn(10, 10); R3D.hexAtScreen(cx(), cy()); __r3d.hoverFacts(10, 10);
+  assert(stateSnapshot() === before);
+}});
+TESTS.push({name: 'hover on an unexplored tile reveals nothing, even with a unit and a city on it', fn: () => {
+  fogOn();
+  try {
+    const E = LM.UNIT_ENEMY_WARRIOR, B = LM.CITY_B;
+    assert(R3D.fogAt(E.q, E.r) === R3DCore.FOG.UNSEEN && R3D.fogAt(B.q, B.r) === R3DCore.FOG.UNSEEN, 'precondition: enemy ground unexplored');
+    for (const p of [{q: UNSEEN_Q, r: UNSEEN_R}, E, B]) {
+      const f = __r3d.hoverFacts(p.q, p.r);
+      assert(f.terrain === null && f.feature === null && f.resource === null && f.improvement === null && f.city === null && f.units.length === 0,
+        'unexplored ' + p.q + ',' + p.r + ' leaked ' + JSON.stringify(f));
+    }
+  } finally { fogOff(); }
+}});
+TESTS.push({name: 'hover on a remembered tile shows the land but not the units or live city state', fn: () => {
+  fogOn();
+  const idx = (p) => p.r * COLS + p.q, saved = FOGM.state.slice();
+  const scout = fixture.players[1].units[2], oldQ = scout.q, oldR = scout.r;
+  try {
+    const R = LM.FOG_REMEMBERED, B = LM.CITY_B;
+    scout.q = R.q; scout.r = R.r;
+    FOGM.state[idx(R)] = R3DCore.FOG.REMEMBERED; FOGM.state[idx(B)] = R3DCore.FOG.REMEMBERED; R3D.refreshFog();
+    const f = __r3d.hoverFacts(R.q, R.r);
+    assert(f.terrain === tileOf(R).terrain && f.terrain !== null, 'remembered land hidden');
+    assert(f.units.length === 0, 'remembered tile reported a unit standing there now');
+    const c = __r3d.hoverFacts(B.q, B.r).city;
+    assert(c && c.name === 'Beta', 'remembered city identity missing');
+    assert(c.hp === undefined && c.production === undefined && c.population === undefined, 'remembered city leaked live state: ' + JSON.stringify(c));
+  } finally { scout.q = oldQ; scout.r = oldR; FOGM.state.set(saved); fogOff(); }
+}});
+TESTS.push({name: 'hover on a visible tile reports the city and units with their owners', fn: () => {
+  fogOn();
+  try {
+    const W = LM.UNIT_WARRIOR, A = LM.CITY_A;
+    const f = __r3d.hoverFacts(W.q, W.r);
+    assert(f.units.length === 1 && f.units[0].id === W.id && f.units[0].player === W.player, 'unit identity: ' + JSON.stringify(f.units));
+    const c = __r3d.hoverFacts(A.q, A.r);
+    assert(c.city && c.city.name === 'Alpha' && c.city.ownerPlayer === 0 && c.city.hp === 200, 'visible city: ' + JSON.stringify(c.city));
+    f.units[0].hp = 1; c.city.hp = 1;
+    assert(fixture.players[0].units[2].hp === 100 && fixture.players[0].cities[0].hp === 200, 'facts alias live state');
+  } finally { fogOff(); }
+}});
+TESTS.push({name: 'drag pans and right-drag rotates', fn: () =>
+  assert(__r3d.mouseButtons().LEFT === THREE.MOUSE.PAN && __r3d.mouseButtons().RIGHT === THREE.MOUSE.ROTATE)});
+TESTS.push({name: 'panning cannot leave the map', fn: () => {
+  R3D.panToHex(0, 0); __r3d.panBy(-9999, -9999);
+  const v = R3D.getCameraView();
+  assert(v.x > -20 && v.z > -20, 'camera must stay near the map');
+  const b = R3DCore.clampTarget(1e9, 1e9, COLS, ROWS);
+  __r3d.panBy(9999, 9999);
+  const w = R3D.getCameraView();
+  assert(w.x <= b.x + 1e-6 && w.z <= b.z + 1e-6, 'escaped the far edge: ' + w.x + ',' + w.z);
+}});
+TESTS.push({name: 'a real left-drag on the canvas cannot pan the camera off the map either', fn: () => {
+  fogOff(); __r3d.lookAt(16, 10, 14, 1.0, 0); R3D.centerOn(16, 10); __r3d.step(performance.now());
+  const ctl = __r3d.controls(), x0 = ctl.target.x;
+  const pe = (type, x, y, tgt) => tgt.dispatchEvent(new PointerEvent(type, {bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse',
+    button: 0, buttons: type === 'pointerup' ? 0 : 1, clientX: x, clientY: y}));
+  const drag = (dx) => {
+    pe('pointerdown', cx(), cy(), testCanvas);
+    for (let i = 1; i <= 10; i++) pe('pointermove', cx() + dx * i / 10, cy(), document);
+    pe('pointerup', cx() + dx, cy(), document);
+    let t = performance.now(); for (let i = 0; i < 90; i++) __r3d.step(t += 16.7);
+  };
+  drag(120);
+  assert(Math.abs(ctl.target.x - x0) > 0.5, 'precondition: a small drag must move the camera (moved ' + (ctl.target.x - x0) + ')');
+  const lo = R3DCore.clampTarget(-1e9, 0, COLS, ROWS).x, hi = R3DCore.clampTarget(1e9, 0, COLS, ROWS).x;
+  const within = () => ctl.target.x >= lo - 1e-6 && ctl.target.x <= hi + 1e-6;
+  drag(9000);
+  assert(within(), 'dragged off the map: ' + ctl.target.x);
+  const e1 = Math.min(Math.abs(ctl.target.x - lo), Math.abs(ctl.target.x - hi));
+  assert(e1 < 0.5, 'precondition: the big drag should have reached a limit, at ' + ctl.target.x);
+  drag(-30000);
+  assert(within(), 'dragged off the map the other way: ' + ctl.target.x);
+  const e2 = Math.min(Math.abs(ctl.target.x - lo), Math.abs(ctl.target.x - hi));
+  assert(e2 < 0.5 && Math.abs((ctl.target.x < 10 ? lo : hi) - ctl.target.x) < 0.5, 'precondition: the reverse drag should reach the other limit, at ' + ctl.target.x);
+}});
+TESTS.push({name: 'arrow keys and WASD pan on the ground, clamped, and ignore typing', fn: () => {
+  fogOff(); __r3d.lookAt(16, 10, 14, 1.0, 0); R3D.centerOn(16, 10); __r3d.step(performance.now());
+  const t = __r3d.controls().target, key = (type, k, tgt) => (tgt || window).dispatchEvent(new KeyboardEvent(type, {key: k, bubbles: true, cancelable: true}));
+  const run = (ms, dt) => { dt = dt || 20; let n = performance.now(); __r3d.step(n); for (let i = 1; i <= ms / dt; i++) __r3d.step(n + i * dt); };
+  for (let i = 0; i < 600; i++) __r3d.controls().update();   // let the drag's damping die out
+  const x0 = t.x, z0 = t.z, d = __r3d.controls().object.position.distanceTo(t);
+  key('keydown', 'ArrowRight'); run(500); key('keyup', 'ArrowRight');
+  assert(t.x - x0 > d * 0.9 * 0.4, 'ArrowRight moved ' + (t.x - x0));
+  const x1 = t.x; key('keydown', 'ArrowRight'); run(200); key('keyup', 'ArrowRight'); assert(t.x > x1, 'second press did not pan right');
+  const z1 = t.z; key('keydown', 'ArrowUp'); run(300); key('keyup', 'ArrowUp'); assert(t.z < z1, 'ArrowUp did not pan away from the camera');
+  const x2 = t.x; run(200); assert(t.x === x2, 'a released key kept panning');
+  const inp = document.createElement('input'); document.body.appendChild(inp);
+  try { key('keydown', 'ArrowLeft', inp); run(300); key('keyup', 'ArrowLeft', inp); } finally { inp.remove(); }
+  assert(t.x === x2, 'typing in an input panned the map');
+  key('keydown', 'ArrowLeft'); run(8000, 100); key('keyup', 'ArrowLeft');
+  assert(t.x >= R3DCore.clampTarget(-1e9, 0, COLS, ROWS).x - 1e-6, 'keys panned off the map: ' + t.x);
+  key('keydown', 'ArrowUp'); run(8000, 100); key('keyup', 'ArrowUp');
+  assert(t.z >= R3DCore.clampTarget(0, -1e9, COLS, ROWS).z - 1e-6, 'keys panned off the map: ' + t.z);
+  const x3 = t.x; (window).dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowRight', ctrlKey: true, bubbles: true})); run(300);
+  assert(t.x === x3, 'ctrl+arrow must not pan');
+  R3D.centerOn(16, 10);
+}});
+TESTS.push({name: 'WASD is off by default (A and S are game shortcuts); on only by option', fn: () => {
+  fogOff(); __r3d.lookAt(16, 10, 14, 1.0, 0); R3D.centerOn(16, 10); __r3d.step(performance.now());
+  const t = __r3d.controls().target, run = (ms) => { let n = performance.now(); __r3d.step(n); for (let i = 1; i <= ms / 20; i++) __r3d.step(n + i * 20); };
+  let seen = 0; const spy = (e) => { if (/^[wasd]$/i.test(e.key)) seen++; }; document.addEventListener('keydown', spy);
+  const x0 = t.x, z0 = t.z;
+  try {
+    for (const k of ['w', 'a', 's', 'd', 'W', 'A', 'S', 'D']) {
+      const ev = new KeyboardEvent('keydown', {key: k, bubbles: true, cancelable: true});
+      window.dispatchEvent(ev); run(200); window.dispatchEvent(new KeyboardEvent('keyup', {key: k, bubbles: true}));
+      assert(!ev.defaultPrevented, k + ' was claimed by the renderer');
+    }
+    document.body.dispatchEvent(new KeyboardEvent('keydown', {key: 'a', bubbles: true}));
+    assert(seen === 1, 'the game never saw A: ' + seen);
+  } finally { document.removeEventListener('keydown', spy); }
+  assert(t.x === x0 && t.z === z0, 'WASD panned with the option off');
+  try {
+    assert(R3D.init({canvas: testCanvas, getState: () => fixture, fogAt: harnessFogAt, wasd: true}) === true);
+    __r3d.lookAt(16, 10, 14, 1.0, 0); R3D.centerOn(16, 10); __r3d.step(performance.now());
+    const t2 = __r3d.controls().target, a = t2.x;
+    window.dispatchEvent(new KeyboardEvent('keydown', {key: 'd', bubbles: true})); run(300);
+    window.dispatchEvent(new KeyboardEvent('keyup', {key: 'd', bubbles: true}));
+    assert(t2.x > a, 'wasd:true did not pan');
+  } finally { R3D.init({canvas: testCanvas, getState: () => fixture, fogAt: harnessFogAt}); R3D.syncState(); }
+}});
+TESTS.push({name: 'an arrow press is claimed: one pan per press, even with another handler on document', fn: () => {
+  fogOff(); let seen = 0; const h = (e) => { seen++; document.removeEventListener('keydown', h); };
+  document.addEventListener('keydown', h);
+  const ev = new KeyboardEvent('keydown', {key: 'ArrowLeft', bubbles: true, cancelable: true});
+  try { document.body.dispatchEvent(ev); window.dispatchEvent(new KeyboardEvent('keyup', {key: 'ArrowLeft', bubbles: true})); }
+  finally { document.removeEventListener('keydown', h); }
+  assert(ev.defaultPrevented, 'arrow default not prevented');
+  assert(seen === 0, 'a second handler also received the arrow press');
+}});
+// Ground truth: march each pixel's ray in tiny steps against heightAt, independently of the picker.
+TESTS.push({name: 'picking agrees with a fine-marched ground truth, including grazing rays at the far rows', fn: () => {
+  fogOff();
+  const C = R3DCore, THREEv = THREE, cam = __r3d.camera(), rc = cvRect(), ray = new THREEv.Raycaster();
+  // Returns every hex the ray touches within 0.05 of where it first meets the
+  // ground: a ray skimming a hex boundary is a tie, not a miss, but a hex a whole
+  // step away is a wrong pick.
+  const truth = (sx, sy) => {
+    cam.updateMatrixWorld(true);
+    ray.setFromCamera({x: (sx - rc.left) / rc.width * 2 - 1, y: -((sy - rc.top) / rc.height) * 2 + 1}, cam);
+    const o = ray.ray.origin, d = ray.ray.direction;
+    if (!(d.y < 0)) return null;
+    const hs = Math.max(Math.hypot(d.x, d.z), 1e-9), dt = Math.min(0.01 / -d.y, 0.02 / hs);
+    const t0 = Math.max(0, (1.0 - o.y) / d.y), t1 = (-0.6 - o.y) / d.y;
+    const at = (t) => C.worldToHex(o.x + d.x * t, o.z + d.z * t, COLS, ROWS);
+    let hit = t1;
+    for (let t = t0; t <= t1; t += dt) {
+      const x = o.x + d.x * t, z = o.z + d.z * t, hx = C.worldToHex(x, z, COLS, ROWS);
+      if (hx && C.heightAt(Object.assign({}, tileOf(hx), {hasCity: cityKey.has(hx.q + ',' + hx.r)}), x, z) >= o.y + d.y * t) { hit = t; break; }
+    }
+    const set = [];
+    for (let k = -5; k <= 5; k++) { const hx = at(hit + k * 0.01 / hs); if (hx) set.push(hx); }
+    return set.length ? set : null;
+  };
+  const cityKey = new Set(fixture.players.flatMap((p) => p.cities.map((c) => c.q + ',' + c.r)));
+  const views = [() => __r3d.lookAt(16, 8, 16, 1.09, 0.0), () => __r3d.lookAt(16, 4, 14, 1.3, 3.14), () => __r3d.lookAt(16, 2, 12, 1.25, 0.2), () => __r3d.lookAt(8, 12, 10, 1.45, -0.7, 0.2)];
+  let n = 0, bad = 0, first = null;
+  for (const v of views) {
+    v();
+    for (let x = rc.left + 3; x < rc.right; x += 16) for (let y = rc.top + 3; y < rc.bottom; y += 10) {
+      const got = R3D.hexAtScreen(x, y), want = truth(x, y);
+      n++;
+      if (!(got === null ? want === null : want !== null && want.some((w) => sameHex(got, w)))) { bad++; first = first || [x, y, got, want]; }
+    }
+  }
+  // The residual (3 of 10000 today) is rays skimming the rim of a cliff by under 0.01: a tie the fine march resolves the other way. The old height-stepped picker misses 96.
+  assert(bad <= n * 0.0006, bad + ' of ' + n + ' picks differ from ground truth; first ' + JSON.stringify(first));
+}});
+
+// Pointer events: a dedicated map-area element, the way the app has #map-area.
+TESTS.push({name: 'pointer input: click, drag threshold, hover facts, outside the map, listener cleanup', fn: () => {
+  const clicks = [], hovers = [], area = document.createElement('div');
+  Object.assign(area.style, {position: 'absolute', left: '0', top: '0', width: '1px', height: '1px'});
+  document.body.appendChild(area);
+  const initWith = (o) => assert(R3D.init(Object.assign({canvas: testCanvas, getState: () => fixture, fogAt: harnessFogAt}, o)) === true);
+  const before = stateSnapshot();
+  try {
+    fogOff();
+    initWith({mapArea: area, onTileClick: (h) => clicks.push(h), onTileHover: (h, f, pos) => hovers.push({h, f, pos})});
+    R3D.centerOn(10, 10);
+    const P = __r3d.project(10, 10), Q = __r3d.project(11, 10);
+    // a plain click
+    mev('mousedown', area, P.x, P.y); mev('mouseup', window, P.x, P.y);
+    assert(clicks.length === 1 && sameHex(clicks[0], {q: 10, r: 10}), 'click: ' + JSON.stringify(clicks));
+    // a drag of more than 4px is not a click
+    mev('mousedown', area, P.x, P.y); mev('mousemove', area, P.x + 5, P.y); mev('mouseup', window, P.x + 5, P.y);
+    assert(clicks.length === 1, 'a 5px drag registered a click');
+    // a drag that goes out and comes back is still a drag
+    mev('mousedown', area, P.x, P.y); mev('mousemove', area, P.x + 40, P.y); mev('mousemove', area, P.x, P.y); mev('mouseup', window, P.x, P.y);
+    assert(clicks.length === 1, 'out-and-back drag registered a click');
+    // exactly 4px is still a click, at the position of release
+    mev('mousedown', area, P.x, P.y); mev('mousemove', area, P.x + 2, P.y + 2); mev('mouseup', window, Q.x, Q.y);
+    assert(clicks.length === 2 && sameHex(clicks[1], {q: 11, r: 10}), '4px click: ' + JSON.stringify(clicks[1]));
+    // the next click after a drag is a fresh gesture
+    mev('mousedown', area, P.x, P.y); mev('mouseup', window, P.x, P.y);
+    assert(clicks.length === 3, 'a drag poisoned the next click');
+    // other buttons and stray mouseups are not clicks
+    mev('mousedown', area, P.x, P.y, {button: 2}); mev('mouseup', window, P.x, P.y, {button: 2});
+    mev('mouseup', window, P.x, P.y);
+    assert(clicks.length === 3, 'right button or stray mouseup clicked');
+    // a different button's release neither clicks nor ends the left gesture
+    mev('mousedown', area, P.x, P.y); mev('mouseup', window, P.x, P.y, {button: 2});
+    assert(clicks.length === 3, 'a right-button release completed a left click');
+    mev('mouseup', window, P.x, P.y);
+    assert(clicks.length === 4, 'the left gesture was lost to a right-button release');
+    clicks.length = 3;
+    // past the map edge: no click, no hover, no throw
+    R3D.centerOn(0, 0);
+    const off = {x: cvRect().left + 3, y: cvRect().top + 3}; hovers.length = 0;
+    mev('mousedown', area, off.x, off.y); mev('mouseup', window, off.x, off.y);
+    mev('mousemove', area, off.x, off.y);
+    assert(clicks.length === 3, 'clicking empty ocean selected a tile');
+    assert(hovers.every((x) => x.h === null), 'hovering empty ocean reported a tile');
+    // hover: callback gets facts through the fog gate
+    fogOn(); R3D.centerOn(24, 14); hovers.length = 0;
+    const E = __r3d.project(LM.UNIT_ENEMY_WARRIOR.q, LM.UNIT_ENEMY_WARRIOR.r);
+    mev('mousemove', area, E.x, E.y);
+    const last = hovers[hovers.length - 1];
+    assert(last && sameHex(last.h, LM.UNIT_ENEMY_WARRIOR), 'hover hex: ' + JSON.stringify(last && last.h));
+    assert(last.f.terrain === null && last.f.units.length === 0 && last.f.city === null, 'hover callback leaked an unexplored tile: ' + JSON.stringify(last.f));
+    assert(last.pos && last.pos.x === E.x, 'hover position missing');
+    // an event whose target is outside the map area (a panel over it) picks nothing
+    hovers.length = 0; const other = document.createElement('div'); document.body.appendChild(other);
+    mev('mousemove', other, E.x, E.y); other.remove();
+    assert(hovers.every((x) => x.h === null), 'a panel over the map picked the ground beneath it');
+    // visible tile: facts carry the unit, and leaving the map clears the hover
+    R3D.centerOn(5, 5); hovers.length = 0;
+    const V = __r3d.project(LM.UNIT_WARRIOR.q, LM.UNIT_WARRIOR.r);
+    mev('mousemove', area, V.x, V.y);
+    assert(hovers.length && hovers[hovers.length - 1].f.units.length === 1, 'visible unit not reported');
+    mev('mouseleave', area, V.x, V.y);
+    assert(hovers[hovers.length - 1].h === null, 'mouseleave did not clear the hover');
+    // a throwing callback must not break the renderer
+    fogOff();
+    initWith({mapArea: area, onTileClick: () => { throw new Error('boom'); }});
+    R3D.centerOn(10, 10); const P2 = __r3d.project(10, 10);
+    mev('mousedown', area, P2.x, P2.y); mev('mouseup', window, P2.x, P2.y);
+    // re-init: the old session's listeners are gone
+    clicks.length = 0;
+    initWith({mapArea: area, onTileClick: (h) => clicks.push(h)});
+    R3D.centerOn(10, 10);
+    mev('mousedown', area, P2.x, P2.y); mev('mouseup', window, P2.x, P2.y);
+    assert(clicks.length === 1, 'click fired ' + clicks.length + ' times: listeners leaked across init');
+    // A leaked listener acts on the live session, so one hover event would fire the callback once per init.
+    let hv = 0; initWith({mapArea: area, onTileHover: () => { hv++; }}); R3D.centerOn(10, 10);
+    mev('mousemove', area, P2.x, P2.y);
+    assert(hv === 1, 'one mousemove fired the hover callback ' + hv + ' times: listeners leaked across init');
+    // and dispose leaves nothing registered
+    R3D.dispose(); hv = 0; clicks.length = 0;
+    mev('mousemove', area, P2.x, P2.y); mev('mousedown', area, P2.x, P2.y); mev('mouseup', window, P2.x, P2.y);
+    assert(hv === 0 && clicks.length === 0, 'events still reach a disposed renderer');
+    window.dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowRight', bubbles: true}));
+    assert(stateSnapshot() === before, 'pointer input mutated the game state');
+  } finally {
+    area.remove(); fogOff();
+    initWith({});
+    R3D.syncState();
+  }
+}});
+
 async function runAll() {
   const failures = [];
   let passed = 0;

@@ -998,6 +998,7 @@
     controls.panSpeed = 1.1;
     camera.position.set(mid.x - 2, 7, mid.z + 18);
     controls.target.set(mid.x - 2, 0.3, mid.z + 5);
+    camera.lookAt(controls.target);     // aimed from the first instant, not only after the first frame
 
     scene.add(new THREE.HemisphereLight(0xd8ecff, 0x6b5a3a, 0.5));
     const sun = new THREE.DirectionalLight(0xfff0d4, 0.92);
@@ -1019,6 +1020,7 @@
       fogAt: opts.fogAt || (() => C.FOG.UNSEEN),
       onTileClick: opts.onTileClick || null,
       onTileHover: opts.onTileHover || null,
+      keys: new Set(), wasd: opts.wasd === true, keyT: 0, drag: null, hoverHex: null, input: null,
       needsRender: true, frames: 0, raf: 0, fly: null, anims: [], hoverTile: null,
       labelRoot: opts.labels || document.getElementById('labels') || null, amenityOf: opts.amenityOf || null,
       labels: new Map(), yieldTiles: [], vw: 0, vh: 0,
@@ -1034,6 +1036,7 @@
     window.addEventListener('resize', S.onResize);
     resize();
     rebuildMap();
+    bindInput(opts.mapArea || document.getElementById('map-area') || opts.canvas);
     S.raf = requestAnimationFrame(loop);
     return true;
   }
@@ -1065,6 +1068,7 @@
     // Water drifts at a low ambient rate so an idle map still breathes without
     // redrawing every frame; any frame drawn for another reason advances it too.
     if (!reducedMotion && now - S.lastAmbient >= AMBIENT_MS) S.needsRender = true;
+    if (S.keys.size) { keyPan(now); live = true; } else S.keyT = 0;
     // controls.update() returns true while damping/pan is still moving.
     const moved = S.controls.update();
     if (moved) clampCamera();
@@ -1131,6 +1135,163 @@
              span: 2 * d * Math.tan(THREE.MathUtils.degToRad(FOV / 2)) * S.camera.aspect };
   }
 
+
+  // ---- Picking, pointer input and camera keys ----
+  // Every tile lookup the picker makes goes through probeTile, so a test can
+  // prove picking is maths plus a handful of candidates, never a scan.
+  let probes = 0;
+  const probeTile = (q, r) => { probes++; return tileAt(q, r); };
+  const pickRay = new THREE.Raycaster();
+  const PICK_TOP = 1.0, PICK_BOTTOM = -0.6, PICK_STEP = 0.1, PICK_REACH = 0.03;   // brackets heightAt over every terrain type
+
+  // Screen (client) pixels -> {q, r} | null. Intersect the view ray with a
+  // ground plane, ask the core which hex that lands in, then re-intersect at
+  // the height of that tile: hills stand up to a hex above y=0, so one flat
+  // plane alone picks the neighbour behind them. Outside the canvas, above the
+  // horizon, or beyond the grid there is nothing to pick: null, never a throw.
+  function pickHex(sx, sy) {
+    if (!S || !Number.isFinite(sx) || !Number.isFinite(sy)) return null;
+    const rc = S.canvas.getBoundingClientRect();
+    if (!(rc.width > 0 && rc.height > 0)) return null;
+    const nx = ((sx - rc.left) / rc.width) * 2 - 1, ny = -((sy - rc.top) / rc.height) * 2 + 1;
+    if (nx < -1 || nx > 1 || ny < -1 || ny > 1) return null;
+    S.camera.updateMatrixWorld(true);
+    pickRay.setFromCamera({ x: nx, y: ny }, S.camera);
+    const o = pickRay.ray.origin, d = pickRay.ray.direction;
+    if (!(d.y < -1e-6)) return null;                       // sky
+    // March down through horizontal planes spanning the terrain's height
+    // range until the ray is below the ground, then bisect between the last
+    // plane above it and the first below. One flat plane would pick the
+    // wrong hex behind any hill. Tiles seen are cached per pick, so the probe
+    // count is the number of distinct tiles the ray crosses, a handful.
+    const seen = new Map();
+    const probe = (x, z) => {
+      const hex = C.worldToHex(x, z, S.cols, S.rows);
+      if (!hex) return null;
+      const k = hex.r * S.cols + hex.q;
+      if (!seen.has(k)) seen.set(k, probeTile(hex.q, hex.r));
+      const tile = seen.get(k);
+      return tile ? { hex, below: (y) => C.heightAt(tileCopy(tile), x, z) >= y } : null;
+    };
+    // Step along the ray, not down it: a grazing ray covers a lot of ground per
+    // 0.1 of height, so each step is capped in both height and horizontal reach.
+    const hs = Math.hypot(d.x, d.z);
+    const tTop = Math.max(0, (PICK_TOP - o.y) / d.y), tBot = (PICK_BOTTOM - o.y) / d.y;
+    if (!(tBot > tTop)) return null;
+    const dt = Math.min(PICK_STEP / -d.y, PICK_REACH / Math.max(hs, 1e-9));
+    const at = (t) => ({ x: o.x + d.x * t, z: o.z + d.z * t, y: o.y + d.y * t });
+    let prev = tTop, hit = null;
+    for (let t = tTop; !hit; t += dt) {
+      const last = t + dt >= tBot;
+      if (last) t = tBot;
+      const p = at(t), pr = probe(p.x, p.z);
+      if (pr && (last || pr.below(p.y))) hit = { t, pr };
+      else if (last) break;
+      else prev = t;
+    }
+    if (!hit) return null;
+    let lo = prev, hi = hit.t, best = hit.pr.hex;
+    for (let i = 0; i < 6; i++) {
+      const t = (lo + hi) / 2, p = at(t), pr = probe(p.x, p.z);
+      if (!pr) break;
+      if (pr.below(p.y)) { hi = t; best = pr.hex; } else lo = t;
+    }
+    return { q: best.q, r: best.r };
+  }
+
+  // What the game may show for a tile. The tile is assembled here (real tiles
+  // carry no city or units field) from copies, then passed through the single
+  // fog gate: callers never see the raw tile.
+  function factsAt(q, r) {
+    const tile = tileAt(q, r);
+    if (!tile) return C.tileFacts(null, C.FOG.UNSEEN);
+    const st = S.getState() || {}, copy = (o) => JSON.parse(JSON.stringify(o));
+    let city = null; const units = [];
+    (Array.isArray(st.players) ? st.players : []).forEach((pl, p) => {
+      for (const c of ((pl && pl.cities) || [])) if (c.q === q && c.r === r) city = Object.assign(copy(c), { ownerPlayer: p, owner: p });
+      for (const u of ((pl && pl.units) || [])) if (u.q === q && u.r === r && u.hp > 0) units.push(Object.assign(copy(u), { player: p }));
+    });
+    return C.tileFacts(Object.assign({}, tile, { city, units }), fogStateAt(q, r));
+  }
+
+  const fire = (fn, ...args) => { if (typeof fn !== 'function') return; try { fn(...args); } catch (err) { console.error('R3D callback threw:', err); } };
+  const DRAG_PX = 4;       // same drag-versus-click threshold the 2D map used
+
+  function bindInput(area) {
+    const I = S.input = { area, on: [] };
+    const add = (target, type, fn, opt) => { target.addEventListener(type, fn, opt); I.on.push([target, type, fn, opt]); };
+    add(area, 'mousedown', (e) => {
+      if (e.button !== 0) return;
+      S.drag = { x: e.clientX, y: e.clientY, moved: false };
+    });
+    add(window, 'mousemove', (e) => {
+      if (S.drag) {
+        if (Math.abs(e.clientX - S.drag.x) + Math.abs(e.clientY - S.drag.y) > DRAG_PX) S.drag.moved = true;
+        return;
+      }
+      // Only the map itself: a panel floating over it must not pick the ground underneath.
+      if (!(e.target instanceof Node) || !area.contains(e.target)) { hoverOff(); return; }
+      const hex = pickHex(e.clientX, e.clientY);
+      if (!hex) { hoverOff(); return; }
+      if (!S.hoverHex || S.hoverHex.q !== hex.q || S.hoverHex.r !== hex.r) { S.hoverHex = hex; setHover(hex.q, hex.r); }
+      fire(S.onTileHover, hex, factsAt(hex.q, hex.r), { x: e.clientX, y: e.clientY });
+    });
+    add(area, 'mouseleave', () => { hoverOff(); });
+    add(window, 'mouseup', (e) => {
+      if (e.button !== 0) return;     // another button's release is not the end of this gesture
+      const d = S.drag; S.drag = null;
+      if (!d || d.moved) return;
+      const hex = pickHex(e.clientX, e.clientY);
+      if (hex) fire(S.onTileClick, hex);
+    });
+    // Arrows pan. WASD is opt-in: the game binds A (attack) and S (skip).
+    const KEYS = { ArrowUp: 'f', ArrowDown: 'b', ArrowLeft: 'l', ArrowRight: 'r' };
+    if (S.wasd) Object.assign(KEYS, { w: 'f', s: 'b', a: 'l', d: 'r', W: 'f', S: 'b', A: 'l', D: 'r' });
+    // Capture phase, and the event is claimed outright: another pan handler on
+    // document must not also move the map on the same keypress.
+    add(window, 'keydown', (e) => {
+      const k = KEYS[e.key];
+      if (!k || e.ctrlKey || e.metaKey || e.altKey) return;
+      const t = e.target;
+      if (t && t.nodeType === 1 && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable)) return;
+      S.keys.add(k); requestRender();
+      e.preventDefault(); e.stopImmediatePropagation();
+    }, true);
+    add(window, 'keyup', (e) => { const k = KEYS[e.key]; if (k) S.keys.delete(k); });
+    add(window, 'blur', () => { S.keys.clear(); S.drag = null; });
+  }
+
+  function hoverOff() {
+    if (!S || !S.hoverHex) return;
+    S.hoverHex = null; setHover(null, null);
+    fire(S.onTileHover, null, null, null);
+  }
+
+  function unbindInput() {
+    if (!S || !S.input) return;
+    for (const [t, type, fn, opt] of S.input.on) t.removeEventListener(type, fn, opt);
+    S.input = null; S.keys.clear(); S.drag = null;
+  }
+
+  // Held keys pan along the ground, at a speed that follows how far out the
+  // camera is. Every shift goes through applyTarget, hence clampTarget.
+  function keyPan(now) {
+    const dt = S.keyT ? Math.min(0.1, Math.max(0, (now - S.keyT) / 1000)) : 0;
+    S.keyT = now;
+    if (!dt) return;
+    const fwd = new THREE.Vector3().subVectors(S.controls.target, S.camera.position); fwd.y = 0;
+    if (fwd.lengthSq() < 1e-8) fwd.set(0, 0, -1);
+    fwd.normalize();
+    const right = new THREE.Vector3(-fwd.z, 0, fwd.x);
+    const sp = S.camera.position.distanceTo(S.controls.target) * 0.9 * dt, v = new THREE.Vector3();
+    if (S.keys.has('f')) v.addScaledVector(fwd, sp);
+    if (S.keys.has('b')) v.addScaledVector(fwd, -sp);
+    if (S.keys.has('r')) v.addScaledVector(right, sp);
+    if (S.keys.has('l')) v.addScaledVector(right, -sp);
+    const t = S.controls.target;
+    applyTarget(t.x + v.x, t.z + v.z);
+  }
+
   function setQuality(q) {
     if (!S || !q) return;
     Object.assign(S.quality, q);
@@ -1144,6 +1305,7 @@
     if (!S) return;
     cancelAnimationFrame(S.raf);
     window.removeEventListener('resize', S.onResize);
+    unbindInput();
     S.controls.dispose();
     disposeTerrain();
     disposeScenery();
@@ -1883,7 +2045,7 @@
   // not enough — a leak needs both to fail.
   window.R3D = { init, rebuildMap, rebuildTile, syncState, setYieldTiles, setSelection, setHover, playAnimation, registerFogHideable, applyFogToScenery,
     refreshFog, fogAt: (q, r) => (S ? fogStateAt(q, r) : C.FOG.UNSEEN), panToHex, centerOn,
-    getCameraView, setQuality, resize, requestRender, dispose };
+    hexAtScreen: pickHex, getCameraView, setQuality, resize, requestRender, dispose };
 
   window.__r3d = {
     drawCalls: () => (S ? S.renderer.info.render.calls : 0),
@@ -1905,6 +2067,20 @@
     yieldLabelOn: (q, r) => labelFor('yield', q + ',' + r),
     labelsInDom: () => (S && S.labelRoot ? S.labelRoot.querySelectorAll('.lbl').length : 0),
     frames: () => (S ? S.frames : 0),
+    tileProbes: () => probes,
+    camera: () => (S ? S.camera : null),
+    hoverFacts: (q, r) => (S ? factsAt(q, r) : null),
+    mouseButtons: () => (S ? S.controls.mouseButtons : null),
+    // Client pixels of a tile's surface centre: lets a test aim at a known tile.
+    project: (q, r) => {
+      if (!S || !tileAt(q, r)) return null;
+      const c = C.hexCenter(q, r), tile = tileCopy(tileAt(q, r));
+      S.camera.updateMatrixWorld(true);
+      const v = new THREE.Vector3(c.x, C.heightAt(tile, c.x, c.z), c.z).project(S.camera), rc = S.canvas.getBoundingClientRect();
+      return { x: rc.left + (v.x + 1) / 2 * rc.width, y: rc.top + (1 - v.y) / 2 * rc.height };
+    },
+    // Shift the orbit target in world units, through the same clamp as every pan.
+    panBy: (dx, dz) => { if (S) applyTarget(S.controls.target.x + dx, S.controls.target.z + dz); },
     canvasWidth: () => (S ? S.renderer.domElement.width : 0),
     setCameraDistance: (d) => {
       if (!S) return;
