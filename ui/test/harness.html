@@ -1,0 +1,125 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>R3D harness</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="../render3d-core.js"></script>
+<script src="../render3d.js"></script>
+</head>
+<body>
+<script>
+// ── Fixture game state: 32x20, varied terrain, 2 cities, 6 units ──
+// Shape mirrors GET /api/state. LM is the single landmark table: later tasks
+// ADD entries here instead of inventing their own tiles.
+const COLS = 32, ROWS = 20;
+const LM = {
+  OCEAN:  {q: 0,  r: 10},                 // deep ocean
+  COAST:  {q: 2,  r: 10},                 // coast, borders ocean at (1,10)
+  HILL:   {q: 8,  r: 6},                  // Grassland Hills (terrain 3)
+  RIVER:  {q: 10, r: 8, edges: [1, 4]},   // river on top + bottom edges (reciprocated on neighbors)
+  SEEN:   {q: 6,  r: 5},                  // within sight of player 0
+  UNSEEN: {q: 28, r: 3},                  // far from every player-0 city/unit
+  CITY_A: {q: 6,  r: 5, name: 'Alpha', player: 0},
+  CITY_B: {q: 25, r: 14, name: 'Beta', player: 1},
+  UNIT_SETTLER: {player: 0, id: 0, q: 7,  r: 6},
+  UNIT_BUILDER: {player: 0, id: 1, q: 6,  r: 6},
+  UNIT_WARRIOR: {player: 0, id: 2, q: 5,  r: 5},
+  UNIT_ENEMY_WARRIOR: {player: 1, id: 0, q: 24, r: 14},
+  UNIT_ENEMY_ARCHER:  {player: 1, id: 1, q: 26, r: 14},
+  UNIT_ENEMY_SCOUT:   {player: 1, id: 2, q: 23, r: 13},
+};
+const UNIT_TYPE = {settler: 0, builder: 1, scout: 2, warrior: 3, slinger: 4, archer: 5};
+
+function buildFixture() {
+  const C = window.R3DCore;
+  const tiles = [];
+  const flatTerrain = [2, 4];
+  const variety = [2, 3, 4, 5, 6, 7, 8, 2, 4, 3, 12];
+  for (let r = 0; r < ROWS; r++) for (let q = 0; q < COLS; q++) {
+    let terrain;
+    if (q <= 1 || q >= 30 || r === 0 || r === ROWS - 1) terrain = 0;
+    else if (q === 2 || q === 29 || r === 1 || r === ROWS - 2) terrain = 1;
+    else terrain = variety[(q * 7 + r * 13) % variety.length];
+    tiles.push({q, r, terrain, feature: 0, resource: 0, riverEdges: 0, improvement: 0, ownerPlayer: 0, ownerCity: 0});
+  }
+  const at = (q, r) => tiles[r * COLS + q];
+  // Keep every city and unit on flat, passable land.
+  const anchors = [LM.CITY_A, LM.CITY_B, LM.UNIT_SETTLER, LM.UNIT_BUILDER, LM.UNIT_WARRIOR,
+                   LM.UNIT_ENEMY_WARRIOR, LM.UNIT_ENEMY_ARCHER, LM.UNIT_ENEMY_SCOUT];
+  for (const t of tiles) for (const a of anchors) {
+    if (t.terrain > 1 && C.hexDist(t.q, t.r, a.q, a.r) <= 1) t.terrain = flatTerrain[(t.q + t.r) % 2];
+  }
+  at(LM.HILL.q, LM.HILL.r).terrain = 3;
+  // River: set edges on RIVER tile and the reciprocal edge on each neighbour.
+  const rv = at(LM.RIVER.q, LM.RIVER.r);
+  rv.terrain = 2;
+  for (const e of LM.RIVER.edges) {
+    rv.riverEdges |= (1 << e);
+    const [nq, nr] = C.neighbor(LM.RIVER.q, LM.RIVER.r, e);
+    const nt = at(nq, nr);
+    nt.riverEdges |= (1 << ((e + 3) % 6));
+    if (nt.terrain <= 1) nt.terrain = 2;
+  }
+  const unit = (u, type, hp) => ({id: u.id, unitType: type, q: u.q, r: u.r, hp, mp: 2, charges: 0, fortify: 0});
+  const city = (c, id) => ({id, name: c.name, q: c.q, r: c.r, population: 3, hp: 200, foodStockpile: 0,
+    prodStockpile: 0, production: 0, buildings: 0, foundedTurn: 1, isCapital: true, lockedTiles: []});
+  const players = [
+    {units: [unit(LM.UNIT_SETTLER, UNIT_TYPE.settler, 100), unit(LM.UNIT_BUILDER, UNIT_TYPE.builder, 100),
+             unit(LM.UNIT_WARRIOR, UNIT_TYPE.warrior, 100)], cities: [city(LM.CITY_A, 0)]},
+    {units: [unit(LM.UNIT_ENEMY_WARRIOR, UNIT_TYPE.warrior, 100), unit(LM.UNIT_ENEMY_ARCHER, UNIT_TYPE.archer, 100),
+             unit(LM.UNIT_ENEMY_SCOUT, UNIT_TYPE.scout, 100)], cities: [city(LM.CITY_B, 0)]},
+  ];
+  return {cols: COLS, rows: ROWS, tiles, players, currentPlayer: 0, turn: 1};
+}
+const FIXTURE = buildFixture();
+window.R3D_FIXTURE = {state: FIXTURE, LM, COLS, ROWS};
+
+// ── Assertions: later tasks append {name, fn} entries ──
+const TESTS = [];
+const tileOf = (p) => FIXTURE.tiles[p.r * COLS + p.q];
+TESTS.push({name: 'hexCenter odd column shifts down', fn: () => {
+  if (!(R3DCore.hexCenter(1, 0).z > 0)) throw new Error('expected z > 0');
+}});
+
+TESTS.push({name: 'CDN scripts loaded (THREE r128 + OrbitControls)', fn: () => {
+  if (typeof THREE === 'undefined' || THREE.REVISION !== '128') throw new Error('THREE r128 missing');
+  if (typeof THREE.OrbitControls !== 'function') throw new Error('OrbitControls missing');
+}});
+TESTS.push({name: 'fixture landmarks have their stated properties', fn: () => {
+  const C = R3DCore, ok = (c, m) => { if (!c) throw new Error(m); };
+  ok(tileOf(LM.OCEAN).terrain === 0, 'OCEAN not ocean');
+  ok(tileOf(LM.COAST).terrain === 1, 'COAST not coast');
+  ok(C.neighbor(LM.COAST.q, LM.COAST.r, 3).every(Number.isInteger) && tileOf({q: 1, r: 10}).terrain === 0, 'COAST has no ocean neighbour');
+  ok(tileOf(LM.HILL).terrain === 3, 'HILL not hills');
+  const rv = tileOf(LM.RIVER);
+  for (const e of LM.RIVER.edges) {
+    ok(rv.riverEdges & (1 << e), 'RIVER edge ' + e + ' unset');
+    const [nq, nr] = C.neighbor(LM.RIVER.q, LM.RIVER.r, e);
+    ok(FIXTURE.tiles[nr * COLS + nq].riverEdges & (1 << ((e + 3) % 6)), 'RIVER edge ' + e + ' not reciprocated');
+  }
+  const src = [];
+  for (const p of FIXTURE.players[0].units.concat(FIXTURE.players[0].cities)) src.push(p);
+  const d = (l) => Math.min(...src.map(s => C.hexDist(l.q, l.r, s.q, s.r)));
+  ok(d(LM.SEEN) <= 2, 'SEEN too far from player 0');
+  ok(d(LM.UNSEEN) > 8, 'UNSEEN too close to player 0');
+  for (const p of FIXTURE.players) for (const o of p.units.concat(p.cities))
+    ok(tileOf(o).terrain >= 2 && tileOf(o).terrain !== 12, 'object on water/mountain at ' + o.q + ',' + o.r);
+  ok(FIXTURE.players.reduce((n, p) => n + p.units.length, 0) === 6, 'expected 6 units');
+}});
+
+function runAll() {
+  const failures = [];
+  let passed = 0;
+  for (const t of TESTS) {
+    try { t.fn(); passed++; }
+    catch (e) { failures.push(t.name + ': ' + (e && e.message || e)); }
+  }
+  document.title = 'R3D-RESULT ' + JSON.stringify({passed, failed: failures.length, failures});
+}
+window.R3D_TESTS = TESTS;
+runAll();
+</script>
+</body>
+</html>
