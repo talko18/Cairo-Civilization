@@ -24,6 +24,15 @@ const LM = {
   CITY_A: {q: 6,  r: 5, name: 'Alpha', player: 0},
   CITY_B: {q: 25, r: 14, name: 'Beta', player: 1},
   CITY_HILLS: {q: 15, r: 12, name: 'Gamma', player: 0},   // a city on hills: flattening must show here
+  WOODS:      {q: 12, r: 4},              // Woods on grassland
+  RAINFOREST: {q: 14, r: 4},
+  WOODS2:     {q: 13, r: 6},              // second woods tile: shares colour buckets with WOODS
+  MARSH:      {q: 16, r: 4},
+  OASIS:      {q: 18, r: 4},              // on desert
+  MOUNTAIN:   {q: 20, r: 4},
+  RES_ROW:    {r: 15, q0: 4},             // resources 1..10 on q0..q0+9, row r (fish sits on a coast tile instead)
+  FISH:       {q: 2,  r: 12},             // coast tile carrying Fish
+  IMP_ROW:    {r: 17, q0: 4},             // improvements 1..5 on q0..q0+4
   UNIT_SETTLER: {player: 0, id: 0, q: 7,  r: 6},
   UNIT_BUILDER: {player: 0, id: 1, q: 6,  r: 6},
   UNIT_WARRIOR: {player: 0, id: 2, q: 5,  r: 5},
@@ -53,6 +62,14 @@ function buildFixture() {
     if (t.terrain > 1 && C.hexDist(t.q, t.r, a.q, a.r) <= 1) t.terrain = flatTerrain[(t.q + t.r) % 2];
   }
   at(LM.HILL.q, LM.HILL.r).terrain = 3;
+  const setT = (p, terrain, props) => Object.assign(at(p.q, p.r), {terrain}, props);
+  setT(LM.WOODS, 2, {feature: 1}); setT(LM.WOODS2, 2, {feature: 1}); setT(LM.RAINFOREST, 2, {feature: 2}); setT(LM.MARSH, 2, {feature: 3});
+  setT(LM.OASIS, 6, {feature: 4}); setT(LM.MOUNTAIN, 12, {});
+  for (let k = 1; k <= 10; k++) {
+    if (k === 5) at(LM.FISH.q, LM.FISH.r).resource = 5;
+    else setT({q: LM.RES_ROW.q0 + k - 1, r: LM.RES_ROW.r}, 2, {resource: k});
+  }
+  for (let k = 1; k <= 5; k++) setT({q: LM.IMP_ROW.q0 + k - 1, r: LM.IMP_ROW.r}, 2, {improvement: k});
   at(LM.CITY_HILLS.q, LM.CITY_HILLS.r).terrain = 3;
   // River: set edges on RIVER tile and the reciprocal edge on each neighbour.
   const rv = at(LM.RIVER.q, LM.RIVER.r);
@@ -273,6 +290,93 @@ TESTS.push({name: 'the water plane is above the coast floor and below land', fn:
   assert(__r3d.waterLevel() > R3DCore.tileBase({terrain: 1}) && __r3d.waterLevel() < R3DCore.tileBase({terrain: 2}))});
 TESTS.push({name: 'chunk and river counts fit the draw-call budget', fn: async () => {
   R3D.requestRender(); await wait(150);
+  assert(__r3d.drawCalls() < 300, 'draw calls ' + __r3d.drawCalls());
+}});
+
+// ── Task 7: instanced scenery ──
+TESTS.push({name: 'scenery is instanced, not thousands of meshes', fn: () =>
+  assert(__r3d.sceneCount() < 200, `scene has ${__r3d.sceneCount()} objects`)});
+TESTS.push({name: 'every resource and improvement type has geometry', fn: () => {
+  for (let res = 1; res <= 10; res++) assert(__r3d.hasResourceArt(res), `resource ${res}`);
+  for (let imp = 1; imp <= 5; imp++) assert(__r3d.hasImprovementArt(imp), `improvement ${imp}`);
+}});
+TESTS.push({name: 'each instance knows its tile', fn: () => {
+  assert(__r3d.instanceCount() > 100, 'no scenery built: ' + __r3d.instanceCount());
+  assert(__r3d.instancesWithoutTile() === 0);
+}});
+TESTS.push({name: 'each landmark tile actually carries its props', fn: () => {
+  const on = (p) => __r3d.instancesOnTile(p.q, p.r);
+  for (const k of ['WOODS', 'RAINFOREST', 'MARSH', 'OASIS', 'MOUNTAIN']) assert(on(LM[k]) >= 3, k + ' has ' + on(LM[k]));
+  const M = LM.MOUNTAIN;
+  assert(__r3d.instancesOfShapeOnTile(M.q, M.r, 'peak') === 3, 'mountain peaks: ' + __r3d.instancesOfShapeOnTile(M.q, M.r, 'peak'));
+  assert(__r3d.instancesOfShapeOnTile(M.q, M.r, 'snow') >= 1, 'mountain has no snow cap');
+  for (let res = 1; res <= 10; res++) {
+    const p = res === 5 ? LM.FISH : {q: LM.RES_ROW.q0 + res - 1, r: LM.RES_ROW.r};
+    assert(on(p) >= 1, 'resource ' + res + ' draws nothing');
+    assert(__r3d.resourceInstancesOn(p.q, p.r) >= 1, 'resource ' + res + ' has no resource-art instance');
+  }
+  for (let imp = 1; imp <= 5; imp++) {
+    const p = {q: LM.IMP_ROW.q0 + imp - 1, r: LM.IMP_ROW.r};
+    assert(__r3d.improvementInstancesOn(p.q, p.r) >= 1, 'improvement ' + imp + ' draws nothing');
+  }
+}});
+TESTS.push({name: 'no props on city tiles or open ocean', fn: () => {
+  assert(__r3d.instancesOnTile(LM.CITY_A.q, LM.CITY_A.r) === 0, 'props on a city tile');
+  assert(__r3d.instancesOnTile(LM.OCEAN.q, LM.OCEAN.r) === 0, 'props on open ocean');
+}});
+TESTS.push({name: 'props stand on the ground, not in the air or under it', fn: () => {
+  // measured: ground props sit within 0.14 (tallest part is a mine beam), peak centres exactly 0.64 up
+  assert(__r3d.maxGroundGap(false) < 0.15, 'a prop is off the ground by ' + __r3d.maxGroundGap(false));
+  assert(__r3d.maxGroundGap(true) < 0.66, 'a peak is off the ground by ' + __r3d.maxGroundGap(true));
+  assert(__r3d.propsOffGround() === 0, 'props off the ground');
+}});
+TESTS.push({name: 'scatter is deterministic across rebuilds', fn: () => {
+  const a = __r3d.sceneryHash(); R3D.rebuildMap(); const b = __r3d.sceneryHash();
+  assert(a === b, 'hash changed ' + a + ' -> ' + b);
+  assert(a !== 0);
+}});
+TESTS.push({name: 'scenery never writes into game state', fn: () => {
+  const keys = new Set(['q', 'r', 'terrain', 'feature', 'resource', 'riverEdges', 'improvement', 'ownerPlayer', 'ownerCity']);
+  assert(fixture.tiles.every(t => Object.keys(t).every(k => keys.has(k))), 'a tile gained a field');
+}});
+TESTS.push({name: 'fog hides exactly one tile\'s props, even inside a shared mesh, and restores every float', fn: () => {
+  const L = LM.WOODS, O = LM.WOODS2, n = __r3d.instancesOnTile(L.q, L.r), nO = __r3d.instancesOnTile(O.q, O.r);
+  assert(n >= 3 && nO >= 3, 'precondition ' + n + '/' + nO);
+  assert(__r3d.sharedMeshes(L.q, L.r, O.q, O.r) >= 1, 'fixture tiles must share a mesh');
+  assert(__r3d.matrixFloatsDifferingFromBase() === 0, 'precondition: nothing hidden');
+  R3D.applyFogToScenery((q, r) => q === L.q && r === L.r);
+  assert(__r3d.visibleInstancesOnTile(L.q, L.r) === 0, 'props still visible under fog');
+  assert(__r3d.hiddenInstancesOnTile(L.q, L.r) === n, 'hidden matrices are not 15 zeros + w=1: ' + __r3d.hiddenInstancesOnTile(L.q, L.r) + '/' + n);
+  assert(__r3d.visibleInstancesOnTile(O.q, O.r) === nO, 'fog hid props on a tile sharing the mesh');
+  assert(__r3d.hiddenInstancesOnTile(O.q, O.r) === 0, 'neighbour partly hidden');
+  const R = LM.RAINFOREST;
+  assert(__r3d.visibleInstancesOnTile(R.q, R.r) === __r3d.instancesOnTile(R.q, R.r), 'fog hid a neighbour');
+  R3D.applyFogToScenery(() => false);
+  assert(__r3d.matrixFloatsDifferingFromBase() === 0, 'restore left matrix floats differing from base');
+  assert(__r3d.visibleInstancesOnTile(L.q, L.r) === n, 'props not restored');
+}});
+TESTS.push({name: 'the fog rule is asked once per tile, not once per instance', fn: () => {
+  let calls = 0; const seen = new Set();
+  R3D.applyFogToScenery((q, r) => { calls++; seen.add(q + ',' + r); return false; });
+  assert(calls === seen.size, calls + ' calls for ' + seen.size + ' tiles');
+  assert(calls > 10 && calls < __r3d.instanceCount() / 2, 'calls ' + calls);
+}});
+TESTS.push({name: 'a fog choice survives a scenery rebuild', fn: () => {
+  const L = LM.WOODS;
+  R3D.applyFogToScenery((q, r) => q === L.q && r === L.r);
+  try { R3D.rebuildTile(L.q, L.r); assert(__r3d.visibleInstancesOnTile(L.q, L.r) === 0, 'rebuild re-exposed fogged props'); }
+  finally { R3D.applyFogToScenery(() => false); }
+  assert(__r3d.visibleInstancesOnTile(L.q, L.r) > 0);
+}});
+TESTS.push({name: 'registerFogHideable rejects a tile list of the wrong length', fn: () => {
+  let threw = false;
+  try { R3D.registerFogHideable(new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial(), 3), [1]); }
+  catch (e) { threw = true; }
+  assert(threw, 'mismatched list accepted');
+}});
+TESTS.push({name: 'scenery adds a few dozen draw calls, not thousands', fn: async () => {
+  R3D.centerOn(16, 10); __r3d.setCameraDistance(14); R3D.requestRender(); await wait(200);
+  assert(__r3d.sceneryMeshCount() > 10 && __r3d.sceneryMeshCount() < 150, 'meshes ' + __r3d.sceneryMeshCount());
   assert(__r3d.drawCalls() < 300, 'draw calls ' + __r3d.drawCalls());
 }});
 
