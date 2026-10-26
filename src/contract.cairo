@@ -1070,8 +1070,12 @@ mod CairoCiv {
                 let bbit = item - 64;
                 if !city::can_build(@c, bbit, techs) { return; }
             }
-            // Reset stockpile when switching production target
-            if c.current_production != item {
+            // Switching away from an in-progress build forfeits its stockpile.
+            // A city that has just completed something is idle
+            // (current_production == 0) while deliberately holding the overflow
+            // process_end_of_turn carried over, and choosing what to build next
+            // is not a switch — so an idle city keeps what it has.
+            if c.current_production != 0 && c.current_production != item {
                 c.production_stockpile = 0;
             }
             c.current_production = item;

@@ -4225,3 +4225,151 @@ fn test_warrior_cannot_build() {
     assert!(d.get_tile_improvement(game_id, w.q, w.r) == IMPROVEMENT_NONE,
         "Warrior should not be able to build");
 }
+
+// ===========================================================================
+// S62: production overflow carries into the next item
+//
+// process_end_of_turn deliberately keeps the leftover production when an item
+// completes: handle_production_complete re-reads the city and then restores
+// new_stockpile, which is (stockpile + per_turn - cost). Completion also sets
+// current_production to 0.
+//
+// act_set_production used to reset the stockpile whenever the new item differed
+// from current_production. An idle city has current_production == 0, so every
+// completion looked like a target switch and the carry was wiped the moment the
+// player chose what to build next — and validate_turn_submission *forces* them
+// to choose before they can submit, so the carry could never survive a single
+// turn. Slinger costs 35, which no early per-turn production rate divides, so
+// there is always a carry to lose.
+// ===========================================================================
+#[test]
+fn test_production_overflow_carries_to_next_item() {
+    let (d, addr) = deploy();
+    let game_id = setup_active_game(d, addr);
+
+    submit_turn(d, addr, player_a(), game_id, array![
+        Action::FoundCity((0, 'Carry')),
+        Action::SetResearch(1),
+        Action::SetProduction((0, PROD_SLINGER)),
+        Action::EndTurn,
+    ]);
+    submit_turn(d, addr, player_b(), game_id, array![
+        Action::FoundCity((0, 'Other')),
+        Action::SetResearch(1),
+        Action::SetProduction((0, PROD_SLINGER)),
+        Action::EndTurn,
+    ]);
+
+    // Advance a round at a time until A's city finishes the slinger. A submits
+    // nothing but EndTurn so that nothing re-assigns its production; the round
+    // resolves on B's submission, and the city is read immediately afterwards,
+    // while it is still idle and still holding the overflow.
+    let mut carry: u16 = 0;
+    let mut completed = false;
+    let mut i: u32 = 0;
+    while i < 40 && !completed {
+        submit_turn(d, addr, player_a(), game_id, array![Action::EndTurn]);
+        skip_turn(d, addr, player_b(), game_id);
+        let c = d.get_city(game_id, 0, 0);
+        if c.current_production == 0 {
+            carry = c.production_stockpile;
+            completed = true;
+        }
+        i += 1;
+    };
+
+    assert!(completed, "slinger never completed in 40 rounds");
+    assert!(carry > 0, "no overflow to carry: this test would prove nothing");
+
+    // Choosing the next item is not a switch away from an in-progress build.
+    // Read before B submits, so the round has not resolved and no new
+    // production has been added yet.
+    submit_turn(d, addr, player_a(), game_id, array![
+        Action::SetProduction((0, PROD_BUILDER)),
+        Action::EndTurn,
+    ]);
+
+    let c = d.get_city(game_id, 0, 0);
+    assert!(c.current_production == PROD_BUILDER, "production target was not set");
+    assert!(c.production_stockpile == carry,
+        "overflow was wiped when the next item was chosen: {} became {}",
+        carry, c.production_stockpile);
+}
+
+// ===========================================================================
+// S63: switching away from an in-progress build still forfeits the stockpile
+// (the guard added for S62 must not turn the reset off altogether)
+// ===========================================================================
+#[test]
+fn test_switching_in_progress_production_still_resets() {
+    let (d, addr) = deploy();
+    let game_id = setup_active_game(d, addr);
+
+    submit_turn(d, addr, player_a(), game_id, array![
+        Action::FoundCity((0, 'Switch')),
+        Action::SetResearch(1),
+        Action::SetProduction((0, PROD_SETTLER)),
+        Action::EndTurn,
+    ]);
+    submit_turn(d, addr, player_b(), game_id, array![
+        Action::FoundCity((0, 'Other')),
+        Action::SetResearch(1),
+        Action::SetProduction((0, PROD_WARRIOR)),
+        Action::EndTurn,
+    ]);
+
+    // Settler costs 80, so it is still in progress after a few rounds.
+    skip_rounds(d, addr, game_id, 3);
+
+    let before = d.get_city(game_id, 0, 0);
+    assert!(before.current_production == PROD_SETTLER, "settler should still be in progress");
+    assert!(before.production_stockpile > 0, "nothing accumulated to forfeit");
+
+    submit_turn(d, addr, player_a(), game_id, array![
+        Action::SetProduction((0, PROD_WARRIOR)),
+        Action::EndTurn,
+    ]);
+
+    let after = d.get_city(game_id, 0, 0);
+    assert!(after.current_production == PROD_WARRIOR, "production target was not switched");
+    assert!(after.production_stockpile == 0,
+        "switching an in-progress build must forfeit the stockpile, kept {}",
+        after.production_stockpile);
+}
+
+// ===========================================================================
+// S64: re-selecting the item already in production keeps the stockpile
+// ===========================================================================
+#[test]
+fn test_reselecting_same_production_keeps_stockpile() {
+    let (d, addr) = deploy();
+    let game_id = setup_active_game(d, addr);
+
+    submit_turn(d, addr, player_a(), game_id, array![
+        Action::FoundCity((0, 'Same')),
+        Action::SetResearch(1),
+        Action::SetProduction((0, PROD_SETTLER)),
+        Action::EndTurn,
+    ]);
+    submit_turn(d, addr, player_b(), game_id, array![
+        Action::FoundCity((0, 'Other')),
+        Action::SetResearch(1),
+        Action::SetProduction((0, PROD_WARRIOR)),
+        Action::EndTurn,
+    ]);
+
+    skip_rounds(d, addr, game_id, 3);
+
+    let before = d.get_city(game_id, 0, 0);
+    assert!(before.production_stockpile > 0, "nothing accumulated to keep");
+
+    submit_turn(d, addr, player_a(), game_id, array![
+        Action::SetProduction((0, PROD_SETTLER)),
+        Action::EndTurn,
+    ]);
+
+    let after = d.get_city(game_id, 0, 0);
+    assert!(after.production_stockpile == before.production_stockpile,
+        "re-selecting the same item reset the stockpile: {} became {}",
+        before.production_stockpile, after.production_stockpile);
+}
