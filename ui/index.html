@@ -2138,7 +2138,14 @@ function applyOptimistic(action) {
     if (tile) { tile.improvement = 0; terrainChanged = { q: action.q, r: action.r }; }
   } else if (action.type === 'SetProduction') {
     const c = p.cities.find(x => x.id === action.cityId);
-    if (c) { c.production = action.itemId; c.prodStockpile = 0; }
+    // Mirror act_set_production: switching away from an in-progress build
+    // forfeits its stockpile, but an idle city is holding the overflow carried
+    // over from whatever it just finished, and re-selecting the item already in
+    // production is not a switch at all.
+    if (c) {
+      if (c.production && c.production !== action.itemId) c.prodStockpile = 0;
+      c.production = action.itemId;
+    }
   } else if (action.type === 'SetResearch') {
     p.currentResearch = action.techId;
     p.accumulatedHalfScience = 0;

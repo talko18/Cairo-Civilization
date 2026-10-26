@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "start": "node server.js",
-    "test": "node --test test/*.test.js && node test/run-browser.mjs && node test/run-game.mjs"
+    "test": "node --test test/*.test.js && node test/run-browser.mjs && node test/run-game.mjs",
+    "test:chain": "node test/run-chain.mjs"
   },
   "dependencies": {
     "express": "^4.21.0",

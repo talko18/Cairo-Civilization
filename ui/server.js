@@ -151,6 +151,34 @@ function extractRevertReason(e) {
   return str.length > 200 ? str.slice(0, 200) + '...' : str;
 }
 
+/**
+ * Wait for a transaction and fail loudly if it reverted.
+ *
+ * starknet.js resolves waitForTransaction as soon as a transaction reaches a
+ * success *state*, and it checks finality before execution: a reverted
+ * transaction on Katana is still ACCEPTED_ON_L2, so the finality match wins and
+ * the promise resolves normally. Every call site that only awaited
+ * waitForTransaction therefore reported success for a transaction that did
+ * nothing on-chain — a player could press Submit Turn, see no error, and not
+ * have submitted.
+ */
+async function confirmTx(txHash) {
+  const receipt = await provider.waitForTransaction(txHash);
+  // starknet.js v6 may hand back either the raw receipt or a wrapper with the
+  // receipt under .value, so check both shapes rather than trusting one.
+  const r = (receipt && receipt.value) ? receipt.value : receipt;
+  const status = r && (r.execution_status || r.executionStatus);
+  if (status === 'REVERTED') {
+    const raw = (r.revert_reason || r.revertReason || '').toString();
+    const err = new Error(extractRevertReason(raw) || 'Transaction reverted');
+    err.reverted = true;
+    err.txHash = txHash;
+    err.revertReason = raw;
+    throw err;
+  }
+  return r;
+}
+
 /** Verify Katana is reachable. */
 async function checkKatanaAlive() {
   try {
@@ -275,7 +303,7 @@ app.post('/api/deploy', async (_req, res) => {
         { contract: sierra, casm },
         { resourceBounds: RESOURCE_BOUNDS, skipValidate: true }
       );
-      await provider.waitForTransaction(declareRes.transaction_hash);
+      await confirmTx(declareRes.transaction_hash);
       classHash = declareRes.class_hash;
     } catch (e) {
       if (e.baseError?.code === 51) {
@@ -293,7 +321,7 @@ app.post('/api/deploy', async (_req, res) => {
       { classHash, constructorCalldata: [] },
       { resourceBounds: RESOURCE_BOUNDS, skipValidate: true }
     );
-    await provider.waitForTransaction(deployRes.transaction_hash);
+    await confirmTx(deployRes.transaction_hash);
     contractAddr = deployRes.contract_address;
     console.log('Contract deployed at:', contractAddr);
 
@@ -321,7 +349,7 @@ app.post('/api/create-game', async (req, res) => {
       { contractAddress: contractAddr, entrypoint: 'create_game', calldata: [String(np)] },
       { resourceBounds: RESOURCE_BOUNDS }
     );
-    await provider.waitForTransaction(createTx.transaction_hash);
+    await confirmTx(createTx.transaction_hash);
     gameId = (gameId || 0) + 1;
     console.log('Game created! ID:', gameId);
     res.json({ gameId, creator: accounts[0].address });
@@ -344,7 +372,7 @@ app.post('/api/join-game', async (req, res) => {
       { contractAddress: contractAddr, entrypoint: 'join_game', calldata: [String(gid)] },
       { resourceBounds: RESOURCE_BOUNDS }
     );
-    await provider.waitForTransaction(joinTx.transaction_hash);
+    await confirmTx(joinTx.transaction_hash);
     gameId = gid;
     console.log(`Player ${pid} joined game ${gid}!`);
     res.json({ ok: true, gameId: gid });
@@ -405,21 +433,21 @@ app.post('/api/setup', async (_req, res) => {
     let classHash;
     try {
       const declareRes = await accounts[0].declare({ contract: sierra, casm }, { resourceBounds: RESOURCE_BOUNDS, skipValidate: true });
-      await provider.waitForTransaction(declareRes.transaction_hash);
+      await confirmTx(declareRes.transaction_hash);
       classHash = declareRes.class_hash;
     } catch (e) {
       if (e.baseError?.code === 51) { const { hash } = require('starknet'); classHash = hash.computeContractClassHash(sierra); }
       else throw e;
     }
     const deployRes = await accounts[0].deployContract({ classHash, constructorCalldata: [] }, { resourceBounds: RESOURCE_BOUNDS, skipValidate: true });
-    await provider.waitForTransaction(deployRes.transaction_hash);
+    await confirmTx(deployRes.transaction_hash);
     contractAddr = deployRes.contract_address;
     contract = new Contract(sierraAbi, contractAddr, provider);
     const createTx = await accounts[0].execute({ contractAddress: contractAddr, entrypoint: 'create_game', calldata: ['2'] }, { resourceBounds: RESOURCE_BOUNDS });
-    await provider.waitForTransaction(createTx.transaction_hash);
+    await confirmTx(createTx.transaction_hash);
     gameId = 1;
     const joinTx = await accounts[1].execute({ contractAddress: contractAddr, entrypoint: 'join_game', calldata: [String(gameId)] }, { resourceBounds: RESOURCE_BOUNDS });
-    await provider.waitForTransaction(joinTx.transaction_hash);
+    await confirmTx(joinTx.transaction_hash);
     res.json({ contractAddress: contractAddr, gameId, players: [predeployed[0].address, predeployed[1].address] });
   } catch (e) {
     console.error('Setup error:', e.baseError || e.message || e);
@@ -603,7 +631,7 @@ app.post('/api/turn', async (req, res) => {
       { contractAddress: contractAddr, entrypoint: 'submit_turn', calldata },
       { resourceBounds: RESOURCE_BOUNDS }
     );
-    await provider.waitForTransaction(tx.transaction_hash);
+    await confirmTx(tx.transaction_hash);
 
     res.json({ ok: true, txHash: tx.transaction_hash });
   } catch (e) {
@@ -631,7 +659,7 @@ app.post('/api/actions', async (req, res) => {
       { contractAddress: contractAddr, entrypoint: 'submit_actions', calldata },
       { resourceBounds: RESOURCE_BOUNDS }
     );
-    await provider.waitForTransaction(tx.transaction_hash);
+    await confirmTx(tx.transaction_hash);
 
     res.json({ ok: true, txHash: tx.transaction_hash });
   } catch (e) {
@@ -649,7 +677,7 @@ app.post('/api/forfeit', async (req, res) => {
       { contractAddress: contractAddr, entrypoint: 'forfeit', calldata: [String(gameId)] },
       { resourceBounds: RESOURCE_BOUNDS }
     );
-    await provider.waitForTransaction(tx.transaction_hash);
+    await confirmTx(tx.transaction_hash);
     res.json({ ok: true });
   } catch (e) {
     const msg = e.baseError
