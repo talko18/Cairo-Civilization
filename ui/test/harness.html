@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>R3D harness</title>
+<script>window.R3D_TEST = true;   // enables the test-only hooks in render3d.js</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 <script src="../render3d-core.js"></script>
@@ -209,11 +210,16 @@ TESTS.push({name: 'the loop idles when nothing animates (reduced motion, water o
     assert(__r3d.frames() - before <= 2, 'idle renderer should not redraw every frame');
   } finally { __r3d.setReducedMotion(false); }
 }});
-TESTS.push({name: 'ambient water redraws at a modest rate, well under every frame', fn: async () => {
-  await wait(200);
-  const before = __r3d.frames(); await wait(1000);
-  const n = __r3d.frames() - before;
-  assert(n >= 8 && n <= 30, 'ambient frames per second: ' + n);
+TESTS.push({name: 'ambient water redraws at a modest rate, well under every frame', fn: () => {
+  // Driven with a synthetic clock through the loop body, so CPU load cannot
+  // change the answer. The real loop is idle while this runs (synchronous).
+  const t0 = performance.now(), drew = [];
+  for (let i = 0; i < 36; i++) drew.push(__r3d.step(t0 + i * 16.67));   // 36 ticks of 60 Hz = 0.6 s
+  const n = drew.filter(Boolean).length, perSecond = n / (36 * 16.67 / 1000);
+  assert(perSecond >= 12 && perSecond <= 25, 'ambient frames per second: ' + perSecond);
+  assert(n < 18, 'redrew at least half of the 60 Hz ticks');
+  __r3d.renderAndSample(0, 0, 1, 1);   // drain the GPU queue so the real loop is not left behind
+  __r3d.resetAmbientClock();           // hand the clock back to real time
 }});
 TESTS.push({name: 'requestRender draws one frame', fn: async () => {
   await wait(100);
@@ -668,6 +674,316 @@ TESTS.push({name: 'the patch path rewrites both shells, not just the one on show
     assert(__r3d.fogShellState('unseen', t.q, t.r) === 'live', 'the unseen shell kept the ground the city levelled');
     assert(__r3d.fogShellState('remembered', t.q, t.r) === 'collapsed', 'the remembered shell appeared on unexplored ground');
   } finally { cities.pop(); R3D.rebuildTile(t.q, t.r); }
+}});
+
+
+// ── Task 9: tile edges, overlays and rings ──
+const mkSel = (o) => Object.assign({kind: 'unit', q: LM.FOG_SEEN.q, r: LM.FOG_SEEN.r, moveTiles: [], attackTiles: [],
+  rangedTiles: [], workedTiles: [], lockedTiles: []}, o);
+const clearMarks = () => { R3D.setSelection(null); R3D.setHover(null); };
+// Waits for the real loop to draw a frame, however slowly this machine runs it.
+const nextFrame = async () => {
+  const f = __r3d.frames(); R3D.requestRender();
+  const dead = performance.now() + 10000;
+  while (__r3d.frames() === f && performance.now() < dead) await wait(10);
+  assert(__r3d.frames() > f, 'the loop drew no frame in 10 s');
+};
+// player is a number, or a function of the tile. fn may be async: ownership is
+// restored only after it has settled.
+const withOwner = async (list, player, fn) => {
+  const was = list.map(p => { const t = tileOf(p); return [t, t.ownerPlayer, t.ownerCity]; });
+  for (const p of list) { const t = tileOf(p); t.ownerPlayer = typeof player === 'function' ? player(t) : player; t.ownerCity = 1; }
+  R3D.syncState();
+  try { return await fn(); } finally { for (const [t, a, b] of was) { t.ownerPlayer = a; t.ownerCity = b; } R3D.syncState(); }
+};
+const flower = (c) => [c].concat([0, 1, 2, 3, 4, 5].map(d => { const [q, r] = R3DCore.neighbor(c.q, c.r, d); return {q, r}; }));
+TESTS.push({name: 'the whole hex grid is one draw call, counted by the renderer', fn: () => {
+  assert(__r3d.gridDrawCalls() === 1, 'grid render calls: ' + __r3d.gridDrawCalls());
+}});
+TESTS.push({name: 'every overlay category shares one layer: one render call', fn: () => {
+  const sel = mkSel({moveTiles: [{q: 5, r: 4}], attackTiles: [{q: 4, r: 4}], rangedTiles: [{q: 4, r: 5}],
+    workedTiles: [{q: 6, r: 4}], lockedTiles: [{q: 7, r: 5}], dimTiles: [{q: 8, r: 5}]});
+  R3D.setSelection(sel);
+  try {
+    assert(__r3d.litTiles() === 6, __r3d.litTiles() + ' lit');
+    assert(__r3d.overlayDrawCalls() === 1, 'overlay render calls: ' + __r3d.overlayDrawCalls());
+    assert(new Set(__r3d.litList().map(g => g.color)).size === 6, 'six categories, six colours');
+  } finally { clearMarks(); }
+}});
+TESTS.push({name: 'grid lines fade as the camera pulls back', fn: async () => {
+  R3D.centerOn(16, 10);
+  const at = async (d) => { __r3d.setCameraDistance(d); await nextFrame(); return __r3d.gridOpacity(); };
+  const near = await at(14), mid = await at(30), far = await at(60);
+  await at(14);
+  assert(near > 0.3, 'edges are faint up close: ' + near);
+  assert(near > mid && mid > far, 'fade is not monotonic: ' + [near, mid, far]);
+  assert(far < 0.05, 'edges still show at the far zoom: ' + far);
+}});
+TESTS.push({name: 'hex edges are drawn once each and absent on open ocean', fn: () => {
+  const L = LM, ocean = L.OCEAN, coast = L.COAST;
+  assert(!__r3d.gridHasEdge(ocean.q, ocean.r, 1, 10), 'an edge between two ocean tiles is drawn');
+  assert(!__r3d.gridHasEdge(1, 10, coast.q, coast.r), 'an edge between ocean and coast is drawn');
+  assert(__r3d.gridHasEdge(coast.q, coast.r, 3, 10), 'the shoreline between coast and land is missing');
+  assert(__r3d.gridHasEdge(8, 6, 9, 6) && __r3d.gridHasEdge(9, 6, 8, 6), 'an inland edge is missing or direction-dependent');
+  let land = 0, shore = 0;
+  const seen = new Set();
+  for (const t of fixture.tiles) for (let d = 0; d < 6; d++) {
+    const [nq, nr] = R3DCore.neighbor(t.q, t.r, d), nt = nq >= 0 && nr >= 0 && nq < COLS && nr < ROWS ? tileOf({q: nq, r: nr}) : null;
+    if (t.terrain <= 1 && (!nt || nt.terrain <= 1)) continue;
+    const a = t.r * COLS + t.q, b = nt ? nr * COLS + nq : -1, k = Math.min(a, b) + '|' + Math.max(a, b);
+    if (!seen.has(k)) { seen.add(k); land++; }
+  }
+  assert(__r3d.gridSegments() === land, 'built ' + __r3d.gridSegments() + ' ribbons for ' + land + ' land edges');
+}});
+TESTS.push({name: 'setSelection lights exactly the tiles overlayList returns', fn: () => {
+  const sel = mkSel({q: 4, r: 4, moveTiles: [{q: 5, r: 4}, {q: 4, r: 5}]});
+  R3D.setSelection(sel);
+  try { assert(__r3d.litTiles() === R3DCore.overlayList(sel, R3D.fogAt).length && __r3d.litTiles() === 2, 'lit ' + __r3d.litTiles()); }
+  finally { clearMarks(); }
+}});
+TESTS.push({name: 'each overlay is lit at its own tile in its own colour', fn: () => {
+  const OVc = R3DCore.OV, C = R3DCore;
+  const sel = mkSel({attackTiles: [{q: 5, r: 4}], rangedTiles: [{q: 4, r: 4}], moveTiles: [{q: 4, r: 5}],
+    lockedTiles: [{q: 7, r: 5}], workedTiles: [{q: 6, r: 4}, {q: 5, r: 4}]});
+  R3D.setSelection(sel);
+  try {
+    const want = C.overlayList(sel, R3D.fogAt), got = __r3d.litList();
+    assert(want.length === 5 && got.length === 5, 'lit ' + got.length);
+    for (let i = 0; i < want.length; i++) {
+      const c = C.hexCenter(want[i].q, want[i].r);
+      assert(Math.abs(got[i].x - c.x) < 1e-4 && Math.abs(got[i].z - c.z) < 1e-4, 'overlay ' + i + ' is not on tile ' + want[i].q + ',' + want[i].r);
+      assert(got[i].color === want[i].color, 'overlay ' + i + ' colour ' + got[i].color.toString(16) + ' vs ' + want[i].color.toString(16));
+      assert(got[i].y > C.heightAt(tileOf(want[i]), c.x, c.z), 'overlay sunk into the ground at ' + want[i].q + ',' + want[i].r);
+    }
+    assert(got.some(g => g.color === OVc.atk) && got.some(g => g.color === OVc.rng) && got.some(g => g.color === OVc.lock), 'a category is missing');
+  } finally { clearMarks(); }
+}});
+TESTS.push({name: 'unexplored tiles are never lit, in any overlay category', fn: () => {
+  fogOn();
+  const U = LM.UNSEEN, S0 = LM.FOG_SEEN;
+  try {
+    for (const key of ['moveTiles', 'attackTiles', 'rangedTiles', 'workedTiles', 'lockedTiles']) {
+      R3D.setSelection(mkSel({[key]: [S0, U]}));
+      const c = R3DCore.hexCenter(U.q, U.r);
+      assert(__r3d.litTiles() === 1, key + ': lit ' + __r3d.litTiles() + ' of 2');
+      assert(!__r3d.litList().some(g => Math.abs(g.x - c.x) < 1e-4 && Math.abs(g.z - c.z) < 1e-4), key + ' lit unexplored ground');
+    }
+  } finally { clearMarks(); }
+}});
+TESTS.push({name: 'overlays follow the fog when it changes under a standing selection', fn: () => {
+  fogOn();
+  const p = {q: 7, r: 7}, i = p.r * COLS + p.q, was = FOGM.state[i];
+  R3D.setSelection(mkSel({moveTiles: [p]}));
+  try {
+    assert(__r3d.litTiles() === 1, 'precondition: (7,7) lit');
+    FOGM.state[i] = R3DCore.FOG.UNSEEN; R3D.refreshFog();
+    assert(__r3d.litTiles() === 0, 'a tile that went dark stayed lit');
+    FOGM.state[i] = was; R3D.refreshFog();
+    assert(__r3d.litTiles() === 1, 'the tile did not light again');
+  } finally { FOGM.state[i] = was; R3D.refreshFog(); clearMarks(); }
+}});
+TESTS.push({name: 'the selection ring and the hover ring sit on their own tiles', fn: () => {
+  const c = R3DCore.hexCenter;
+  R3D.setSelection(mkSel({q: 6, r: 6})); R3D.setHover(8, 6);
+  try {
+    const s = __r3d.ringCentre('selection'), h = __r3d.ringCentre('hover');
+    assert(s && Math.abs(s.x - c(6, 6).x) < 1e-3 && Math.abs(s.z - c(6, 6).z) < 1e-3, 'selection ring at ' + JSON.stringify(s));
+    assert(h && Math.abs(h.x - c(8, 6).x) < 1e-3 && Math.abs(h.z - c(8, 6).z) < 1e-3, 'hover ring at ' + JSON.stringify(h));
+    R3D.setHover(null);
+    assert(__r3d.ringCentre('hover') === null, 'hover ring stayed after the pointer left');
+    R3D.setSelection(null);
+    assert(__r3d.ringCentre('selection') === null, 'selection ring stayed after deselect');
+  } finally { clearMarks(); }
+}});
+TESTS.push({name: 'no ring is drawn on unexplored ground', fn: () => {
+  fogOn();
+  try {
+    R3D.setSelection(mkSel({q: LM.UNSEEN.q, r: LM.UNSEEN.r})); R3D.setHover(LM.UNSEEN.q, LM.UNSEEN.r);
+    assert(__r3d.ringCentre('selection') === null && __r3d.ringCentre('hover') === null, 'a ring marks unexplored ground');
+  } finally { clearMarks(); }
+}});
+TESTS.push({name: 'territory fills owned tiles and outlines only the outer edge', fn: async () => {
+  fogOn();
+  await withOwner(flower(LM.CITY_A), 0, () => {
+    assert(__r3d.territoryTiles() === 7, 'territory tiles ' + __r3d.territoryTiles());
+    assert(__r3d.borderSegments() === 18, 'a 7-hex flower has 18 outer edges, drew ' + __r3d.borderSegments());
+  });
+  assert(__r3d.territoryTiles() === 0 && __r3d.borderSegments() === 0, 'territory outlived its owner');
+}});
+TESTS.push({name: 'territory on unexplored ground is not drawn', fn: async () => {
+  fogOn();
+  await withOwner(flower(LM.UNSEEN), 1, () => {
+    assert(__r3d.fogOf(LM.UNSEEN.q, LM.UNSEEN.r) === R3DCore.FOG.UNSEEN, 'precondition');
+    assert(__r3d.territoryTiles() === 0 && __r3d.borderSegments() === 0,
+      'unexplored territory drawn: ' + __r3d.territoryTiles() + ' tiles, ' + __r3d.borderSegments() + ' edges');
+  });
+}});
+TESTS.push({name: 'the renderer leaves tiles exactly as the game made them', fn: async () => {
+  const keys = 'q,r,terrain,feature,resource,riverEdges,improvement,ownerPlayer,ownerCity';
+  await withOwner(flower(LM.CITY_A), 0, () => R3D.setSelection(mkSel({moveTiles: [{q: 5, r: 4}]})));
+  R3D.setHover(5, 5); clearMarks();
+  assert(fixture.tiles.every(t => Object.keys(t).join() === keys), 'a tile gained or lost a field');
+  assert(fixture.players[0].cities.every(c => !('hasCity' in c)));
+}});
+TESTS.push({name: 'every layer is in the table, below the unexplored fog', fn: () => {
+  const O = __r3d.renderOrderOf;
+  assert(O('overlays') === 3 && O('selRing') === 4 && O('hoverRing') === 4, [O('overlays'), O('selRing'), O('hoverRing')]);
+  for (const k of ['grid', 'territory', 'borders']) assert(O(k) > 0 && O(k) < O('fogUnseen'), k + ' at ' + O(k));
+  assert(__r3d.drawablesAtOrAboveUnseenFog() === 0);
+}});
+TESTS.push({name: 'marks add six draw calls, measured by the renderer, inside the budget', fn: async () => {
+  await withOwner(flower(LM.CITY_A), 0, async () => {
+    R3D.setSelection(mkSel({moveTiles: [{q: 5, r: 4}], q: 6, r: 6})); R3D.setHover(7, 6);
+    try {
+      assert(__r3d.territoryTiles() === 7 && __r3d.borderSegments() === 18, 'precondition: territory is drawn');
+      assert(__r3d.markDrawCalls() === 6, 'mark render calls ' + __r3d.markDrawCalls());
+      R3D.centerOn(16, 10); __r3d.setCameraDistance(14); await nextFrame();
+      assert(__r3d.drawCalls() < 300, 'draw calls ' + __r3d.drawCalls());
+      R3D.centerOn(6, 6); __r3d.setCameraDistance(90); await nextFrame();
+      assert(__r3d.drawCalls() < 800, 'worst-case draw calls ' + __r3d.drawCalls());
+    } finally { clearMarks(); __r3d.setCameraDistance(14); }
+  });
+}});
+
+// Pixel pins. Everything is lit with the fog filter OFF (setMarksUnfiltered) on a
+// map that is entirely unexplored: the only thing keeping the marks off the
+// screen is the draw order and transparency, which is the defence these prove.
+// The frame with the marks must equal the frame without them.
+const diffFrames = (layer) => {
+  const a = __r3d.renderAndSample(FRAME.x, FRAME.y, FRAME.w, FRAME.h);
+  __r3d.setMarksVisible(false, layer);
+  const b = __r3d.renderAndSample(FRAME.x, FRAME.y, FRAME.w, FRAME.h);
+  __r3d.setMarksVisible(true, layer);
+  let n = 0, worst = 0;
+  for (let i = 0; i < a.length; i += 4) {
+    const d = Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]);
+    if (d > 8) { n++; worst = Math.max(worst, d); }
+  }
+  return {n, worst};
+};
+for (const view of [{name: 'close', dist: 9, polar: 0.9}, {name: 'grazing', dist: 8, polar: GRAZE}, {name: 'from above', dist: 30, polar: 0.4}]) {
+  TESTS.push({name: 'no mark shows through unexplored fog (' + view.name + ')', fn: async () => {
+    const hexes = [];
+    for (let r = 1; r <= 10; r++) for (let q = 2; q <= 12; q++) hexes.push({q, r});
+    await withOwner(hexes, 0, () => allFog(() => {
+      __r3d.setMarksUnfiltered(true);
+      try {
+        R3D.setSelection(mkSel({q: 6, r: 5, moveTiles: hexes.slice(0, 30), attackTiles: hexes.slice(30, 50),
+          rangedTiles: hexes.slice(50, 70), workedTiles: hexes.slice(70, 90), lockedTiles: hexes.slice(90, 110)}));
+        R3D.setHover(7, 5);
+        __r3d.lookAt(7, 5, view.dist, view.polar, 0.4);
+        assert(__r3d.litTiles() === 110 && __r3d.territoryTiles() === hexes.length && __r3d.ringCentre('selection'), 'precondition: the marks are lit');
+        const got = diffFrames();
+        assert(got.n <= 200, got.n + ' pixels change when the marks are removed (worst ' + got.worst + ')');
+      } finally { __r3d.setMarksUnfiltered(false); clearMarks(); }
+    }));
+  }});
+}
+// Visible-on-explored pins: each mark layer, with the layer taken away, must
+// change a real number of pixels on ground the player can see. Counters and
+// buffer readers cannot notice a ring sunk under the ground; pixels can.
+const SEE = {q: 7, r: 6, dist: 9, polar: 0.9, az: 0.4};
+const seenDiff = (layer) => {
+  __r3d.lookAt(SEE.q, SEE.r, SEE.dist, SEE.polar, SEE.az);
+  return diffFrames(layer);
+};
+const needPixels = (layer, min) => {
+  const got = seenDiff(layer);
+  assert(got.n >= min, layer + ' changes only ' + got.n + ' pixels on explored ground (want >= ' + min + ')');
+};
+TESTS.push({name: 'the selection ring is visible on explored ground', fn: () => {
+  fogOn(); R3D.setSelection(mkSel({q: 6, r: 6}));
+  try { needPixels('selRing', 800); } finally { clearMarks(); }
+}});
+TESTS.push({name: 'the hover ring is visible on explored ground', fn: () => {
+  fogOn(); R3D.setHover(7, 6);
+  try { needPixels('hoverRing', 400); } finally { clearMarks(); }
+}});
+TESTS.push({name: 'overlay discs are visible on explored ground', fn: () => {
+  fogOn(); R3D.setSelection(mkSel({q: 6, r: 6, moveTiles: [{q: 7, r: 6}, {q: 6, r: 7}], dimTiles: [{q: 8, r: 6}]}));
+  try { needPixels('overlays', 3000); } finally { clearMarks(); }
+}});
+TESTS.push({name: 'territory fill and borders are visible on explored ground', fn: async () => {
+  fogOn();
+  await withOwner(flower({q: 7, r: 6}), 0, () => { needPixels('territory', 3000); needPixels('borders', 800); });
+}});
+TESTS.push({name: 'the grid lines are visible on explored ground', fn: () => { fogOn(); needPixels('grid', 300); }});
+
+// Leak 2 class: marks that float above the shell's own outline. Hill tiles
+// at close range, grazing, every edge a border, every overlay category lit,
+// fog filter off. Flat discs at the crest height stuck out past the shell here.
+for (const v of [
+  {name: 'hill (8,6) east', q: 8, r: 6, az: Math.PI / 2}, {name: 'hill (8,6) west', q: 8, r: 6, az: -Math.PI / 2},
+  {name: 'hill (8,6) north', q: 8, r: 6, az: Math.PI}, {name: 'hill city (15,12)', q: 15, r: 12, az: 0.3},
+  {name: 'hill city (15,12) west', q: 15, r: 12, az: -Math.PI / 2}, {name: 'coast (2,10)', q: 2, r: 10, az: -Math.PI / 2},
+  {name: 'map edge', q: COLS - 1, r: 10, az: Math.PI / 2},
+]) {
+  TESTS.push({name: 'no mark pokes past the shell silhouette on slopes: ' + v.name, fn: async () => {
+    __r3d.setWaterVisible(false);
+    const all = fixture.tiles.map(t => ({q: t.q, r: t.r}));
+    try {
+      await withOwner(all, (t) => (t.q * 7 + t.r * 13 + (t.q >> 1)) % 3, () => allFog(() => {
+        __r3d.setMarksUnfiltered(true);
+        try {
+          const by = (k) => all.filter(t => (t.q + 3 * t.r) % 5 === k);
+          R3D.setSelection(mkSel({q: v.q, r: v.r, moveTiles: by(0), attackTiles: by(1), rangedTiles: by(2),
+            workedTiles: by(3), lockedTiles: by(4), dimTiles: all}));
+          R3D.setHover(v.q, v.r);
+          __r3d.lookAt(v.q, v.r, 6, GRAZE, v.az);
+          assert(__r3d.litTiles() === all.length && __r3d.borderSegments() > 400, 'precondition: everything is lit');
+          const got = diffFrames();
+          assert(got.n <= 200, got.n + ' pixels of marks show outside the fog (worst ' + got.worst + ')');
+        } finally { __r3d.setMarksUnfiltered(false); clearMarks(); }
+      }));
+    } finally { __r3d.setWaterVisible(true); }
+  }});
+}
+TESTS.push({name: 'an unexplored neighbour always gets a border, whoever owns it', fn: async () => {
+  fogOn();
+  const F = R3DCore.FOG; let a = null, b = null;
+  for (const t of fixture.tiles) {
+    if (a || t.q < 3 || t.q > 27 || t.r < 3 || t.r > 16 || FOGM.state[t.r * COLS + t.q] === F.UNSEEN) continue;
+    for (let d = 0; d < 6; d++) {
+      const [nq, nr] = R3DCore.neighbor(t.q, t.r, d);
+      if (FOGM.state[nr * COLS + nq] === F.UNSEEN) { a = {q: t.q, r: t.r}; b = {q: nq, r: nr}; break; }
+    }
+  }
+  assert(a, 'fixture has no explored tile beside unexplored ground');
+  await withOwner([a, b], 0, () => {
+    // b is unexplored, so only a is drawn. a's six edges are all borders: the
+    // edge facing b must not vanish just because b has the same owner.
+    assert(__r3d.territoryTiles() === 1, 'territory tiles ' + __r3d.territoryTiles());
+    assert(__r3d.borderSegments() === 6, 'borders ' + __r3d.borderSegments() + ': the edge toward unexplored ground tells the owner');
+  });
+}});
+TESTS.push({name: 'dim overlay is drawn dark on explored ground', fn: () => {
+  fogOn(); R3D.setSelection(mkSel({q: 6, r: 6, dimTiles: [{q: 7, r: 6}]}));
+  try { assert(__r3d.litList()[0].color === R3DCore.OV.dim && __r3d.litTiles() === 1); needPixels('overlays', 1500); }
+  finally { clearMarks(); }
+}});
+TESTS.push({name: 'the filtered path lights nothing on a map that is all unexplored', fn: async () => {
+  const hexes = [];
+  for (let r = 1; r <= 8; r++) for (let q = 3; q <= 10; q++) hexes.push({q, r});
+  await withOwner(hexes, 0, () => allFog(() => {
+    R3D.setSelection(mkSel({q: 6, r: 5, moveTiles: hexes})); R3D.setHover(7, 5);
+    try {
+      assert(__r3d.litTiles() === 0 && __r3d.territoryTiles() === 0 && __r3d.borderSegments() === 0, 'lit ' + __r3d.litTiles());
+      assert(__r3d.ringCentre('selection') === null && __r3d.ringCentre('hover') === null);
+    } finally { clearMarks(); }
+  }));
+}});
+TESTS.push({name: 'the grid is visible on explored ground and invisible through fog', fn: () => {
+  __r3d.setWaterVisible(false);
+  try {
+    __r3d.lookAt(7, 5, 9, 0.9, 0.4); R3D.requestRender();
+    const seen = diffFrames();
+    assert(seen.n > 300, 'the grid is not drawn on explored ground: ' + seen.n + ' pixels');
+    allFog(() => {
+      __r3d.lookAt(7, 5, 9, 0.9, 0.4);
+      const got = diffFrames();
+      assert(got.n <= 200, 'grid shows through the fog: ' + got.n + ' pixels (worst ' + got.worst + ')');
+    });
+  } finally { __r3d.setWaterVisible(true); }
 }});
 
 async function runAll() {

@@ -523,18 +523,19 @@
   // order from this table (and must stay below fogUnseen).
   // 'labels' is a reserved slot, not a layer: labels are DOM elements over the
   // canvas (Decision 5). It is here so nothing else claims 5.
-  const RENDER_ORDER = { terrain: 0, grid: 1, territory: 1, fogRemembered: 2,
+  const RENDER_ORDER = { terrain: 0, grid: 1, territory: 1, borders: 1, fogRemembered: 2,
     overlays: 3, rings: 4, labels: 5, fogUnseen: 6 };
 
   // The surface the player actually sees, which is not always the terrain
   // mesh: on water tiles the mesh is the seabed, well below the water plane,
   // so a shell built from it sits UNDER the sea and leaves unexplored ocean
   // and coast in plain view. Water clamps to just above the highest crest.
-  function fogSurfaceY(tile, x, z) {
+  function surfaceY(tile, x, z, lift) {
     let y = C.heightAt(tile, x, z);
     if (tile.terrain <= 1) y = Math.max(y, WATER_LEVEL + WAVE_CREST);
-    return y + FOG_BIAS;
+    return y + lift;
   }
+  const fogSurfaceY = (tile, x, z) => surfaceY(tile, x, z, FOG_BIAS);
 
   // The same wedge triangles tileGeometryInto builds, at the same subdivision
   // level, plus a rim skirt. Winding is irrelevant: the shells are DoubleSide.
@@ -684,7 +685,7 @@
     // straight up through a ground layer unless their instances are culled.
     if (changed || S.sceneryHide !== fogHidesScenery) applyFogToScenery(fogHidesScenery);
     S.hoverTile = null;      // the tooltip must re-read its tile under the new fog
-    if (changed) requestRender();
+    if (changed) { updateMarks(); requestRender(); }
   }
 
   // Test-only reader over the live buffer: 'live' means this tile's range
@@ -705,6 +706,244 @@
   }
 
   function fogRange(q, r) { return (S && S.fog) ? (S.fog.ranges.get(r * S.cols + q) || null) : null; }
+
+  // ---- Marks: hex edges, tile overlays, territory, selection and hover rings ----
+  // Everything here sits above the ground, so every layer is transparent and
+  // writes no depth (an opaque layer would draw in the opaque pass and pass the
+  // depth test against the fog shell 0.045 over the ground: leak 3). Ordering
+  // comes from RENDER_ORDER and stays below fogUnseen. Anything that could
+  // tell the player what a tile holds is ALSO filtered through fogStateAt, so
+  // ordering is never the only thing between the player and unexplored ground.
+  //
+  // Geometry rule: every mark that covers ground is built from the SAME
+  // triangles as the ground and the fog shell, lifted by less than the shell's
+  // own 0.045 (surfaceY). It therefore lies under the shell at every point and
+  // never pokes past the shell's silhouette on a hill. A flat disc at the
+  // tile's crest did exactly that.
+  const GRID_NEAR = 14, GRID_FAR = 56, GRID_MAX = 0.5;   // camera distance at which the lines start/finish fading
+  const GRID_W = 0.035, BORDER_W = 0.09, RING_W = 0.07, HOVER_W = 0.04;
+  const LIFT = { grid: 0.02, border: 0.025, territory: 0.01, overlay: 0.02, ring: 0.025 };
+  const TERRITORY_FILL = [0x3498db, 0xe74c3c], TERRITORY_FALLBACK = 0xffffff;
+  const BORDER_COLOR = [0x3498db, 0xe74c3c];
+  const SELECT_COLOR = 0xfff3b0;
+  const MARK_NAMES = ['grid', 'territory', 'borders', 'overlays', 'selRing', 'hoverRing'];
+
+  const waterTop = () => WATER_LEVEL + WAVE_CREST;
+  const tileCopy = (src) => Object.assign({}, src, { hasCity: S.cityTiles.has(src.r * S.cols + src.q) });
+  const edgeBase = (t) => (t.terrain <= 1 ? Math.max(C.tileBase(t), waterTop()) : C.tileBase(t));
+
+  // A flat quad along one segment. noExt keeps it inside the segment's ends.
+  function ribbonInto(pos, idx, x1, z1, x2, z2, y, w, noExt) {
+    let dx = x2 - x1, dz = z2 - z1;
+    const len = Math.hypot(dx, dz) || 1; dx /= len; dz /= len;
+    const ex = noExt ? 0 : dx * w / 2, ez = noExt ? 0 : dz * w / 2, nx = -dz * w / 2, nz = dx * w / 2;
+    const a = x1 - ex, b = z1 - ez, c = x2 + ex, d = z2 + ez, vi = pos.length / 3;
+    pos.push(a - nx, y, b - nz, a + nx, y, b + nz, c + nx, y, d + nz, c - nx, y, d - nz);
+    idx.push(vi, vi + 2, vi + 1, vi, vi + 3, vi + 2);
+  }
+
+  // The tile's own ground triangles (same wedges, same subdivision as the fog
+  // shell), lifted by `lift`, in one flat colour.
+  function surfaceInto(src, pos, col, rgb, lift) {
+    const tile = tileCopy(src), cen = C.hexCenter(tile.q, tile.r), N = C.subdivisions(tile);
+    const start = pos.length / 3;
+    const v = (lx, lz) => { const x = cen.x + lx, z = cen.z + lz; pos.push(x, surfaceY(tile, x, z, lift), z); col.push(rgb.r, rgb.g, rgb.b); };
+    for (let e = 0; e < 6; e++) {
+      const A = C.hexCorner(e), B = C.hexCorner((e + 1) % 6);
+      const P = (i, j) => [(A[0] * i + B[0] * j) / N, (A[1] * i + B[1] * j) / N];
+      for (let i = 0; i < N; i++) for (let j = 0; j < N - i; j++) {
+        const a = P(i, j), b = P(i + 1, j), c = P(i, j + 1);
+        v(a[0], a[1]); v(b[0], b[1]); v(c[0], c[1]);
+        if (j < N - 1 - i) { const d = P(i + 1, j + 1); v(b[0], b[1]); v(d[0], d[1]); v(c[0], c[1]); }
+      }
+    }
+    return pos.length / 3 - start;
+  }
+
+  // A strip along hex edge A-B between two scales of the hex, every vertex on
+  // the tile's own ground so it hugs slopes and stays inside the tile.
+  function stripInto(pos, idx, src, e, f0, f1, lift) {
+    const tile = tileCopy(src), cen = C.hexCenter(tile.q, tile.r);
+    const A = C.hexCorner(e), B = C.hexCorner((e + 1) % 6), K = 4;
+    for (let i = 0; i <= K; i++) {
+      const t = i / K, px = A[0] + (B[0] - A[0]) * t, pz = A[1] + (B[1] - A[1]) * t;
+      for (const f of [f0, f1]) { const x = cen.x + px * f, z = cen.z + pz * f; pos.push(x, surfaceY(tile, x, z, lift), z); }
+      if (i) { const v = pos.length / 3 - 4; idx.push(v, v + 1, v + 2, v + 1, v + 3, v + 2); }
+    }
+  }
+  const inset = (w) => w / APOTHEM;       // scale change that moves an edge inward by w
+
+  function markMaterial(opts) {
+    return new THREE.MeshBasicMaterial(Object.assign({ transparent: true, depthWrite: false,
+      side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }, opts));
+  }
+  function markMesh(name, order, mat) {
+    const mesh = new THREE.Mesh(new THREE.BufferGeometry(), mat);
+    mesh.frustumCulled = false; mesh.raycast = () => {}; mesh.renderOrder = order; mesh.visible = false;
+    S.scene.add(mesh); S.layers[name] = mesh;
+    return mesh;
+  }
+  // Swap in new geometry. A layer with nothing to draw is not drawn at all.
+  function setMark(name, pos, idx, col) {
+    const M = S.marks, mesh = M[name], old = mesh.geometry, g = new THREE.BufferGeometry();
+    if (pos.length) {
+      g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+      if (col) g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+      if (idx) g.setIndex(idx);
+    }
+    mesh.geometry = g; old.dispose();
+    M.has[name] = pos.length > 0;
+    applyMarkVisibility(name);
+  }
+  function applyMarkVisibility(name) { const M = S.marks; M[name].visible = !!M.has[name] && !M.hidden.has(name); }
+
+  function buildMarks() {
+    disposeMarks();
+    const M = S.marks = { has: {}, hidden: new Set(), gridEdges: new Set(), gridSegments: 0, lit: [],
+      litRanges: [], territoryCount: 0, borderSegments: 0, terrSig: null, selTile: null, hoverTileMark: null };
+    M.grid = markMesh('grid', RENDER_ORDER.grid, markMaterial({ color: 0x0a1418, opacity: GRID_MAX }));
+    M.territory = markMesh('territory', RENDER_ORDER.territory, markMaterial({ vertexColors: true, opacity: 0.16 }));
+    M.borders = markMesh('borders', RENDER_ORDER.borders, markMaterial({ vertexColors: true, opacity: 0.85 }));
+    M.overlays = markMesh('overlays', RENDER_ORDER.overlays, markMaterial({ vertexColors: true, opacity: 0.42 }));
+    M.selRing = markMesh('selRing', RENDER_ORDER.rings, markMaterial({ color: SELECT_COLOR, opacity: 0.95 }));
+    M.hoverRing = markMesh('hoverRing', RENDER_ORDER.rings, markMaterial({ color: C.OV.hover, opacity: 0.8 }));
+    buildGrid();
+    updateMarks();
+  }
+
+  function disposeMarks() {
+    if (!S || !S.marks) return;
+    for (const k of MARK_NAMES) {
+      const m = S.marks[k];
+      S.scene.remove(m); m.geometry.dispose(); m.material.dispose();
+      delete S.layers[k];
+    }
+    S.marks = null;
+  }
+
+  // Terrain-driven: one merged ribbon along every hex edge that borders land,
+  // shared edges drawn once. Edges between two water tiles are left out, so
+  // open ocean stays clean (Decision 11). On the map perimeter the ribbon is
+  // pulled inside the hex so it never hangs past the rim.
+  function buildGrid() {
+    const pos = [], idx = [], seen = new Set(), edges = S.marks.gridEdges;
+    edges.clear();
+    for (const t of S.tileIdx.values()) {
+      const cen = C.hexCenter(t.q, t.r);
+      for (let d = 0; d < 6; d++) {
+        const [nq, nr] = C.neighbor(t.q, t.r, d), nb = tileAt(nq, nr);
+        if (t.terrain <= 1 && (!nb || nb.terrain <= 1)) continue;
+        const a = t.r * S.cols + t.q, b = nb ? nr * S.cols + nq : -1;
+        const key = Math.min(a, b) + '|' + Math.max(a, b);
+        if (seen.has(key)) continue;
+        seen.add(key); edges.add(key);
+        const A = C.hexCorner(5 - d), B = C.hexCorner((6 - d) % 6), f = nb ? 1 : 1 - inset(GRID_W / 2);
+        ribbonInto(pos, idx, cen.x + A[0] * f, cen.z + A[1] * f, cen.x + B[0] * f, cen.z + B[1] * f,
+          Math.max(edgeBase(t), nb ? edgeBase(nb) : -9) + LIFT.grid, GRID_W, !nb);
+      }
+    }
+    S.marks.gridSegments = idx.length / 6;
+    setMark('grid', pos, idx, null);
+  }
+
+  // Lines fade as the camera pulls back so a whole-map view is not a wire mesh.
+  function updateGridFade() {
+    if (!S || !S.marks) return;
+    const d = S.camera.position.distanceTo(S.controls.target);
+    S.marks.grid.material.opacity = GRID_MAX * (1 - Math.min(1, Math.max(0, (d - GRID_NEAR) / (GRID_FAR - GRID_NEAR))));
+  }
+
+  function ringInto(q, r, w, pos, idx) {
+    const t = tileAt(q, r);
+    for (let e = 0; e < 6; e++) stripInto(pos, idx, t, e, 0.92, 0.92 - inset(w), LIFT.ring);
+  }
+  // A ring is a hint at what is on a tile; unexplored ground gets none.
+  function ringTile(name, q, r, w) {
+    const ok = Number.isInteger(q) && Number.isInteger(r) && tileAt(q, r) && (S.unfiltered || fogStateAt(q, r) !== C.FOG.UNSEEN);
+    const pos = [], idx = [];
+    if (ok) ringInto(q, r, w, pos, idx);
+    setMark(name, pos, idx, null);
+    return ok ? { q, r } : null;
+  }
+
+  // State- and fog-driven: territory fill and borders, the overlays, the two
+  // rings. Territory is the big one, so it is rebuilt only when its inputs
+  // (which tiles, which owners, which edges) actually changed.
+  function updateMarks() {
+    if (!S || !S.marks) return;
+    const M = S.marks, gate = S.unfiltered ? () => C.FOG.VISIBLE : fogStateAt;
+    const ownerOf = (t) => (t && t.ownerCity > 0 ? t.ownerPlayer : -1);
+    const owned = [], edgeList = [];
+    for (const t of S.tileIdx.values()) {
+      const p = ownerOf(t);
+      if (p < 0 || gate(t.q, t.r) === C.FOG.UNSEEN) continue;
+      owned.push(t);
+      for (let d = 0; d < 6; d++) {
+        const [nq, nr] = C.neighbor(t.q, t.r, d), nb = tileAt(nq, nr);
+        // An unexplored neighbour always gets a border. Leaving it out when
+        // the owner matches would tell the player the unscouted tile is theirs.
+        if (nb && ownerOf(nb) === p && gate(nq, nr) !== C.FOG.UNSEEN) continue;
+        edgeList.push([t, d, p]);
+      }
+    }
+    const sig = owned.map((t) => t.q + ',' + t.r + ',' + ownerOf(t)).join(';') + '#' + edgeList.map((e) => e[0].q + ',' + e[0].r + ',' + e[1]).join(';');
+    if (sig !== M.terrSig) {
+      M.terrSig = sig;
+      const tp = [], tc = [], c = new THREE.Color();
+      for (const t of owned) {
+        c.setHex(TERRITORY_FILL[ownerOf(t)] !== undefined ? TERRITORY_FILL[ownerOf(t)] : TERRITORY_FALLBACK);
+        surfaceInto(t, tp, tc, c, LIFT.territory);
+      }
+      M.territoryCount = owned.length;
+      setMark('territory', tp, null, tc);
+      const bp = [], bi = [], bc = [];
+      for (const [t, d, p] of edgeList) {
+        const n0 = bp.length / 3;
+        stripInto(bp, bi, t, 5 - d, 1, 1 - inset(BORDER_W), LIFT.border);
+        c.setHex(BORDER_COLOR[p] !== undefined ? BORDER_COLOR[p] : TERRITORY_FALLBACK);
+        for (let i = n0; i < bp.length / 3; i++) bc.push(c.r, c.g, c.b);
+      }
+      M.borderSegments = edgeList.length;
+      setMark('borders', bp, bi, bc);
+    }
+
+    // Overlays: straight from overlayList, which drops every unexplored tile.
+    const lit = C.overlayList(S.selection, gate), op = [], oc = [], c2 = new THREE.Color();
+    M.litRanges = [];
+    for (const o of lit) {
+      const t = tileAt(o.q, o.r);
+      if (!t) continue;
+      const start = op.length / 3;
+      surfaceInto(t, op, oc, c2.setHex(o.color), LIFT.overlay);
+      M.litRanges.push({ start, count: op.length / 3 - start, q: o.q, r: o.r });
+    }
+    M.lit = lit;
+    setMark('overlays', op, null, oc);
+
+    const sel = S.selection;
+    M.selTile = sel && sel.kind ? ringTile('selRing', sel.q, sel.r, RING_W) : ringTile('selRing', null, null, RING_W);
+    M.hoverTileMark = S.hover ? ringTile('hoverRing', S.hover.q, S.hover.r, HOVER_W) : ringTile('hoverRing', null, null, HOVER_W);
+    requestRender();
+  }
+
+  // Centre of a layer's real vertices, so a test can see where it was drawn.
+  function ringCentre(mesh) {
+    const p = mesh.geometry.attributes.position;
+    if (!p || !p.count) return null;
+    let x = 0, z = 0;
+    for (let i = 0; i < p.count; i++) { x += p.getX(i); z += p.getZ(i); }
+    return { x: x / p.count, z: z / p.count };
+  }
+
+  // Draw calls the renderer itself reports for the named mark layers: a frame
+  // is rendered with everything else hidden and info.render.calls is read.
+  function layerDrawCalls(names) {
+    if (!S || !S.marks) return -1;
+    const keep = names.map((n) => S.marks[n]), saved = S.scene.children.map((o) => [o, o.visible]);
+    for (const [o] of saved) if (keep.indexOf(o) < 0) o.visible = false;
+    try { S.renderer.render(S.scene, S.camera); return S.renderer.info.render.calls; }
+    finally { for (const [o, v] of saved) o.visible = v; }
+  }
 
   function visibleChunkCount() {
     if (!S) return 0;
@@ -778,7 +1017,7 @@
       onTileClick: opts.onTileClick || null,
       onTileHover: opts.onTileHover || null,
       needsRender: true, frames: 0, raf: 0, fly: null, anims: [], hoverTile: null,
-      fog: null, layers: {},
+      fog: null, layers: {}, marks: null, unfiltered: false, selection: null, hover: null,
       quality: { shadows: true, props: true, fullRes: false },
       tileIdx: new Map(), cityTiles: new Set(), chunks: [], chunksX: Math.ceil(cols / CHUNK), chunksY: Math.ceil(rows / CHUNK),
       scenery: [], fogHideable: [], sceneryMats: new Map(), sceneryGeo: makeSceneryGeo(), sceneryHide: null,
@@ -797,6 +1036,12 @@
   function loop(now) {
     if (!S) return;
     S.raf = requestAnimationFrame(loop);
+    step(now);
+  }
+
+  // One pass of the loop body. Returns true when it drew a frame. Split out so
+  // a test can drive it with its own clock instead of racing the wall clock.
+  function step(now) {
     let live = false;
     if (S.fly) {
       const f = S.fly, k = Math.min(1, (now - f.t0) / f.dur), e = k * k * (3 - 2 * k);
@@ -822,9 +1067,12 @@
       S.needsRender = false;
       S.lastAmbient = now;
       animateSurfaces(now);
+      updateGridFade();
       S.renderer.render(S.scene, S.camera);
       S.frames++;
+      return true;
     }
+    return false;
   }
 
   // Shift target and camera together so the view keeps its shape.
@@ -893,6 +1141,7 @@
     disposeTerrain();
     disposeScenery();
     disposeFog();
+    disposeMarks();
     for (const g of Object.values(S.sceneryGeo)) g.dispose();
     S.terrainMat.dispose();
     S.renderer.dispose();
@@ -912,6 +1161,7 @@
     buildScenery();
     buildFogShell();
     refreshFog();
+    buildMarks();
     requestRender();
   }
 
@@ -930,19 +1180,22 @@
     // shell has to follow it. buildScenery has already re-applied the current
     // scenery rule, so this path deliberately does not touch it.
     refreshFogTile(q, r);
+    if (S.marks) { buildGrid(); updateMarks(); }
     requestRender();
   }
   // State changed: fog is derived from it, so re-read it here too rather than
   // trusting every call site to remember.
-  function syncState() { refreshFog(); requestRender(); }
-  function setSelection(sel) { if (S) S.selection = sel; requestRender(); }
+  // Ownership lives on tiles, so a state refresh re-reads the marks too.
+  function syncState() { if (S) indexState(S.getState()); refreshFog(); updateMarks(); requestRender(); }
+  function setSelection(sel) { if (S) { S.selection = sel || null; updateMarks(); } }
+  function setHover(q, r) { if (S) { S.hover = Number.isInteger(q) && Number.isInteger(r) ? { q, r } : null; updateMarks(); } }
   function playAnimation(anim) { if (S && anim) { S.anims.push(anim); requestRender(); } }
 
   // fogAt is the renderer's own gate on top of the game's lookup: every layer
   // that could reveal game state filters through it, as well as sitting under
   // the unexplored shell. Ordering alone is not enough and filtering alone is
   // not enough — a leak needs both to fail.
-  window.R3D = { init, rebuildMap, rebuildTile, syncState, setSelection, playAnimation, registerFogHideable, applyFogToScenery,
+  window.R3D = { init, rebuildMap, rebuildTile, syncState, setSelection, setHover, playAnimation, registerFogHideable, applyFogToScenery,
     refreshFog, fogAt: (q, r) => (S ? fogStateAt(q, r) : C.FOG.UNSEEN), panToHex, centerOn,
     getCameraView, setQuality, resize, requestRender, dispose };
 
@@ -1072,6 +1325,54 @@
     },
     riverSegmentsOn: (q, r) => (S ? (S.riverOwners.get(r * S.cols + q) || 0) : 0),
 
+
+    // ---- marks readers (the real built layers) ----
+    gridDrawCalls: () => layerDrawCalls(['grid']),
+    overlayDrawCalls: () => layerDrawCalls(['overlays']),
+    markDrawCalls: () => layerDrawCalls(MARK_NAMES),
+    gridOpacity: () => (S && S.marks ? S.marks.grid.material.opacity : NaN),
+    gridSegments: () => (S && S.marks ? S.marks.gridSegments : -1),
+    gridHasEdge: (q1, r1, q2, r2) => {
+      if (!S || !S.marks) return false;
+      const a = r1 * S.cols + q1, b = tileAt(q2, r2) ? r2 * S.cols + q2 : -1;
+      return S.marks.gridEdges.has(Math.min(a, b) + '|' + Math.max(a, b));
+    },
+    litTiles: () => (S && S.marks ? S.marks.litRanges.length : -1),
+    // Each lit tile read back from the real vertex and colour buffers: centre
+    // of its triangles, highest vertex, and colour.
+    litList: () => {
+      if (!S || !S.marks) return [];
+      const g = S.marks.overlays.geometry, p = g.attributes.position, k = g.attributes.color, out = [];
+      if (!p) return out;
+      for (const rg of S.marks.litRanges) {
+        let x = 0, z = 0, y = -Infinity;
+        for (let i = rg.start; i < rg.start + rg.count; i++) { x += p.getX(i); z += p.getZ(i); y = Math.max(y, p.getY(i)); }
+        const c = new THREE.Color(k.getX(rg.start), k.getY(rg.start), k.getZ(rg.start));
+        out.push({ x: x / rg.count, z: z / rg.count, y, color: c.getHex() });
+      }
+      return out;
+    },
+    territoryTiles: () => (S && S.marks ? S.marks.territoryCount : -1),
+    borderSegments: () => (S && S.marks ? S.marks.borderSegments : -1),
+    ringCentre: (which) => (S && S.marks ? ringCentre(S.marks[which === 'hover' ? 'hoverRing' : 'selRing']) : null),
+    // Lowest and highest vertex y of a mark layer, from the real buffer.
+    markYRange: (name) => {
+      const p = S && S.marks && S.marks[name].geometry.attributes.position;
+      if (!p) return null;
+      let min = Infinity, max = -Infinity;
+      for (let i = 0; i < p.count; i++) { min = Math.min(min, p.getY(i)); max = Math.max(max, p.getY(i)); }
+      return { min, max };
+    },
+    // Show or hide one mark layer (or all of them with no name).
+    setMarksVisible: (b, name) => {
+      if (!S || !S.marks) return;
+      for (const k of (name ? [name] : MARK_NAMES)) { if (b) S.marks.hidden.delete(k); else S.marks.hidden.add(k); applyMarkVisibility(k); }
+      requestRender();
+    },
+    // One pass of the render loop with a caller-supplied clock.
+    step: (now) => (S ? step(now) : false),
+    resetAmbientClock: () => { if (S) S.lastAmbient = 0; },
+
     // ---- fog readers (the real built buffers, not bookkeeping) ----
     tileInfo: (q, r) => {
       const t = S && tileAt(q, r);
@@ -1171,6 +1472,7 @@
     // leak the geometry allows but the depth test hides, so some have to.
     renderAndSample: (x, y, w, h) => {
       if (!S) return null;
+      updateGridFade();
       S.renderer.render(S.scene, S.camera);
       const gl = S.renderer.getContext(), px = new Uint8Array(w * h * 4);
       gl.readPixels(x, y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
@@ -1182,4 +1484,10 @@
       return n;
     },
   };
+  // The fog filter bypass exists only so pixel tests can prove the draw order
+  // and transparency hold on their own. It is not part of the page's surface:
+  // it is defined only when the test harness has declared itself first.
+  if (window.R3D_TEST === true) {
+    window.__r3d.setMarksUnfiltered = (b) => { if (S) { S.unfiltered = !!b; updateMarks(); } };
+  }
 })();

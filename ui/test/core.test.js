@@ -198,6 +198,17 @@ test('remembered tiles still take overlays', () => {
   assert.strictEqual(list.length, 1);
 });
 
+test('dimTiles light in OV.dim, lose to every other category, and obey the fog', () => {
+  const sel = {kind: 'city', q: 4, r: 4, dimTiles: [{q: 5, r: 4}, {q: 6, r: 4}, {q: 7, r: 4}],
+    workedTiles: [{q: 5, r: 4}], moveTiles: [], attackTiles: [], rangedTiles: [], lockedTiles: [{q: 6, r: 4}]};
+  const list = C.overlayList(sel, (q) => (q === 7 ? C.FOG.UNSEEN : C.FOG.VISIBLE));
+  assert.strictEqual(list.length, 2, 'one tile unexplored, so two lit');
+  assert.strictEqual(list.find(o => o.q === 5).color, C.OV.work);
+  assert.strictEqual(list.find(o => o.q === 6).color, C.OV.lock);
+  const dim = C.overlayList({kind: 'city', q: 4, r: 4, dimTiles: [{q: 8, r: 8}]}, allVisible);
+  assert.deepStrictEqual(dim, [{q: 8, r: 8, color: C.OV.dim}]);
+});
+
 test('no selection means no overlays', () => {
   assert.deepStrictEqual(C.overlayList({kind: null}, allVisible), []);
 });

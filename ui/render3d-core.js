@@ -237,7 +237,7 @@
   function overlayList(sel, fogAt) {
     if (!sel || !sel.kind) return [];
     const cats = [['attackTiles', OV.atk], ['rangedTiles', OV.rng], ['moveTiles', OV.move],
-      ['lockedTiles', OV.lock], ['workedTiles', OV.work]];
+      ['lockedTiles', OV.lock], ['workedTiles', OV.work], ['dimTiles', OV.dim]];
     const seen = new Set(), out = [];
     for (const [key, color] of cats) {
       const tiles = sel[key];
