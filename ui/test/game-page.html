@@ -92,6 +92,18 @@ test('without WebGL the map area says so, and the rest of the game still works',
   ev(W, 'redrawMap(); resyncMap(); syncMap3d(); zoomAtCenter(1); updateMinimapViewport(); updateZoomLabel(); panToHex(3,3); centerCamera(true); startMove(); cancelMode();');
 });
 
+test('the no-renderer stand-in has exactly the real R3D surface, and every call is a safe no-op', async () => {
+  const real = Object.keys((await boot()).R3D).sort();
+  const W = await boot('norenderer');
+  assert(typeof W.__r3d === 'undefined', 'precondition: render3d.js did not load');
+  const stub = Object.keys(W.R3D).sort();
+  assert(JSON.stringify(stub) === JSON.stringify(real), 'stand-in drifted from the real R3D. missing: ' +
+    real.filter((k) => !stub.includes(k)) + ' extra: ' + stub.filter((k) => !real.includes(k)));
+  for (const k of real) assert(typeof W.R3D[k] === 'function', k + ' is not a function on the stand-in');
+  for (const k of real) W.R3D[k](1, 1, {}, {}); // none may throw
+  assert(ev(W, 'document.getElementById("sidebar-body").children.length') > 0, 'sidebar did not render');
+});
+
 // ───────────────────────── input ─────────────────────────
 test('a click reaches handleClick through real pointer events, and a drag is not a click', async () => {
   const W = await boot();
@@ -115,6 +127,26 @@ test('the map shows the grabbing cursor class while a button is held', async () 
   assert(!area(W).classList.contains('dragging'), 'dragging class stuck after release');
 });
 
+test('a gesture the browser cancels (pointercancel) ends the drag: grab cursor off, hover alive, no phantom click', async () => {
+  const W = await boot();
+  const cvs = W.document.getElementById('map-canvas'), tip = W.document.getElementById('tile-tip');
+  const P = pointAt(W, 11, 9), Q = pointAt(W, 8, 9);
+  clickHex(W, 11, 10);
+  const before = JSON.stringify(sel(W));
+  // the pointer goes down on the map and the browser takes the gesture over: no pointerup will ever come
+  cvs.dispatchEvent(pe(W, 'pointerdown', Q.x, Q.y));
+  assert(area(W).classList.contains('dragging'), 'precondition: the grab cursor is on');
+  W.dispatchEvent(pe(W, 'pointercancel', Q.x, Q.y));
+  assert(!area(W).classList.contains('dragging'), 'the grabbing cursor stayed on after pointercancel');
+  // hover is suppressed while a drag is in progress: after a cancel it must work again
+  tip.style.display = 'none';
+  cvs.dispatchEvent(pe(W, 'pointermove', P.x, P.y));
+  assert(tip.style.display === 'block' && /\(11,9\)/.test(tip.textContent), 'hover is dead after pointercancel (a drag is still "in progress"): ' + tip.style.display);
+  // and the next release, which belongs to no press, must not be read as a click on the empty ground
+  W.dispatchEvent(pe(W, 'pointerup', Q.x, Q.y));
+  assert(JSON.stringify(sel(W)) === before, 'a release after a cancelled gesture was treated as a click: ' + before + ' -> ' + JSON.stringify(sel(W)));
+});
+
 test('hovering shows the tile tooltip and leaving hides it', async () => {
   const W = await boot();
   const P = pointAt(W, 11, 9), tip = W.document.getElementById('tile-tip');
@@ -123,6 +155,47 @@ test('hovering shows the tile tooltip and leaving hides it', async () => {
   assert(/Grassland|Plains|Hills|Desert|Tundra|Snow|Coast|Ocean|Mountain/.test(tip.textContent), 'tooltip has no terrain name');
   area(W).dispatchEvent(new W.MouseEvent('mouseleave', {bubbles: false}));
   assert(tip.style.display === 'none', 'tooltip stayed after the pointer left');
+});
+
+// Decision 12: "Unexplored tiles must answer 'Unexplored'; remembered tiles show
+// the land but not its occupants." The renderer computes fog-gated facts for
+// onTileHover, but the page deliberately does NOT use them: showTooltip builds
+// its text from the page's own state (yields, owner, lock status, myPlayer), so
+// ITS gate (isTileExplored / isTileVisible in showTooltip) is the one that
+// ships, and this is the test that pins it.
+test('the tooltip names nothing on unexplored ground, and no enemy on remembered ground', async () => {
+  const W = await boot();
+  const tip = W.document.getElementById('tile-tip'), canvas = W.document.getElementById('map-canvas');
+  assert(ev(W, 'fogActive()') === true, 'precondition: fog of war is on');
+  const hover = (q, r) => { tip.style.display = 'none'; const P = pointAt(W, q, r); canvas.dispatchEvent(pe(W, 'pointermove', P.x, P.y)); };
+  // 1. unexplored ground: the tooltip says so and gives away nothing about the tile
+  const un = JSON.parse(ev(W, 'JSON.stringify(G.tiles.filter(t => !isTileExplored(t.q, t.r) && t.terrain !== 0 && t.resource).map(t => [t.q, t.r]))'))
+    .find(([q, r]) => { const P = W.__r3d.project(q, r); return P && P.x > 20 && P.y > 20 && P.x < 1100 && P.y < 700; });
+  assert(un, 'fixture has no on-screen unexplored land tile with a resource');
+  hover(un[0], un[1]);
+  assert(tip.style.display === 'block', 'no tooltip on unexplored ground');
+  assert(tip.textContent === 'Unexplored (' + un[0] + ',' + un[1] + ')',
+    'the tooltip on unexplored ground says: ' + JSON.stringify(tip.textContent));
+  // 2. remembered ground (explored, out of sight) holding an enemy unit and an enemy city
+  const R = ev(W, `(() => {
+    const t = G.tiles.find(t => isTileExplored(t.q, t.r) && !isTileVisible(t.q, t.r) && t.terrain !== 0 && t.terrain !== 12);
+    if (t) return [t.q, t.r];
+    const u = G.tiles.find(t => t.terrain !== 0 && t.terrain !== 12 && !isTileVisible(t.q, t.r) && !exploredSet.has(t.r * COLS + t.q));
+    exploredSet.add(u.r * COLS + u.q); return [u.q, u.r];
+  })()`);
+  ev(W, `(() => { const [q, r] = ${JSON.stringify(R)}; const e = G.players[1];
+    e.units.push({id: 99, unitType: 3, q, r, hp: 77, mp: 2, charges: 0, fortifyTurns: 0});
+    e.cities.push({id: 9, name: 'Memphis', q, r, population: 4, hp: 200, buildings: 0, foodStockpile: 0, prodStockpile: 0, production: 0, foundedTurn: 1, isCapital: false, lockedTiles: []}); })()`);
+  hover(R[0], R[1]);
+  assert(tip.style.display === 'block' && /\(\d+,\d+\)/.test(tip.textContent), 'no tooltip on remembered ground');
+  assert(!/Unexplored/.test(tip.textContent), 'remembered ground was reported as unexplored: ' + tip.textContent);
+  assert(/Grassland|Plains|Hills|Desert|Tundra|Snow|Coast|Mountain/.test(tip.textContent), 'remembered ground lost its terrain: ' + tip.textContent);
+  assert(!/Warrior|HP:77|MP:2/.test(tip.textContent), 'the tooltip names an enemy unit on remembered ground: ' + tip.textContent);
+  assert(!/Pop:/.test(tip.textContent), 'the tooltip gives the population of an enemy city out of sight: ' + tip.textContent);
+  // 3. the same hex in sight DOES name the occupant, so the checks above are not vacuous
+  ev(W, `visibleSet.add(${R[1]} * COLS + ${R[0]})`);
+  tip.style.display = 'none'; hover(un[0], un[1]); hover(R[0], R[1]);
+  assert(/Warrior/.test(tip.textContent), 'precondition: a visible enemy unit is named: ' + tip.textContent);
 });
 
 test('arrow keys pan once per press; WASD is off, so A is attack and S is skip', async () => {
@@ -142,6 +215,39 @@ test('arrow keys pan once per press; WASD is off, so A is attack and S is skip',
   const mp = ev(W, 'G.players[0].units.find(u => u.id === 1).mp');
   key(W, 's');
   assert(ev(W, 'G.players[0].units.find(u => u.id === 1).mp') === 0 && mp > 0, 'S did not skip the unit');
+});
+
+test('typing in an input, select or editable field never fires a game shortcut; Ctrl/Meta/Alt combos do not either', async () => {
+  const W = await boot();
+  clickHex(W, 11, 10); draw(W);
+  const doc = W.document, mk = (tag, attrs) => { const el = doc.createElement(tag); Object.assign(el, attrs || {}); doc.body.appendChild(el); return el; };
+  const input = mk('input', {type: 'text'}), area2 = mk('textarea'), select = mk('select'), edit = mk('div');
+  edit.setAttribute('contenteditable', 'true'); edit.tabIndex = 0;
+  const unit = () => ev(W, 'G.players[0].units.find(u => u.id === 1).mp'), mp0 = unit();
+  const fire = (el, k, extra) => { const e = new W.KeyboardEvent('keydown', Object.assign({key: k, bubbles: true, cancelable: true}, extra)); el.dispatchEvent(e); return e; };
+  const state = () => JSON.stringify([ev(W, 'actionMode'), unit(), ev(W, 'document.getElementById("rpanel").classList.contains("open")'), cam(W).span, ev(W, 'pendingActions.length'), sel(W)]);
+  // control: the same keys on the page body DO act, so the test below is not vacuous
+  const s0 = state(), z0 = cam(W).span;
+  fire(doc.body, '-'); draw(W);
+  assert(cam(W).span > z0, 'control: - on the body did not zoom out');
+  fire(doc.body, 'm'); assert(ev(W, 'actionMode') === 'move', 'control: M on the body did not start a move'); key(W, 'Escape');
+  fire(doc.body, 'p'); assert(ev(W, 'document.getElementById("rpanel").classList.contains("open")'), 'control: P on the body did not open Production'); key(W, 'Escape');
+  ev(W, 'closePanel()');
+  const before = state();
+  for (const [name, el] of [['input', input], ['textarea', area2], ['select', select], ['contenteditable', edit]]) {
+    el.focus();
+    for (const k of ['-', '+', '=', 'm', 'a', 'r', 'f', 's', 'b', 't', 'p', 'e', 'v', 'Tab', 'Escape']) {
+      const e = fire(el, k); draw(W);
+      assert(!e.defaultPrevented, 'typing "' + k + '" in a ' + name + ' was preventDefault-ed: the field cannot receive it');
+      assert(state() === before, 'typing "' + k + '" in a ' + name + ' triggered a shortcut: ' + before + ' -> ' + state());
+    }
+  }
+  // modifier combos belong to the browser (Ctrl+- is browser zoom, Ctrl+E the search bar, Alt+Tab the OS)
+  for (const mod of ['ctrlKey', 'metaKey', 'altKey']) for (const k of ['-', '+', 'e', 't', 'p', 'm', 'Tab']) {
+    const e = fire(doc.body, k, {[mod]: true}); draw(W);
+    assert(!e.defaultPrevented && state() === before, mod + '+' + k + ' triggered a game shortcut: ' + before + ' -> ' + state());
+  }
+  [input, area2, select, edit].forEach((el) => el.remove());
 });
 
 test('Tab cycles units and pans through R3D.panToHex', async () => {
@@ -257,6 +363,27 @@ test('the minimap viewport follows the 3D camera, and a minimap click recentres 
   assert(Math.hypot(cam(W).x - c.x, cam(W).z - c.z) < 1.8, 'minimap click centred ' + JSON.stringify(cam(W)) + ' not on ' + JSON.stringify(c));
 });
 
+test('camera changes never read layout: the minimap rectangle and zoom label use the cached map size', async () => {
+  const W = await boot();
+  draw(W);
+  const cv = W.document.getElementById('map-canvas'), vp = W.document.getElementById('minimap-viewport');
+  const proto = Object.getOwnPropertyDescriptor(W.Element.prototype, 'clientWidth').get;
+  let reads = 0;
+  Object.defineProperty(cv, 'clientWidth', {configurable: true, get() { reads++; return proto.call(this); }});
+  Object.defineProperty(cv, 'clientHeight', {configurable: true, get() { reads++; return W.Object.getOwnPropertyDescriptor(W.Element.prototype, 'clientHeight').get.call(this); }});
+  try {
+    // every kind of camera change: zoom, pan, fly-to, keys
+    W.R3D.zoomBy(1.4); draw(W, 2);
+    W.R3D.centerOn(6, 5); draw(W, 2);
+    W.R3D.zoomBy(0.8); draw(W, 2);
+    assert(reads === 0, 'camera changes read canvas.clientWidth/Height ' + reads + 'x: that forces layout on every frame');
+    // and the rectangle really is computed from the cache, not from some other source
+    const h0 = parseFloat(vp.style.height);
+    ev(W, 'mapSize.w *= 2; updateMinimapViewport();');
+    assert(parseFloat(vp.style.height) < h0 * 0.7, 'the rectangle ignored the cached size: height ' + h0 + ' -> ' + vp.style.height);
+  } finally { delete cv.clientWidth; delete cv.clientHeight; }
+});
+
 test('opening and closing the right panel resizes the renderer to #map-area', async () => {
   const W = await boot();
   const width = () => W.__r3d.canvasWidth(), areaW = () => area(W).clientWidth;
@@ -268,6 +395,30 @@ test('opening and closing the right panel resizes the renderer to #map-area', as
   ev(W, 'closePanel()');
   await wait(250);
   assert(width() === before, 'panel closed: canvas ' + width() + ' did not return to ' + before);
+});
+
+test('switching between the Production and Research panels keeps the canvas, zoom label and minimap in step with #map-area', async () => {
+  const W = await boot();
+  const cv = W.document.getElementById('map-canvas'), vp = W.document.getElementById('minimap-viewport');
+  const lbl = () => W.document.getElementById('zoom-lbl').textContent;
+  const settle = async () => { await wait(600); draw(W, 2); };
+  const sync = (what) => {
+    const pr = W.__r3d.pixelRatio();
+    assert(cv.width === Math.round(area(W).clientWidth * pr) && cv.height === Math.round(area(W).clientHeight * pr),
+      what + ': canvas backing store ' + cv.width + 'x' + cv.height + ' vs #map-area ' + area(W).clientWidth + 'x' + area(W).clientHeight);
+  };
+  // the reference state: Production open, as a player first sees it
+  ev(W, "openPanel('prod')"); await settle(); sync('prod (first)');
+  const ref = {lbl: lbl(), w: parseFloat(vp.style.width), h: parseFloat(vp.style.height)};
+  assert(ref.lbl === '100%', 'reference zoom label ' + ref.lbl);
+  // the review's sequence: both panels open, one of them 340px wider
+  ev(W, "openPanel('tech')"); await settle(); sync('tech (after prod)');
+  assert(lbl() === '100%', 'zoom label with the Research panel open: ' + lbl() + ' (nothing was zoomed)');
+  ev(W, "openPanel('prod')"); await settle(); sync('prod (after tech)');
+  assert(lbl() === ref.lbl, 'zoom label after the toggle: ' + lbl() + ', expected ' + ref.lbl);
+  assert(Math.abs(parseFloat(vp.style.width) - ref.w) < 1 && Math.abs(parseFloat(vp.style.height) - ref.h) < 1,
+    'minimap rectangle ' + vp.style.width + ' x ' + vp.style.height + ', expected ' + ref.w + 'px x ' + ref.h + 'px');
+  ev(W, 'closePanel()'); await settle(); sync('closed');
 });
 
 test('the quality menu changes shadows, props and resolution, and remembers the choice', async () => {
@@ -287,11 +438,10 @@ test('the quality menu changes shadows, props and resolution, and remembers the 
   // real scenery stays: features, resources, improvements are information, not decoration
   assert(W.__r3d.sceneryMeshCount() > W.__r3d.decorMeshCount(), 'props off must not hide every scenery mesh');
   Object.defineProperty(W, 'devicePixelRatio', {value: 2, configurable: true});
-  flip('fullRes', true);
-  assert(W.__r3d.pixelRatio() === 2, 'full resolution did not raise the pixel ratio: ' + W.__r3d.pixelRatio());
   flip('fullRes', false);
   assert(W.__r3d.pixelRatio() === 1, 'pixel ratio did not drop back');
   flip('fullRes', true);
+  assert(W.__r3d.pixelRatio() === 2, 'full resolution did not raise the pixel ratio: ' + W.__r3d.pixelRatio());
   // it survives a rebuild of the scenery (a terrain change) and a fresh page load
   ev(W, 'R3D.rebuildTile(12, 10)');
   assert(W.__r3d.propsVisible() === false, 'a scenery rebuild brought the props back');
@@ -299,6 +449,37 @@ test('the quality menu changes shadows, props and resolution, and remembers the 
   assert(W.__r3d.shadowsEnabled() === false && W.__r3d.propsVisible() === false, 'saved quality was not restored on load');
   assert(!box('shadows').checked && !box('props').checked && box('fullRes').checked, 'the menu does not show the saved state');
   W.localStorage.removeItem('cairoCivQuality');
+});
+
+test('full resolution is on by default when nothing is stored', async () => {
+  const stash = localStorage.getItem('cairoCivQuality');
+  localStorage.removeItem('cairoCivQuality');
+  try {
+    const W = await boot();
+    assert(ev(W, 'quality.fullRes') === true, 'the page defaults fullRes to ' + ev(W, 'quality.fullRes'));
+    assert(W.document.querySelector('#quality-menu input[data-q="fullRes"]').checked === true, 'the Full resolution box is not ticked by default');
+    // the renderer applied it: with a 2x screen the pixel ratio is 2, not the pinned 1
+    Object.defineProperty(W, 'devicePixelRatio', {value: 2, configurable: true});
+    W.R3D.resize();
+    assert(W.__r3d.pixelRatio() === 2, 'default pixel ratio on a 2x screen: ' + W.__r3d.pixelRatio());
+    Object.defineProperty(W, 'devicePixelRatio', {value: 3, configurable: true});
+    W.R3D.resize();
+    assert(W.__r3d.pixelRatio() === 2, 'the pixel ratio cap of 2 is gone: ' + W.__r3d.pixelRatio());
+  } finally { if (stash === null) localStorage.removeItem('cairoCivQuality'); else localStorage.setItem('cairoCivQuality', stash); }
+});
+
+test('a stored fullRes=false is still honoured, and a stored value for one key leaves the others at their defaults', async () => {
+  const stash = localStorage.getItem('cairoCivQuality');
+  try {
+    localStorage.setItem('cairoCivQuality', JSON.stringify({fullRes: false}));
+    const W = await boot();
+    assert(ev(W, 'quality.fullRes') === false, 'a stored false was overridden by the new default');
+    assert(W.document.querySelector('#quality-menu input[data-q="fullRes"]').checked === false, 'the box ignores the stored false');
+    Object.defineProperty(W, 'devicePixelRatio', {value: 2, configurable: true});
+    W.R3D.resize();
+    assert(W.__r3d.pixelRatio() === 1, 'a stored false did not pin the pixel ratio to 1: ' + W.__r3d.pixelRatio());
+    assert(ev(W, 'quality.shadows') === true && ev(W, 'quality.props') === true, 'unstored keys lost their defaults');
+  } finally { if (stash === null) localStorage.removeItem('cairoCivQuality'); else localStorage.setItem('cairoCivQuality', stash); }
 });
 
 // ───────────────────────── state flow ─────────────────────────
@@ -328,6 +509,31 @@ test('a state refresh rebuilds the map only when terrain changed', async () => {
   const moved = JSON.parse(JSON.stringify(changed)); moved.players[0].units.find((u) => u.id === 1).q = 12;
   serve(moved); await W.refreshState();
   assert(rebuild.length === 1 && sync.length >= 3, 'a unit moving rebuilt terrain');
+});
+
+test('capturing a city (it changes owner) does not rebuild the map; a city appearing or vanishing does', async () => {
+  const W = await boot();
+  const rebuild = spy(W, 'rebuildMap');
+  const base = JSON.parse(ev(W, 'JSON.stringify(G)'));
+  const serve = (state) => { W.fetch = async () => ({ok: true, json: async () => JSON.parse(JSON.stringify(state))}); };
+  const clone = (o) => JSON.parse(JSON.stringify(o));
+  assert(base.players[0].cities.length >= 1 && base.players[1].cities.length >= 1, 'fixture: each player needs a city');
+  // capture: player 0's city moves into player 1's list, so the cities come in a different order
+  const captured = clone(base); captured.players[1].cities.push(captured.players[0].cities.shift());
+  serve(captured); await W.refreshState();
+  assert(rebuild.length === 0, 'a captured city (same positions, other owner) rebuilt the whole map ' + rebuild.length + 'x');
+  // and the other direction (player 1's city taken, order preserved)
+  const back = clone(base); back.players[0].cities.push(back.players[1].cities.shift());
+  serve(back); await W.refreshState();
+  assert(rebuild.length === 0, 'the other capture direction rebuilt the map');
+  // genuinely new city
+  const founded = clone(base); founded.players[0].cities.push(Object.assign(clone(base.players[0].cities[0]), {id: 9, q: 14, r: 12}));
+  serve(founded); await W.refreshState();
+  assert(rebuild.length === 1, 'a new city did not rebuild the map (' + rebuild.length + 'x)');
+  // and one disappearing (destroyed)
+  const gone = clone(founded); gone.players[0].cities.pop();
+  serve(gone); await W.refreshState();
+  assert(rebuild.length === 2, 'a city vanishing did not rebuild the map (' + rebuild.length + 'x)');
 });
 
 test('optimistic moves play hex-coordinate effects once the fog has caught up with the move', async () => {
@@ -417,8 +623,12 @@ async function runAll() {
   const failures = []; let passed = 0;
   // ?filter=<regex> runs only the tests whose name matches (used when proving a test fails on a broken build)
   const f = new URLSearchParams(location.search).get('filter'), only = f ? new RegExp(f, 'i') : null;
-  for (const t of TESTS) {
-    if (only && !only.test(t.name)) continue;
+  const chosen = TESTS.filter((t) => !only || only.test(t.name));
+  let i = 0;
+  for (const t of chosen) {
+    // Published before each test so a runner that times out names the test it stalled in.
+    document.title = 'GAME-PROGRESS ' + JSON.stringify({done: i, total: chosen.length, name: t.name});
+    i++;
     try { await t.fn(); passed++; }
     catch (e) { failures.push(t.name + ': ' + (e && e.message || e)); }
   }

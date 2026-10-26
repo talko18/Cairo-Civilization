@@ -27,6 +27,8 @@ function page(query) {
     inject += '<script>(() => { const g = HTMLCanvasElement.prototype.getContext;'
       + ' HTMLCanvasElement.prototype.getContext = function (t, ...r) { return /webgl/.test(t) ? null : g.call(this, t, ...r); }; })();</script>';
   }
+  // ?norenderer: render3d.js never loads, so the page installs its no-op R3D stand-in.
+  if (query.includes('norenderer')) html = html.replace('<script src="render3d.js"></script>', '');
   return html.replace('<head>', '<head>' + inject);
 }
 
@@ -44,14 +46,14 @@ const server = http.createServer((req, res) => {
   send(404, 'text/plain', 'not found');
 });
 
-const profile = mkdtempSync(path.join(tmpdir(), 'r3d-game-'));
-let chrome = null, done = false;
+let profile = null, chrome = null, done = false;
+const PORT_WAIT_MS = Number(process.env.GAME_TEST_PORT_WAIT_MS) || 30000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function finish(code) {
   if (done) return; done = true;
   server.close();
   const cleanup = () => {
-    try { rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); } catch (e) { /* ignore */ }
+    try { if (profile) rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); } catch (e) { /* ignore */ }
     process.exit(code);
   };
   if (!chrome || chrome.exitCode !== null || chrome.signalCode !== null) return cleanup();
@@ -60,45 +62,69 @@ function finish(code) {
   try { chrome.kill('SIGKILL'); } catch (e) { cleanup(); }
 }
 
-async function main() {
-  await new Promise((r) => server.listen(0, '127.0.0.1', r));
-  const base = `http://127.0.0.1:${server.address().port}`;
-  chrome = spawn('google-chrome', [
+// Chrome has come up without ever writing DevToolsActivePort. That is a launch
+// failure, not a test failure: one retry, and a diagnostic naming what was awaited.
+async function launch(attempt) {
+  profile = mkdtempSync(path.join(tmpdir(), 'r3d-game-'));
+  const proc = spawn('google-chrome', [
     '--headless=new', '--no-sandbox', '--enable-unsafe-swiftshader', '--use-angle=swiftshader',
     '--window-size=1400,850', '--remote-debugging-port=0', '--user-data-dir=' + profile,
     '--no-first-run', '--disable-extensions', 'about:blank',
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  chrome = proc;
   let stderr = '';
-  chrome.stderr.on('data', (d) => { stderr += d; });
-  chrome.on('error', (e) => { console.error('failed to launch chrome:', e.message); finish(1); });
-
+  proc.stderr.on('data', (d) => { stderr += d; });
+  proc.on('error', (e) => { stderr += 'spawn error: ' + e.message + '\n'; });
+  const portFile = path.join(profile, 'DevToolsActivePort');
+  const until = Date.now() + PORT_WAIT_MS;
   let port = 0;
-  for (let i = 0; i < 100 && !port; i++) {
+  while (!port && Date.now() < until) {
     await sleep(100);
-    try { port = Number(readFileSync(path.join(profile, 'DevToolsActivePort'), 'utf8').split('\n')[0]); } catch (e) { /* not yet */ }
+    try { port = Number(readFileSync(portFile, 'utf8').split('\n')[0]); } catch (e) { /* not written yet */ }
   }
-  if (!port) { console.error('chrome did not expose a debugging port'); console.error(stderr.split('\n').slice(-10).join('\n')); return finish(1); }
+  if (port) return port;
+  console.error(`chrome did not expose a debugging port (attempt ${attempt}: waited ${PORT_WAIT_MS}ms for ${portFile}; `
+    + `process ${proc.exitCode === null ? 'still running' : 'exited ' + proc.exitCode})`);
+  console.error(stderr.split('\n').slice(-10).join('\n'));
+  try { proc.kill('SIGKILL'); } catch (e) { /* ignore */ }
+  try { rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); } catch (e) { /* ignore */ }
+  chrome = null; profile = null;
+  return 0;
+}
+
+async function main() {
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  let port = await launch(1);
+  if (!port) { console.error('retrying chrome launch once'); port = await launch(2); }
+  if (!port) { console.error('FAIL page: chrome would not start'); return finish(1); }
   const dbg = `http://127.0.0.1:${port}`;
   const target = await (await fetch(`${dbg}/json/new?${encodeURIComponent(base + '/test/game-page.html' + (process.env.GAME_TEST_FILTER ? '?filter=' + encodeURIComponent(process.env.GAME_TEST_FILTER) : ''))}`, { method: 'PUT' })).json();
-  const deadline = Date.now() + (Number(process.env.GAME_TEST_DEADLINE_MS) || 600000);
-  let title = '';
+  const DEADLINE_MS = Number(process.env.GAME_TEST_DEADLINE_MS) || 600000;
+  const started = Date.now(), deadline = started + DEADLINE_MS;
+  let title = '', progress = '';
   while (Date.now() < deadline) {
     await sleep(250);
     const list = await (await fetch(`${dbg}/json`)).json();
     const t = list.find((x) => x.id === target.id);
     title = t ? t.title : '';
+    if (title.startsWith('GAME-PROGRESS ')) progress = title.slice('GAME-PROGRESS '.length);
     if (title.startsWith('GAME-RESULT ')) break;
   }
+  const unescape = (x) => x.replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
   if (!title.startsWith('GAME-RESULT ')) {
-    console.error('no GAME-RESULT found (timed out); last title: ' + title);
+    // A timeout is a failure, never an empty result.
+    const where = progress ? 'stalled in: ' + unescape(progress) : 'the page never reported any progress (it probably failed to load)';
+    console.error(`FAIL page: timed out after ${Math.round((Date.now() - started) / 1000)}s (${where})`);
+    console.error('raise GAME_TEST_DEADLINE_MS (currently ' + DEADLINE_MS + ') if the machine is simply slow');
+    console.error('0 passed, 1 failed');
     return finish(1);
   }
-  const unescape = (x) => x.replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
   let result;
   try { result = JSON.parse(unescape(title.slice('GAME-RESULT '.length))); }
-  catch (e) { console.error('unparseable GAME-RESULT:', title); return finish(1); }
+  catch (e) { console.error('FAIL page: unparseable GAME-RESULT: ' + title); return finish(1); }
   for (const f of result.failures) console.error('FAIL ' + f);
   console.log(`${result.passed} passed, ${result.failed} failed`);
   finish(result.failed > 0 ? 1 : 0);
 }
-main().catch((e) => { console.error(e); finish(1); });
+main().catch((e) => { console.error('FAIL page: ' + (e && e.stack || e)); finish(1); });

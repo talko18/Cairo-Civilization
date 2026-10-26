@@ -231,10 +231,33 @@ TESTS.push({name: 'ambient water redraws at a modest rate, well under every fram
   __r3d.renderAndSample(0, 0, 1, 1);   // drain the GPU queue so the real loop is not left behind
   __r3d.resetAmbientClock();           // hand the clock back to real time
 }});
-TESTS.push({name: 'requestRender draws one frame', fn: async () => {
-  await wait(100);
-  const before = __r3d.frames(); R3D.requestRender(); await wait(100);
-  assert(__r3d.frames() > before, 'frames ' + before + ' -> ' + __r3d.frames());
+// Settle the loop by stepping it with ONE fixed clock reading until it reports
+// it drew nothing. The clock never advances, so the ambient water timer cannot
+// re-arm (now - lastAmbient is 0 after the first draw) and the only thing that
+// can keep it going is OrbitControls damping, which converges. Returns the
+// number of frames it took, so a caller can assert it really went idle.
+function settleLoop(now) {
+  let n = 0;
+  while (n < 500 && __r3d.step(now)) n++;
+  return n;
+}
+TESTS.push({name: 'requestRender draws one frame', fn: () => {
+  // Driven through the loop body with a supplied clock rather than waiting on
+  // requestAnimationFrame: under software rendering one frame can take longer
+  // than any wall-clock timeout worth writing, and this test flaked five times
+  // on exactly that. What it is actually asserting — that requestRender arms
+  // the dirty flag and the next pass of the loop draws exactly one frame — is
+  // not a timing property at all.
+  const t = performance.now();
+  try {
+    assert(settleLoop(t) < 500, 'the loop never went idle');
+    assert(__r3d.step(t) === false, 'the idle loop drew without being asked');
+    const before = __r3d.frames();
+    R3D.requestRender();
+    assert(__r3d.step(t) === true, 'requestRender did not make the next pass draw');
+    assert(__r3d.frames() === before + 1, 'frames ' + before + ' -> ' + __r3d.frames());
+    assert(__r3d.step(t) === false, 'one requestRender drew more than one frame');
+  } finally { __r3d.resetAmbientClock(); }
 }});
 TESTS.push({name: 'camera controls: left pans, right rotates, polar angle clamped', fn: () => {
   const c = __r3d.controls();
@@ -258,15 +281,22 @@ TESTS.push({name: 'panToHex moves the camera target', fn: async () => {
   const c = R3DCore.hexCenter(LM.CITY_A.q, LM.CITY_A.r), v = R3D.getCameraView();
   assert(Math.abs(v.x - c.x) < 0.5, 'x ' + v.x + ' vs ' + c.x);
 }});
-TESTS.push({name: 'a throwing animation is dropped and rendering continues', fn: async () => {
+TESTS.push({name: 'a throwing animation is dropped and rendering continues', fn: () => {
+  // Same reasoning as 'requestRender draws one frame': stepped with a supplied
+  // clock, because "the loop survived a throw" is not a wall-clock property.
   const origErr = console.error; console.error = () => {};
+  const t = performance.now();
   try {
+    assert(settleLoop(t) < 500, 'the loop never went idle');
     R3D.playAnimation({tick: () => { throw new Error('boom'); }});
-    await wait(150);
-    const before = __r3d.frames(); R3D.requestRender(); await wait(150);
-    assert(__r3d.frames() > before, 'renderer wedged after a throwing animation');
+    assert(__r3d.animCount() === 1, 'the animation was never registered');
+    assert(__r3d.step(t) === true, 'the loop did not run the tick that throws');
     assert(__r3d.animCount() === 0, 'throwing animation still registered: ' + __r3d.animCount());
-  } finally { console.error = origErr; }
+    const before = __r3d.frames();
+    R3D.requestRender();
+    assert(__r3d.step(t) === true, 'renderer wedged after a throwing animation');
+    assert(__r3d.frames() === before + 1, 'frames ' + before + ' -> ' + __r3d.frames());
+  } finally { console.error = origErr; __r3d.resetAmbientClock(); }
 }});
 
 // ── Task 6: terrain chunks, water, rivers ──
@@ -666,9 +696,40 @@ for (const view of [
     } finally { __r3d.setWaterVisible(true); }
   }});
 }
+// Leak 11. The four tests above hide the water, which is half of why the water
+// plane's depth write shipped: a transparent, depth-writing sea drawn BEFORE
+// the shell makes the shell fail the depth test over unexplored ocean, and the
+// seabed shows through. These keep the water ON, the way a player sees it,
+// with every tile unexplored, at the map rim and at shoreline angles.
+for (const view of [
+  {name: 'a grazing map edge', q: COLS - 1, r: 10, az: Math.PI / 2},
+  {name: 'a grazing south edge', q: 16, r: ROWS - 1, az: 0},
+  {name: 'a grazing coast', q: LM.COAST.q, r: LM.COAST.r, az: -Math.PI / 2},
+  {name: 'the whole map from above', q: 16, r: 10, az: 0, dist: 55, polar: 0.5},
+]) {
+  TESTS.push({name: 'unexplored ground shows no pixel of itself through the WATER at ' + view.name, fn: () => {
+    assert(__r3d.waterVisible(), 'precondition: the water is on');
+    allFog(() => {
+      __r3d.lookAt(view.q, view.r, view.dist || 7, view.polar || GRAZE, view.az);
+      const got = groundPixels();
+      assert(got.n <= 200, got.n + ' pixels of ' + got.total + ' change when the ground is removed, water on: ' +
+        JSON.stringify(got.worst));
+    });
+    assert(__r3d.waterVisible(), 'the water was left hidden');
+  }});
+}
 TESTS.push({name: 'every layer above the terrain is transparent and writes no depth', fn: () =>
   assert(__r3d.depthWritingLayersAboveTerrain() === 0,
     __r3d.depthWritingLayersAboveTerrain() + ' layers above the terrain write depth and would punch through the fog')});
+TESTS.push({name: 'the layer predicate inspects the water plane (it once skipped renderOrder 0)', fn: () => {
+  const m = __r3d.waterMaterial();
+  assert(m && m.transparent === true, 'precondition: the water is a transparent material');
+  assert(m.depthWrite === false, 'the water plane writes depth');
+  m.depthWrite = true;
+  try { assert(__r3d.depthWritingLayersAboveTerrain() >= 1, 'a depth-writing water plane is invisible to the predicate'); }
+  finally { m.depthWrite = false; }
+  assert(__r3d.depthWritingLayersAboveTerrain() === 0, 'predicate is not clean after restoring the water');
+}});
 TESTS.push({name: 'the patch path rewrites both shells, not just the one on show', fn: () => {
   fogOn();
   const HILLS = [3, 5, 7, 9, 11];
@@ -2318,14 +2379,160 @@ TESTS.push({name: 'setQuality: fullRes raises the pixel ratio (capped at 2) and 
   }
 }});
 
+// ── Task 15: the draw-call budget, asserted so a regression fails ──
+//
+// The spec's budget is "under ~800 draw calls in the worst case (whole map on
+// screen), under ~300 at normal play zoom", and it is a TOTAL, not a terrain
+// budget. These assertions are the permanent guard: a change that instances
+// one fewer thing, splits a merged layer, or gives every unit its own mesh
+// fails here rather than merely getting slower on someone's laptop.
+//
+// Draw calls, triangles and scene children are hardware-independent — they are
+// what the renderer asks the driver to do — so they measure the same under
+// SwiftShader as on a real GPU. Frame RATE is not measured anywhere in this
+// suite and cannot be: this runs in software at a few frames per second.
+//
+// The frame is drawn through __r3d.step with a supplied clock, not by waiting
+// on rAF, so the numbers do not depend on how loaded the machine is.
+const budgetFrame = () => { R3D.requestRender(); __r3d.step(performance.now()); };
+const budget = () => ({ calls: __r3d.drawCalls(), tris: __r3d.triangles(), scene: __r3d.sceneCount(),
+  labels: __r3d.labelsInDom(), anims: __r3d.liveAnimations(), fx: __r3d.fxMeshes().length });
+const budgetSay = (b) => `${b.calls} draw calls, ${b.tris} triangles, ${b.scene} scene children, ${b.labels} DOM labels, ${b.anims} animations`;
+// Every budget figure the suite takes, reported with the result so the numbers
+// are visible on every run and not only when one of them blows the budget.
+const BUDGET_LOG = [];
+const budgetRecord = (scene, b) => { BUDGET_LOG.push({scene, calls: b.calls, tris: b.tris, children: b.scene, labels: b.labels, anims: b.anims, fx: b.fx}); return b; };
+
+// Everything the worst case needs at once: far more units and cities than the
+// fixture carries, fog off so nothing is culled, every overlay category lit on
+// every land tile, a yield pill on all 640, every animation type running, and
+// full quality. Restores the fixture whatever happens.
+function withWorstCase(fn) {
+  const land = fixture.tiles.filter((t) => t.terrain > 1 && t.terrain !== 12);
+  const saved = fixture.players.map((p) => ({ p, units: p.units, cities: p.cities }));
+  const wasFog = FOGM.on;
+  try {
+    const taken = new Set();
+    for (const p of fixture.players) for (const c of p.cities) taken.add(c.r * COLS + c.q);
+    const units = [[], []], cities = [[], []];
+    let i = 0;
+    for (const t of land) {
+      if (taken.has(t.r * COLS + t.q) || units[0].length + units[1].length >= 120) continue;
+      const p = i % 2;
+      units[p].push({ id: units[p].length, unitType: i % 6, q: t.q, r: t.r, hp: 60 + (i % 40), mp: 2, charges: 2, fortify: 0 });
+      i++;
+    }
+    let made = 0;
+    for (const t of land) {
+      if (made >= 16) break;
+      if (taken.has(t.r * COLS + t.q)) continue;
+      if (cities.some((cl) => cl.some((c) => R3DCore.hexDist(c.q, c.r, t.q, t.r) < 3))) continue;
+      const p = made % 2;
+      cities[p].push({ id: cities[p].length, name: 'S' + made, q: t.q, r: t.r, population: 6, hp: 140,
+        foodStockpile: 5, prodStockpile: 20, production: 4, buildings: 15, foundedTurn: 1, isCapital: made === 0, lockedTiles: [] });
+      taken.add(t.r * COLS + t.q); made++;
+    }
+    fixture.players.forEach((p, k) => { p.units = units[k]; p.cities = cities[k]; });
+    fogOff();
+    R3D.rebuildMap();
+    R3D.setQuality({ shadows: true, props: true, fullRes: true });
+    // Every overlay category on every land tile, which is well past anything
+    // the game can produce: one unit's move range is a handful of tiles.
+    // overlayList keeps the first category that claims a tile, so the land is
+    // split six ways to get all six colours on screen at once.
+    const slice = (k) => land.filter((t, n) => n % 6 === k);
+    R3D.setSelection(mkSel({ kind: 'city', q: cities[0][0].q, r: cities[0][0].r,
+      attackTiles: slice(0), rangedTiles: slice(1), moveTiles: slice(2),
+      lockedTiles: slice(3), workedTiles: slice(4), dimTiles: slice(5) }));
+    R3D.setYieldTiles(fixture.tiles.map((t, k) => ({ q: t.q, r: t.r, locked: k % 3 === 0, isCenter: k === 0 })));
+    R3D.setHover(cities[0][0].q, cities[0][0].r);
+    for (const p of fixture.players) for (const u of p.units) for (const type of ANIM_TYPES) {
+      R3D.playAnimation({ type, q: u.q, r: u.r, toQ: u.q + 1, toR: u.r, player: 0, unitId: u.id, text: '-5', color: '#f44', duration: 5000 });
+    }
+    return fn();
+  } finally {
+    for (const s of saved) { s.p.units = s.units; s.p.cities = s.cities; }
+    __r3d.clearFlash();
+    for (const a of __r3d.anims().slice()) a.stop = true;
+    __r3d.step(performance.now()); __r3d.step(performance.now() + 1);
+    R3D.setSelection(null); R3D.setYieldTiles([]); R3D.setHover(null);
+    R3D.setQuality({ shadows: true, props: true, fullRes: false });
+    FOGM.on = wasFog; R3D.refreshFog();
+    R3D.rebuildMap();
+  }
+}
+
+TESTS.push({name: 'budget: play zoom stays under 300 draw calls', fn: () => {
+  R3D.centerOn(16, 10); __r3d.setCameraDistance(14.6);
+  budgetFrame();
+  const b = budgetRecord('play zoom (d=14.6)', budget());
+  assert(b.calls < 300, 'play zoom used ' + budgetSay(b));
+  // Object count, not triangle count, was the constraint the whole performance
+  // plan is built around, and the draw-call ceiling alone is a loose guard at
+  // play zoom: frustum culling hides most of an unmerged map. Measured 117.
+  assert(b.scene < 300, 'the scene grew to ' + b.scene + ' children: ' + budgetSay(b));
+}});
+TESTS.push({name: 'budget: the whole map in view stays under 800 draw calls', fn: () => {
+  R3D.centerOn(16, 10); __r3d.setCameraDistance(__r3d.controls().maxDistance);
+  budgetFrame();
+  const b = budgetRecord('whole map (d=' + __r3d.controls().maxDistance + ')', budget());
+  assert(b.calls < 800, 'whole map used ' + budgetSay(b));
+  assert(b.scene < 300, 'the scene grew to ' + b.scene + ' children: ' + budgetSay(b));
+}});
+TESTS.push({name: 'budget: the worst case stays under 800 draw calls at play zoom', fn: () => {
+  const b = withWorstCase(() => {
+    R3D.centerOn(16, 10); __r3d.setCameraDistance(14.6);
+    budgetFrame();
+    const got = budget();
+    // Prove the worst case is really loaded, or the budget assertion is vacuous.
+    assert(got.anims > 100, 'the stress animations did not take: ' + got.anims);
+    assert(__r3d.litTiles() > 300, 'the overlays did not light: ' + __r3d.litTiles());
+    return budgetRecord('worst case, play zoom (d=14.6, ' + __r3d.litTiles() + ' tiles lit)', got);
+  });
+  assert(b.calls < 800, 'worst case at play zoom used ' + budgetSay(b));
+  assert(b.scene < 500, 'the worst-case scene grew to ' + b.scene + ' children: ' + budgetSay(b));   // measured 243
+}});
+TESTS.push({name: 'budget: the worst case stays under 800 draw calls with the whole map in view', fn: () => {
+  const b = withWorstCase(() => {
+    R3D.centerOn(16, 10); __r3d.setCameraDistance(__r3d.controls().maxDistance);
+    budgetFrame();
+    return budgetRecord('worst case, whole map (d=' + __r3d.controls().maxDistance + ')', budget());
+  });
+  assert(b.calls < 800, 'worst case over the whole map used ' + budgetSay(b));
+}});
+TESTS.push({name: 'budget: live effect meshes are capped, so animations cannot run the count away', fn: () => {
+  const b = withWorstCase(() => { budgetFrame(); return budget(); });
+  assert(b.fx <= __r3d.fxLimit(), b.fx + ' effect meshes against a cap of ' + __r3d.fxLimit());
+}});
+
+// ── Task 15: the cost of one builder action, measured rather than assumed ──
+// rebuildTile reindexes all 640 tiles and rebuilds ALL scenery, so N builder
+// actions in one turn are N whole-map scenery rebuilds. This is CPU-side JS
+// geometry work, which is meaningful under software rendering (unlike frame
+// rate), and it happens once per click rather than in a batch.
+TESTS.push({name: 'rebuildTile costs little enough that a turn of builder actions is not felt', fn: () => {
+  const p = LM.HILL;
+  R3D.rebuildTile(p.q, p.r);                       // warm the code path
+  const t0 = performance.now();
+  const N = 8;
+  for (let i = 0; i < N; i++) R3D.rebuildTile(p.q, p.r);
+  const per = (performance.now() - t0) / N;
+  BUDGET_LOG.push({scene: 'one rebuildTile (reindex + all scenery)', ms: +per.toFixed(1)});
+  assert(per < 150, 'one rebuildTile takes ' + per.toFixed(1) + ' ms, which a player would feel on a builder click');
+}});
+
 async function runAll() {
   const failures = [];
-  let passed = 0;
+  let passed = 0, i = 0;
   for (const t of TESTS) {
+    // Published before each test so a runner that times out can say which test
+    // it stalled in instead of reporting an empty result.
+    document.title = 'R3D-PROGRESS ' + JSON.stringify({done: i, total: TESTS.length, name: t.name});
+    i++;
     try { await t.fn(); passed++; }
     catch (e) { failures.push(t.name + ': ' + (e && e.message || e)); }
   }
-  document.title = 'R3D-RESULT ' + JSON.stringify({passed, failed: failures.length, failures});
+  document.title = 'R3D-RESULT ' + JSON.stringify({passed, failed: failures.length, failures, budget: BUDGET_LOG});
 }
 window.R3D_TESTS = TESTS;
 runAll().catch(e => { document.title = 'R3D-RESULT ' + JSON.stringify({passed: 0, failed: 1, failures: ['harness: ' + e]}); });

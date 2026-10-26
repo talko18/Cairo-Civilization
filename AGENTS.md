@@ -37,16 +37,25 @@ cairo_civ/
 │   ├── test_city.cairo     # City logic unit tests (888 lines)
 │   └── ...                 # Per-module unit tests
 ├── ui/
-│   ├── server.js           # Express API server — lobby + game endpoints (651 lines)
-│   ├── index.html          # Full game UI — lobby, canvas, action validation (3,429 lines)
-│   ├── scenarios.js        # AI scenario replay system — generator-based (509 lines)
-│   ├── package.json        # Node deps: express, starknet
-│   └── package-lock.json
+│   ├── server.js           # Express API server — lobby + game endpoints (671 lines)
+│   ├── index.html          # Full game UI — lobby, HUD, action validation (3,386 lines)
+│   ├── render3d.js         # three.js map renderer: terrain, fog, units, overlays, animations (2,733 lines)
+│   ├── render3d-core.js    # Pure renderer logic, no three.js: hex math, yield rules, fog states (295 lines)
+│   ├── scenarios.js        # AI scenario replay system — generator-based (549 lines)
+│   ├── package.json        # Node deps: express, starknet; `npm test` runs the JS suites
+│   ├── package-lock.json
+│   └── test/               # Renderer + game-page tests (3,747 lines)
+│       ├── core.test.js        # node:test unit tests for render3d-core.js
+│       ├── harness.html        # Renderer tests in headless Chrome (pixel, draw-call, fog)
+│       ├── game-page.html      # Tests of the real index.html, driven in an iframe
+│       ├── run-browser.mjs     # Runs harness.html under headless Chrome
+│       ├── run-game.mjs        # Runs game-page.html against a fake server + game-fixture.json
+│       └── game-fixture.json   # Recorded game state used by run-game.mjs
 ├── design/                 # Design docs (architecture, game rules, ZK plans, future phases)
 └── target/dev/             # Build artifacts (sierra + casm JSON)
 ```
 
-**Total: ~20,860 lines of code.**
+**Total: ~27,700 lines of code** (Cairo `src/` + `tests/` 16,275; `ui/` 7,634; `ui/test/` 3,747; design docs not counted).
 
 ---
 
@@ -74,6 +83,10 @@ katana --dev --dev.no-fee --dev.no-account-validation
 cd ui && npm install && npm start
 
 # 5. Open browser to http://localhost:3000
+
+# 6. (Optional) UI tests: renderer unit tests + headless-Chrome renderer and game-page suites.
+#    Needs google-chrome on PATH; software WebGL, so allow a few minutes.
+cd ui && npm test
 ```
 
 ### Using the Lobby
@@ -193,7 +206,7 @@ Scenarios are listed in the lobby dropdown. Selecting one and clicking "Run Scen
 
 ### UI (`ui/index.html`)
 
-Single-file HTML/CSS/JS app (~3,430 lines) with two main screens: a **lobby** and the **game canvas**.
+Single-file HTML/CSS/JS app (~3,390 lines) with two main screens: a **lobby** and the **game canvas**.
 
 **Lobby screen:**
 - Multi-step card UI: Deploy → Create → Join → Enter Game.
@@ -363,7 +376,9 @@ Test files:
 
 7. **No save/load:** Game state lives only in Katana memory. Restarting Katana loses the game.
 
-8. **Software WebGL is slow:** headless or GPU-less browsers render the 3D map at a few frames per second. The test pages (`ui/test/harness.html`, `ui/test/game-page.html`) need minutes; `node test/run-browser.mjs` has a 90 s deadline that yields an empty result under load.
+8. **Software WebGL is slow:** headless or GPU-less browsers render the 3D map at a few frames per second. The test pages (`ui/test/harness.html`, `ui/test/game-page.html`) need minutes; each runner has a 600 s deadline (`R3D_TEST_DEADLINE_MS` for `run-browser.mjs`, `GAME_TEST_DEADLINE_MS` for `run-game.mjs`); on timeout it prints a FAIL line naming the test it stalled in and exits non-zero, so a slow machine can no longer read as an empty pass. Slow is not broken: raise the variable.
+
+   Known renderer risks worth knowing: the fog pixel tests cap total changed pixels at 200 per frame (a total, not a cluster bound; a thin leak could hide under it, so switch to the largest 8-connected cluster if it ever flakes), and a 16-bit depth buffer could z-fight the fog shell's `polygonOffset` beyond ~25 world units of camera distance (not reproduced).
 
 9. **No turn timer:** The design docs describe a 5-minute turn timer with `claim_timeout`, but this is not implemented. Adding it risks leaving the game in an unrecoverable state if a player disconnects (no one can claim timeout in hotseat mode). Deferred to multiplayer phase.
 
@@ -439,6 +454,13 @@ These are potential areas for improvement, roughly ordered by impact:
 3. Use helper functions (`scScoutActions`, `scChooseProduction`, `scStrategicTech`, etc.) for AI logic
 4. The `state` object passed to the generator mirrors the server JSON structure from `GET /api/state`
 5. Scenarios auto-appear in the lobby dropdown via `populateScenarios()`
+
+### Changing the 3D renderer (`ui/render3d.js`, `ui/render3d-core.js`)
+Run `cd ui && npm test` before and after; the pixel and structural tests there are what catches fog leaks. Fog is the constraint that shapes everything: **anything that can show a tile's contents must be hidden on unexplored ground, and occupants must be hidden on remembered ground.** Two defences, both required: ordering (a layer is `transparent` with `depthWrite: false` and a `renderOrder` below `fogUnseen`) and filtering (the layer's builder drops tiles through the fog gate). The only exemptions are terrain chunks, culled instanced scenery and culled unit meshes; `depthWritingLayersAboveTerrain()` in the test hooks enforces this on every mesh in the scene, so a new opaque or depth-writing material fails the suite.
+- **New overlay / tile mark:** add an `OV` colour in `render3d-core.js`, a producer in `overlayList` (it must filter through the fog gate), a `RENDER_ORDER` slot **below `fogUnseen`**, and build the material with `markMaterial` so it is transparent with no depth write. Read the comment at `render3d.js` "Marks: hex edges, tile overlays..." first: it states the transparency, ordering, filtering and "same triangles as the ground" rules and the leak behind each.
+- **New terrain type:** add its entries to `BASE` (colour), `tileBase` and `tileAmp` (height) in `render3d-core.js`, `TERRAIN_COLORS` and `TERRAIN_NAMES` in `index.html` (minimap and tooltip), and check yields in `R3DCore.tileYield`.
+- **New unit model:** add the art in `buildUnitArt(type, owner)` in `render3d.js`; units are instanced per `(type, owner)` and opaque, culled off VISIBLE ground. Add the name/icon in `index.html` as for any unit type.
+- Any new transparent material needs `depthWrite: false` (the sea once shipped without it and showed unexplored seabed through the fog); any new test of fog must run with the water ON.
 
 ### Modifying Client-side Validation
 When contract action validation logic changes, the corresponding JavaScript validation in `validateAction()` (`ui/index.html`) must be updated to match. The validator uses global helper functions and constants that mirror the Cairo contract:
@@ -522,4 +544,4 @@ bits 128-135: is_capital
 
 ---
 
-*Last updated: 2026-02-22. 579 tests passing, ~20,860 lines of code. Contract builds successfully. Simultaneous turns: all players submit independently, round resolves when all have submitted, turn_seed derived from Poseidon hash of all tx hashes. UI features: multi-step lobby (deploy → create → join → enter), client-side action validation (mirrors contract rules), scenario replay system (AI-vs-AI generator-based), optimistic updates with animation. City garrison protection: attacks on city tiles always hit the city, garrisoned units destroyed on capture. Score victory, bankruptcy disbandment, kill/capture tracking, game-over UI, and forfeit all implemented. Action handlers use soft failure (silent skip) for blockchain compatibility; only turn-submission validation reverts.*
+*Last updated: 2026-10-25. 579 Cairo tests passing (plus the `ui/` JS suites), ~27,700 lines of code. Contract builds successfully. Simultaneous turns: all players submit independently, round resolves when all have submitted, turn_seed derived from Poseidon hash of all tx hashes. UI features: multi-step lobby (deploy → create → join → enter), client-side action validation (mirrors contract rules), scenario replay system (AI-vs-AI generator-based), optimistic updates with animation. City garrison protection: attacks on city tiles always hit the city, garrisoned units destroyed on capture. Score victory, bankruptcy disbandment, kill/capture tracking, game-over UI, and forfeit all implemented. Action handlers use soft failure (silent skip) for blockchain compatibility; only turn-submission validation reverts.*

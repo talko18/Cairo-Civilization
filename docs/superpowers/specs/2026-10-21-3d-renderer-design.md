@@ -448,6 +448,127 @@ layer structure are only locked in after that number exists. Discovering the
 budget is blown after the architecture is settled means a rewrite, and
 Decision 1 removed the 2D fallback that would otherwise absorb it.
 
+### Shipped renderer, measured (Task 15)
+
+Everything below is a measurement, not an estimate. Draw calls, triangles,
+scene children and DOM label counts are what the renderer asks of the driver
+and the DOM; they are hardware-independent and read the same under software
+rendering as on a GPU.
+
+**Conditions, common to every row.** Headless Chrome 1400×900,
+`--use-angle=swiftshader`; `#map-canvas` 1140×628 CSS; quality shadows ON,
+props ON, `fullRes` ON unless a row says otherwise; camera distances are the
+renderer's own — play zoom is the distance `R3D.init` leaves
+(**d = 14.62**), whole map is `controls.maxDistance` (**d = 90**).
+
+**Real on-chain game.** Katana devnet, contract deployed, played to **turn
+121** by a scripted driver: 34 units and 10 cities across both players, 70
+owned tiles, 36 woods tiles, 24 resource tiles, fog ON, nothing selected.
+(No improvements: the driver never issued `BuildImprovement`. Improvements
+are instanced scenery, so they cost draw calls only in the bucket they share
+— the fixture rows below carry all five.)
+
+| Scene | Draw calls | Triangles | Scene children | DOM labels (shown) | Visible chunks |
+|---|---|---|---|---|---|
+| Play zoom (d 14.62) | **63** | 254k | 99 | 23 (14) | 17 |
+| Whole map (d 90) | **88** | 288k | 99 | 23 (6) | 40 |
+
+**Constructed worst case, same real game.** The on-chain game cannot be
+played to saturation in a sitting, so the state the renderer reads was
+stuffed past anything the game can reach: 120 units and 26 cities, fog OFF
+(so nothing is culled), all six overlay categories lit on all 411 land tiles,
+a yield pill on all 640, every one of the 11 animation types fired at every
+unit (≈1,200 live animation records), full quality.
+
+| Scene | Draw calls | Triangles | Scene children | DOM labels (shown) | Effect meshes |
+|---|---|---|---|---|---|
+| Worst case, play zoom (d 14.62) | **131** | 429k | 234 | 643 (211) | 120 (at the cap) |
+| Worst case, whole map (d 90) | **230** | 475k | 234 | 643 (26) | 120 (at the cap) |
+| Worst case, whole map, shadows + props OFF | 185 | 467k | 234 | 643 (26) | 120 |
+
+**Both budgets hold with room to spare: 63 against 300 at play zoom, 230
+against 800 in the worst case.** The shipped renderer is well inside the
+prototype's 277 / 739, because it merges and instances considerably more
+than the spike did. Live effect meshes are hard-capped at 120, so no amount
+of queued animation can run the draw-call count away — 1,200 animation
+records still cost 120 meshes.
+
+**The same budgets are asserted in the test suite** (`ui/test/harness.html`,
+five `budget:` tests; `run-browser.mjs` prints every figure on each run), so
+a change that un-merges or un-instances something fails rather than merely
+getting slower. Those run against the harness fixture, which is a different
+map from the live game; its figures:
+
+| Scene (fixture, 800×500 canvas) | Draw calls | Triangles | Scene children | DOM labels |
+|---|---|---|---|---|
+| Play zoom (d 14.6) | 87 | 231k | 117 | 9 |
+| Whole map (d 90) | 108 | 255k | 117 | 9 |
+| Worst case, play zoom | 169 | 418k | 243 | 710 |
+| Worst case, whole map | 232 | 445k | 243 | 710 |
+
+Each scene also bounds its **object count**, because object count — not
+triangles — was the constraint the performance plan was built around, and a
+draw-call ceiling alone is a loose guard at play zoom where frustum culling
+hides most of an unmerged map. Verified by mutation: dropping the chunk size
+from 4 to 1 (640 terrain meshes instead of 40) fails all four budget tests.
+
+**One builder action costs 14.1 ms.** `R3D.rebuildTile` reindexes all 640
+tiles and rebuilds all scenery, so N builder actions in a turn are N
+whole-map scenery rebuilds — but they arrive one per click, and 14 ms is not
+felt. Measured under software rendering, where this CPU-side JS geometry work
+is meaningful. Asserted with a 150 ms bound rather than optimised.
+
+### Frame rate is still not measured
+
+The measuring environment renders in software and runs the worst case at
+**6.3–6.7 fps**. That number describes SwiftShader, not the game, and is
+recorded here only so nobody mistakes its absence for an oversight. Frame
+rate on real hardware remains the owner's 60fps reading on the prototype,
+which did not include the gameplay layer.
+
+### What `fullRes` costs (Decision: it defaults ON)
+
+`fullRes` sets the renderer's pixel ratio to `min(devicePixelRatio, 2)`;
+off, it is 1. Measured at the same camera, same scene, in the real game:
+
+| | Pixel ratio | Backing store | Pixels shaded / frame | Draw calls | Triangles |
+|---|---|---|---|---|---|
+| **DPR 1**, fullRes OFF | 1 | 1140×628 | 715,920 | 123 | 429k |
+| **DPR 1**, fullRes ON | 1 | 1140×628 | 715,920 | 131 | 429k |
+| **DPR 2**, fullRes OFF | 1 | 1140×628 | 715,920 | 125 | 429k |
+| **DPR 2**, fullRes ON | 2 | 2280×1256 | 2,863,680 | 124 | 429k |
+
+Three facts follow, all measured:
+
+- **On a DPR-1 screen the flip costs exactly nothing.** Same pixel ratio,
+  same backing store, same work. (The draw-call spread of 123–131 is frame
+  noise from live animations, not an effect of the setting.)
+- **On a DPR-2 screen it is exactly 4× the fragment work of the main colour
+  pass,** and nothing else: identical draw calls, identical triangles,
+  identical geometry. It is pure fill cost.
+- **The shadow pass is unaffected.** `sun.shadow.mapSize` is a fixed
+  2048×2048 and does not scale with the pixel ratio.
+
+The cost scales as **devicePixelRatio², capped at 4×**, which follows from
+`setPixelRatio(min(devicePixelRatio, 2))`. The two endpoints above are
+measured; the rows between them are read off that line, not measured, and
+they matter because most Windows laptops sit there:
+
+| Display scaling | `devicePixelRatio` | Pixels vs `fullRes` OFF |
+|---|---|---|
+| 100% | 1.0 | 1× *(measured: no change at all)* |
+| 125% | 1.25 | 1.56× |
+| 150% | 1.5 | 2.25× |
+| 200% / Retina | ≥ 2 | 4× *(measured)* |
+
+The frame-rate consequence of that 4× is **not measured and cannot be
+measured here**. On a mid-range integrated GPU, ~2.9M pixels per frame at
+60fps is ~172 Mpix/s for the main pass, over a scene that layers several
+large transparent surfaces (the fog shell, the overlay layer, the water) and
+so pays that cost more than once per pixel. A drop below 60fps is plausible
+and has not been ruled out. The Quality menu reverts it in one click, and
+the choice is remembered.
+
 ## Risks
 
 - **This is a large change to a working file.** `ui/index.html` holds the

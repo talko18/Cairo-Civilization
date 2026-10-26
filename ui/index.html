@@ -554,11 +554,15 @@ button{cursor:pointer;font-family:inherit;border:none;border-radius:var(--rad);t
 <script>
 // If three.js or render3d.js failed to load, R3D is absent. A no-op stand-in keeps every
 // call site below safe; initMap3d() sees init() === false and shows the message instead.
+// The names below must be exactly the keys of window.R3D in render3d.js: the game-page suite
+// loads the page without the renderer and compares the two lists, so they cannot drift.
 if (typeof window.R3D === 'undefined') {
   const none = () => null;
-  window.R3D = { init: () => false, getCameraView: () => ({ x: 0, z: 0, span: 0 }), hexAtScreen: none };
+  window.R3D = { init: () => false, getCameraView: () => ({ x: 0, z: 0, span: 0 }), hexAtScreen: none,
+    fogAt: () => R3DCore.FOG.UNSEEN };
   for (const k of ['rebuildMap', 'rebuildTile', 'syncState', 'refreshFog', 'setSelection', 'setYieldTiles', 'setHover',
-    'playAnimation', 'panToHex', 'centerOn', 'setQuality', 'resize', 'requestRender', 'zoomBy', 'dispose']) window.R3D[k] = none;
+    'playAnimation', 'panToHex', 'centerOn', 'setQuality', 'resize', 'requestRender', 'zoomBy', 'dispose',
+    'registerFogHideable', 'applyFogToScenery']) window.R3D[k] = none;
 }
 // ═══════════════════════════════════════════════════════════════
 // STATE
@@ -1321,18 +1325,8 @@ function centerCamera(instant) {
   if (!u) return;
   if (instant) R3D.centerOn(u.q, u.r); else panToHex(u.q, u.r);
 }
-function hexDist(q1,r1,q2,r2) {
-  // offset hex distance
-  function toAxial(q,r) {
-    const aq = q;
-    const ar = r - Math.floor(q / 2);
-    return [aq, ar];
-  }
-  const [aq1,ar1] = toAxial(q1,r1);
-  const [aq2,ar2] = toAxial(q2,r2);
-  const dq = aq2-aq1, dr = ar2-ar1;
-  return Math.max(Math.abs(dq), Math.abs(dr), Math.abs(dq+dr));
-}
+// One implementation, in render3d-core.js; scenarios.js reads this global too.
+const hexDist = R3DCore.hexDist;
 
 // ═══════════════════════════════════════════════════════════════
 // MAP DRAWING
@@ -1485,31 +1479,10 @@ function getTile(q,r) {
   return tileIdx[q + ',' + r] || null;
 }
 
-// Offset-coordinate hex neighbors for flat-top grid with odd columns shifted down.
-// Indexed by visual edge (0-5): edge i connects vertex i to vertex (i+1)%6.
-// Each entry is the [dq, dr] offset of the neighbor across that edge.
-// Even columns (q%2===0):
-const EDGE_NEIGHBOR_EVEN = [
-  [+1, -1], // edge 0 (v0→v1): upper-right
-  [ 0, -1], // edge 1 (v1→v2): top
-  [-1, -1], // edge 2 (v2→v3): upper-left
-  [-1,  0], // edge 3 (v3→v4): lower-left
-  [ 0, +1], // edge 4 (v4→v5): bottom
-  [+1,  0], // edge 5 (v5→v0): lower-right
-];
-// Odd columns (q%2===1):
-const EDGE_NEIGHBOR_ODD = [
-  [+1,  0], // edge 0 (v0→v1): upper-right
-  [ 0, -1], // edge 1 (v1→v2): top
-  [-1,  0], // edge 2 (v2→v3): upper-left
-  [-1, +1], // edge 3 (v3→v4): lower-left
-  [ 0, +1], // edge 4 (v4→v5): bottom
-  [+1, +1], // edge 5 (v5→v0): lower-right
-];
-// Get all 6 neighbors of a hex (unordered, for general use)
+// All 6 neighbors of a hex (unordered, not bounds-checked). scenarios.js calls this global.
+// The neighbour table and its edge convention live in render3d-core.js (R3DCore.neighbor).
 function allNeighbors(q, r) {
-  const table = (q % 2 === 0) ? EDGE_NEIGHBOR_EVEN : EDGE_NEIGHBOR_ODD;
-  return table.map(off => [q + off[0], r + off[1]]);
+  return [0, 1, 2, 3, 4, 5].map(d => R3DCore.neighbor(q, r, d));
 }
 
 // Get all territory tiles for a city (hexes_in_range)
@@ -1594,7 +1567,11 @@ mapArea.addEventListener('pointerdown', e => { if (e.button === 0) mapArea.class
 window.addEventListener('pointerup', e => { if (e.button === 0) mapArea.classList.remove('dragging'); });
 window.addEventListener('pointercancel', () => mapArea.classList.remove('dragging'));
 
-function handleMapHover(hex, facts, pos) {
+// The renderer also passes fog-gated `facts` as the second argument; this page does not use
+// them. showTooltip builds its text from the page's own state (yields, owner, lock status,
+// myPlayer), so ITS fog gate (isTileExplored / isTileVisible) is the one that ships, and the
+// game-page test 'the tooltip names nothing on unexplored ground...' pins it.
+function handleMapHover(hex, _facts, pos) {
   const tt = document.getElementById('tile-tip');
   if (!hex || !pos) { hoveredHex = null; tt.style.display = 'none'; return; }
   if (!hoveredHex || hex.q !== hoveredHex.q || hex.r !== hoveredHex.r) {
@@ -2354,11 +2331,6 @@ function removeImprovement(builderId, q, r) {
   doAction({type:'RemoveImprovement', builderId, q, r});
 }
 
-// Legacy alias — kept for backward compatibility
-async function submitActions(actions) {
-  await submitBatch(actions, false);
-}
-
 // ═══════════════════════════════════════════════════════════════
 // RIGHT PANEL (Tech / Production)
 // ═══════════════════════════════════════════════════════════════
@@ -2887,7 +2859,7 @@ function updateVisibility() {
 
 // ── Graphics quality (shadows / decorative props / full-resolution canvas) ──
 const QUALITY_KEY = 'cairoCivQuality';
-const quality = { shadows: true, props: true, fullRes: false };
+const quality = { shadows: true, props: true, fullRes: true };   // defaults apply only to keys with nothing stored
 try {
   const saved = JSON.parse(localStorage.getItem(QUALITY_KEY) || '{}');
   for (const k of Object.keys(quality)) if (typeof saved[k] === 'boolean') quality[k] = saved[k];

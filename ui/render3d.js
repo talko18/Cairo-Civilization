@@ -1036,7 +1036,7 @@
       labelRoot: opts.labels || document.getElementById('labels') || null, amenityOf: opts.amenityOf || null,
       labels: new Map(), yieldTiles: [], vw: 0, vh: 0,
       fog: null, layers: {}, marks: null, pieces: null, unfiltered: false, selection: null, hover: null,
-      quality: { shadows: true, props: true, fullRes: false },
+      quality: { shadows: true, props: true, fullRes: true },
       tileIdx: new Map(), cityTiles: new Set(), chunks: [], chunksX: Math.ceil(cols / CHUNK), chunksY: Math.ceil(rows / CHUNK),
       scenery: [], fogHideable: [], sceneryMats: new Map(), sceneryGeo: makeSceneryGeo(), sceneryHide: null,
       water: null, river: null, riverOwners: new Map(), lastAmbient: 0,
@@ -2651,27 +2651,39 @@
       return y;
     },
     terrainSkirtFloor: () => SKIRT_EDGE_Y,
-    // Every drawable above the terrain band (renderOrder > 0) must be
-    // transparent and must not write depth. renderOrder only sorts
+    // Every drawable in the scene must be transparent and must not write
+    // depth, EXCEPT the three named kinds below. renderOrder only sorts
     // transparent objects against each other: an OPAQUE overlay draws in the
     // opaque pass, writes depth, and — since the shell floats a mere 0.045
     // over the ground — passes the depth test and shows straight through the
-    // fog, whatever its renderOrder says. That was leak 3.
+    // fog, whatever its renderOrder says. That was leak 3. A TRANSPARENT layer
+    // that writes depth does the same to anything drawn after it: the water
+    // plane (renderOrder 0, drawn before the shell) did exactly that, leak 11.
+    // So this predicate deliberately does NOT skip by renderOrder: a band
+    // exclusion is how leak 11 went unseen. The exceptions are identities:
+    //   1. terrain chunks  (S.chunks[].mesh)  - the ground the fog covers;
+    //   2. instanced scenery (S.scenery[])    - opaque, culled per instance by
+    //      applyFogToScenery (pinned by the scenery instance-count tests);
+    //   3. unit meshes (S.pieces.meshes)      - opaque, culled outright off
+    //      VISIBLE ground (pinned by the unit instance-count tests).
     depthWritingLayersAboveTerrain: () => {
       if (!S) return -1;
+      const exempt = new Set();
+      for (const ch of S.chunks) if (ch) exempt.add(ch.mesh);
+      for (const m of S.scenery) exempt.add(m);
       let n = 0;
       S.scene.traverse((x) => {
-        if (!(x.isMesh || x.isLine || x.isPoints || x.isSprite) || x.renderOrder <= 0) return;
-        // Either the layer is see-through and writes no depth (fog covers it),
-        // or it is culled by fog outright (units: proven by instance counts).
-        // A flag alone proves nothing: it must be a real unit mesh, owned by
-        // the unit cull (type set, registered in S.pieces.meshes).
+        if (!(x.isMesh || x.isLine || x.isPoints || x.isSprite)) return;
+        if (exempt.has(x)) return;
+        // A flag alone proves nothing: a unit mesh must be owned by the unit
+        // cull (type set, registered in S.pieces.meshes).
         if (x.userData && x.userData.fogCulled === true && x.userData.type !== undefined && S.pieces
             && [...S.pieces.meshes.values()].some((e) => e.mesh === x)) return;
         for (const m of [].concat(x.material)) if (m && (m.depthWrite !== false || m.transparent !== true)) n++;
       });
       return n;
     },
+    waterMaterial: () => (S && S.water ? S.water.mat : null),
     // Test-only camera placement: aim at a tile, orbit to (dist, polar, az).
     lookAt: (q, r, dist, polar, az, ty) => {
       if (!S) return;
@@ -2682,6 +2694,7 @@
       S.controls.update();
       requestRender();
     },
+    waterVisible: () => !!(S && S.water && S.water.mesh.visible),
     setWaterVisible: (b) => { if (S && S.water) { S.water.mesh.visible = !!b; requestRender(); } },
     setTerrainVisible: (b) => {
       if (!S) return;
