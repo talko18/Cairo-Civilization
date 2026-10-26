@@ -527,7 +527,7 @@
   // draw order alone decides, and the remembered fog must be drawn over them.
   const RENDER_ORDER = { terrain: 0, grid: 1, territory: 1, borders: 1,
     cities: 1.2, unitDiscs: 1.25, unitRings: 1.3, units: 1.4, fogRemembered: 2,
-    overlays: 3, rings: 4, labels: 5, fogUnseen: 6 };
+    overlays: 3, rings: 4, fx: 4.5, labels: 5, fogUnseen: 6 };
 
   // The surface the player actually sees, which is not always the terrain
   // mesh: on water tiles the mesh is the seabed, well below the water plane,
@@ -1021,7 +1021,7 @@
       onTileClick: opts.onTileClick || null,
       onTileHover: opts.onTileHover || null,
       keys: new Set(), wasd: opts.wasd === true, keyT: 0, drag: null, hoverHex: null, input: null,
-      needsRender: true, frames: 0, raf: 0, fly: null, anims: [], hoverTile: null,
+      needsRender: true, frames: 0, raf: 0, fly: null, anims: [], hoverTile: null, fx: null, fxCount: 0, flashNext: 0, fxT: null,
       labelRoot: opts.labels || document.getElementById('labels') || null, amenityOf: opts.amenityOf || null,
       labels: new Map(), yieldTiles: [], vw: 0, vh: 0,
       fog: null, layers: {}, marks: null, pieces: null, unfiltered: false, selection: null, hover: null,
@@ -1058,10 +1058,15 @@
       live = true;
     }
     if (S.anims.length) {
-      // One misbehaving animation must never stop the renderer: drop it and log.
+      // One misbehaving animation must never stop the renderer: drop it and
+      // log. A dropped animation is also disposed, so its meshes, DOM text
+      // and any unit it displaced are put back; nothing is left behind.
       S.anims = S.anims.filter((a) => {
-        try { return typeof a.tick === 'function' ? a.tick(now) !== false : false; }
-        catch (err) { console.error('R3D animation threw and was dropped:', err); return false; }
+        let keep = false;
+        try { keep = typeof a.tick === 'function' ? a.tick(S.fxT !== null ? S.fxT : performance.now()) !== false : false; }
+        catch (err) { console.error('R3D animation threw and was dropped:', err); }
+        if (!keep) dropAnim(a);
+        return keep;
       });
       live = true;
     }
@@ -1312,6 +1317,9 @@
     disposeFog();
     disposeMarks();
     disposePieces();
+    for (const a of S.anims) dropAnim(a);
+    S.anims = [];
+    disposeFxKit();
     clearLabels();
     for (const g of Object.values(S.sceneryGeo)) g.dispose();
     S.terrainMat.dispose();
@@ -2037,7 +2045,291 @@
   function syncState() { if (S) indexState(S.getState()); refreshFog(); updateMarks(); updatePieces(); requestRender(); }
   function setSelection(sel) { if (S) { S.selection = sel || null; updateMarks(); updateLabels(); } }
   function setHover(q, r) { if (S) { S.hover = Number.isInteger(q) && Number.isInteger(r) ? { q, r } : null; updateMarks(); } }
-  function playAnimation(anim) { if (S && anim) { S.anims.push(anim); requestRender(); } }
+
+  // ---- Animations ----
+  // Every animation takes HEX coordinates and is converted here; nothing is
+  // captured in pixels. One list (S.anims) is driven by the render loop. Each
+  // record owns whatever it adds (scene meshes, a DOM element, a nudge on a
+  // unit instance) and removes it in dispose(), which runs on completion AND
+  // when a tick throws, so a dropped animation leaves nothing behind.
+  //
+  // Meshes are effects above the ground, so by the fog invariant they are all
+  // transparent with no depth write and a renderOrder below fogUnseen: the
+  // unexplored shell draws over them. Geometry and materials are shared by
+  // every particle; fading steps through a few pre-built opacity levels.
+  const FX_DEFAULT_MS = { unitWalk: 350, dustParticle: 500, meleeCharge: 600, clashSparks: 500, unitShake: 400,
+    floatingText: 1000, screenFlash: 260, archerFire: 300, projectile: 500, rangedImpact: 400, cityFound: 600 };
+  const FX_MAX_OBJECTS = 120;          // hard cap on live effect meshes (each is a draw call)
+  const FLASH_PEAK = 0.22;             // modest: a flash is a cue, not a strobe
+  const FLASH_COOLDOWN_MS = 800;
+  const FX_FADE = [0.9, 0.62, 0.36, 0.14];
+  let _fxDummy = null;
+
+  function fxKit() {
+    if (S.fx) return S.fx;
+    const G = THREE;
+    const fade = (color, depthTest) => FX_FADE.map((o) => new G.MeshBasicMaterial({ color, transparent: true, opacity: o, depthWrite: false, depthTest, side: G.DoubleSide }));
+    const ring = new G.RingGeometry(0.72, 1, 28); ring.rotateX(-Math.PI / 2);
+    const arrow = new G.ConeGeometry(0.018, 0.34, 5); arrow.rotateX(Math.PI / 2);   // tip along +z
+    S.fx = {
+      geo: { puff: new G.IcosahedronGeometry(0.05, 0), spark: new G.TetrahedronGeometry(0.03, 0), ring, arrow },
+      mats: { dust: fade('#c9b690', true), spark: fade('#ffd45a', true), ringHit: fade('#ff9a3c', false), ringFound: fade('#ffd54f', false),
+        arrow: [new G.MeshBasicMaterial({ color: '#8a6238', transparent: true, opacity: 1, depthWrite: false })] },
+    };
+    return S.fx;
+  }
+  function disposeFxKit() {
+    if (!S || !S.fx) return;
+    for (const g of Object.values(S.fx.geo)) g.dispose();
+    for (const set of Object.values(S.fx.mats)) for (const m of set) m.dispose();
+    S.fx = null;
+  }
+  const fadeMat = (set, k) => set[Math.max(0, Math.min(set.length - 1, Math.floor(k * set.length)))];
+
+  function fxMesh(A, geo, mat, x, y, z) {
+    if (S.fxCount >= FX_MAX_OBJECTS) return null;
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set(x, y, z); m.renderOrder = RENDER_ORDER.fx; m.raycast = () => {};
+    S.scene.add(m); A.objs.push(m); S.fxCount++;
+    return m;
+  }
+  function dropAnim(a) {
+    if (typeof a.dispose !== 'function') return;
+    try { a.dispose(); } catch (err) { console.error('R3D animation cleanup threw:', err); }
+  }
+
+  const hexPt = (q, r) => {
+    const c = C.hexCenter(q, r), t = tileAt(q, r);
+    return { x: c.x, z: c.z, y: t ? surfaceY(tileCopy(t), c.x, c.z, 0) : 0.25 };
+  };
+  const hexSeen = (q, r) => Number.isInteger(q) && Number.isInteger(r) && !!tileAt(q, r) && fogStateAt(q, r) === C.FOG.VISIBLE;
+
+  // Units are instances: offset one instance matrix, never the state. The
+  // base position is the one updatePieces recorded, so a nudge of (0,0,0) is
+  // an exact restore, and a rebuild by updatePieces resets it anyway.
+  function pieceKeyAt(q, r, p, id) {
+    if (!S.pieces) return null;
+    if (p !== undefined && id !== undefined && S.pieces.placed.has(p + ':' + id)) return p + ':' + id;
+    for (const [k, pl] of S.pieces.placed) if (pl.q === q && pl.r === r) return k;
+    return null;
+  }
+  function nudgePiece(key, dx, dy, dz) {
+    const pl = key && S.pieces && S.pieces.placed.get(key);
+    if (!pl) return;
+    const d = _fxDummy || (_fxDummy = new THREE.Object3D());
+    d.position.set(pl.x + dx, pl.y + dy, pl.z + dz); d.rotation.set(0, unitYaw(pl.p, pl.u.id), 0); d.scale.setScalar(UNIT_SCALE);
+    d.updateMatrix(); pl.mesh.setMatrixAt(pl.index, d.matrix); pl.mesh.instanceMatrix.needsUpdate = true;
+  }
+
+  // A cloud of small meshes with ballistic motion, shrinking as it fades.
+  function burst(A, origin, n, set, speed, rise, gravity, geo) {
+    const parts = [];
+    for (let i = 0; i < n; i++) {
+      const m = fxMesh(A, geo, set[0], origin.x, origin.y, origin.z);
+      if (!m) break;
+      const ang = Math.random() * Math.PI * 2, sp = speed * (0.5 + Math.random() * 0.7);
+      parts.push({ m, vx: Math.cos(ang) * sp, vz: Math.sin(ang) * sp, vy: rise * (0.6 + Math.random() * 0.8) });
+    }
+    return (k, sec) => {
+      for (const p of parts) {
+        p.m.position.set(origin.x + p.vx * sec, origin.y + p.vy * sec - gravity * sec * sec, origin.z + p.vz * sec);
+        p.m.scale.setScalar(Math.max(0.05, 1 - k * 0.75)); p.m.material = fadeMat(set, k);
+      }
+    };
+  }
+
+  const sanitizeColor = (c) => (typeof c === 'string' && /^(#[0-9a-f]{3,8}|[a-z]{3,20})$/i.test(c) ? c : '#ffffff');
+  const FLASH_RGB = /^\d{1,3},\d{1,3},\d{1,3}$/;
+
+  // Each builder fills in init (first active tick), update(k, sec) and
+  // cleanup; returning false rejects the animation.
+  const FX = {
+    unitWalk(a, A) {
+      const from = hexPt(a.q, a.r), to = hexPt(a.toQ, a.toR); let key = null;
+      A.update = (k) => {
+        key = key || pieceKeyAt(a.toQ, a.toR, a.player, a.unitId);
+        const e = k * k * (3 - 2 * k), rest = 1 - e;
+        nudgePiece(key, (from.x - to.x) * rest, (from.y - to.y) * rest + Math.abs(Math.sin(k * Math.PI * 3)) * 0.035 * rest, (from.z - to.z) * rest);
+      };
+      A.cleanup = () => nudgePiece(key, 0, 0, 0);
+    },
+    dustParticle(a, A) {
+      const o = hexPt(a.q, a.r); let m = null;
+      A.init = () => { const kit = fxKit(); m = fxMesh(A, kit.geo.puff, kit.mats.dust[0], o.x + (Math.random() - 0.5) * 0.18, o.y + 0.06, o.z + (Math.random() - 0.5) * 0.18); };
+      A.update = (k) => { if (!m) return; m.position.y = o.y + 0.06 + k * 0.22; m.scale.setScalar(1 + k * 1.4); m.material = fadeMat(S.fx.mats.dust, k); };
+    },
+    meleeCharge(a, A) {
+      if (reducedMotion) return false;
+      const from = hexPt(a.q, a.r), to = hexPt(a.toQ, a.toR); let key = null;
+      const ease = (t) => 1 - Math.pow(1 - t, 3);
+      A.update = (k) => {
+        key = key || pieceKeyAt(a.q, a.r, a.player, a.unitId);
+        // charge, hold at the clash, recoil
+        const amp = k < 0.35 ? ease(k / 0.35) : k < 0.5 ? 1 : 1 - ease((k - 0.5) / 0.5);
+        nudgePiece(key, (to.x - from.x) * 0.6 * amp, 0, (to.z - from.z) * 0.6 * amp);
+      };
+      A.cleanup = () => nudgePiece(key, 0, 0, 0);
+    },
+    clashSparks(a, A) {
+      const f = hexPt(a.q, a.r), t = Number.isInteger(a.toQ) && Number.isInteger(a.toR) ? hexPt(a.toQ, a.toR) : f; let step = null;
+      A.init = () => { const kit = fxKit(); step = burst(A, { x: (f.x + t.x) / 2, y: (f.y + t.y) / 2 + 0.3, z: (f.z + t.z) / 2 }, 8, kit.mats.spark, 0.7, 0.9, 3.5, kit.geo.spark); };
+      A.update = (k, sec) => { if (step) step(k, sec); };
+    },
+    unitShake(a, A) {
+      if (reducedMotion) return false;
+      let key = null;
+      A.update = (k) => { key = key || pieceKeyAt(a.q, a.r, a.player, a.unitId); nudgePiece(key, Math.sin(k * 40) * 0.05 * (1 - k), 0, 0); };
+      A.cleanup = () => nudgePiece(key, 0, 0, 0);
+    },
+    archerFire(a, A) {
+      const from = hexPt(a.q, a.r), to = hexPt(a.toQ, a.toR); let key = null;
+      const dx = from.x - to.x, dz = from.z - to.z, len = Math.hypot(dx, dz) || 1;
+      A.update = (k) => { key = key || pieceKeyAt(a.q, a.r, a.player, a.unitId); const s = Math.sin(Math.PI * k) * 0.06; nudgePiece(key, dx / len * s, 0, dz / len * s); };
+      A.cleanup = () => nudgePiece(key, 0, 0, 0);
+    },
+    projectile(a, A) {
+      const n = Math.max(1, Math.min(6, a.count | 0 || 1)), STAG = 80;
+      const from = hexPt(a.q, a.r), to = hexPt(a.toQ, a.toR), arrows = [];
+      A.dur += STAG * (n - 1);
+      const dist = Math.hypot(to.x - from.x, to.z - from.z), h = 0.35 + dist * 0.12, p = new THREE.Vector3(), nx = new THREE.Vector3();
+      A.init = () => {
+        const kit = fxKit();
+        for (let i = 0; i < n; i++) {
+          const jx = n > 1 ? (Math.random() - 0.5) * 0.24 : 0, jz = n > 1 ? (Math.random() - 0.5) * 0.24 : 0;
+          const m = fxMesh(A, kit.geo.arrow, kit.mats.arrow[0], from.x, from.y + 0.3, from.z);
+          if (m) { m.visible = false; arrows.push({ m, i, ex: to.x + jx, ez: to.z + jz }); }
+        }
+      };
+      const at = (ar, t, out) => {
+        out.set(from.x + (ar.ex - from.x) * t, from.y + 0.3 + (to.y + 0.05 - from.y - 0.3) * t + Math.sin(Math.PI * t) * h, from.z + (ar.ez - from.z) * t);
+      };
+      A.update = (k) => {
+        const ms = k * A.dur;
+        for (const ar of arrows) {
+          const t = (ms - ar.i * STAG) / (A.dur - STAG * (n - 1));
+          ar.m.visible = t > 0 && t < 1;
+          if (!ar.m.visible) continue;
+          at(ar, t, p); ar.m.position.copy(p); at(ar, Math.min(1, t + 0.03), nx); ar.m.lookAt(nx);
+        }
+      };
+    },
+    rangedImpact(a, A) {
+      const o = hexPt(a.q, a.r); let ring = null, step = null;
+      A.init = () => {
+        const kit = fxKit();
+        ring = fxMesh(A, kit.geo.ring, kit.mats.ringHit[0], o.x, o.y + 0.08, o.z);
+        step = burst(A, { x: o.x, y: o.y + 0.1, z: o.z }, 4, kit.mats.dust, 0.25, 0.4, 0.6, kit.geo.puff);
+      };
+      A.update = (k, sec) => { if (ring) { ring.scale.setScalar(0.1 + k * 0.4); ring.material = fadeMat(S.fx.mats.ringHit, k); } if (step) step(k, sec); };
+    },
+    cityFound(a, A) {
+      const o = hexPt(a.q, a.r); let ring = null, step = null;
+      A.init = () => {
+        const kit = fxKit();
+        ring = fxMesh(A, kit.geo.ring, kit.mats.ringFound[0], o.x, o.y + 0.08, o.z);
+        step = burst(A, { x: o.x, y: o.y + 0.1, z: o.z }, 10, kit.mats.spark, 0.3, 0.8, -0.4, kit.geo.spark);
+      };
+      A.update = (k, sec) => { if (ring) { ring.scale.setScalar(0.2 + k * 0.9); ring.material = fadeMat(S.fx.mats.ringFound, k); } if (step) step(k, sec); };
+    },
+    floatingText(a, A) {
+      if (!S.labelRoot || typeof a.text !== 'string') return false;
+      const o = hexPt(a.q, a.r), text = a.text.slice(0, 40), color = sanitizeColor(a.color); let el = null;
+      A.init = () => {
+        // Created HIDDEN. It is revealed only once it has a real screen
+        // position, so a fight off-screen never leaves text piled at 0,0.
+        el = document.createElement('div'); el.className = 'fx-float'; el.textContent = text;
+        Object.assign(el.style, { position: 'absolute', left: '0', top: '0', pointerEvents: 'none', whiteSpace: 'nowrap', visibility: 'hidden',
+          font: '700 14px sans-serif', color, textShadow: '0 1px 2px #000, 0 0 3px #000' });
+        S.labelRoot.appendChild(el);
+      };
+      A.update = (k) => {
+        if (!el) return;
+        let on = false, tx = 0, ty = 0;
+        if (S.vw && fogStateAt(a.q, a.r) === C.FOG.VISIBLE) {     // text over unexplored ground would leak what happened there
+          S.camera.updateMatrixWorld();
+          _lv.set(o.x, o.y + 0.9 + k * 0.7, o.z).project(S.camera);
+          tx = (_lv.x * 0.5 + 0.5) * S.vw; ty = (-_lv.y * 0.5 + 0.5) * S.vh;
+          on = _lv.z > -1 && _lv.z < 1 && tx > -60 && tx < S.vw + 60 && ty > -30 && ty < S.vh + 30;
+        }
+        if (on) {
+          el.style.transform = 'translate(' + tx.toFixed(1) + 'px,' + ty.toFixed(1) + 'px) translate(-50%,-100%)';
+          el.style.opacity = String(k < 0.25 ? 1 : 1 - (k - 0.25) / 0.75);
+          el.style.visibility = 'visible';
+        } else { el.style.visibility = 'hidden'; el.style.transform = ''; }
+      };
+      A.cleanup = () => { if (el && el.parentNode) el.parentNode.removeChild(el); el = null; };
+    },
+    screenFlash(a, A) {
+      // One at a time, a cooldown between flashes, a low peak, and none at all
+      // under reduced motion: overlapping flashes read as a strobe. The
+      // one-alive check is NOT redundant with the cooldown: a stalled loop can
+      // let any wall-clock cooldown lapse before a queued flash has started.
+      const now = performance.now();
+      if (reducedMotion || now < S.flashNext || S.anims.some((x) => x.type === 'screenFlash')) return false;
+      const rgb = FLASH_RGB.test(a.color) ? a.color : '231,76,60'; let el = null;
+      A.init = () => {
+        const rc = S.canvas.getBoundingClientRect();
+        el = document.createElement('div'); el.className = 'fx-flash';
+        Object.assign(el.style, { position: 'fixed', left: rc.left + 'px', top: rc.top + 'px', width: rc.width + 'px', height: rc.height + 'px',
+          pointerEvents: 'none', zIndex: '40', background: 'rgb(' + rgb + ')', opacity: '0' });
+        document.body.appendChild(el);
+      };
+      A.update = (k) => { if (reducedMotion) { A.stop = true; return; } if (el) el.style.opacity = String(FLASH_PEAK * (k < 0.35 ? k / 0.35 : (1 - k) / 0.65)); };
+      // The cooldown runs from the flash's real end (or drop), so a stalled
+      // loop cannot let it expire before the flash has even started.
+      A.cleanup = () => { S.flashNext = performance.now() + FLASH_COOLDOWN_MS; if (el && el.parentNode) el.parentNode.removeChild(el); el = null; };
+    },
+  };
+  const FX_NEEDS_PAIR = new Set(['unitWalk', 'meleeCharge', 'archerFire', 'projectile']);
+
+  // Returns true when an animation was accepted. Ignored without effect when
+  // it is malformed, off the map, or nowhere near ground the player can see.
+  function playAnimation(anim) {
+    if (!S || !anim || typeof anim !== 'object') return false;
+    const build = typeof anim.type === 'string' && Object.hasOwn(FX, anim.type) ? FX[anim.type] : null;
+    if (!build) {
+      // a bare {tick, dispose?} record: the loop's own contract
+      if (typeof anim.tick === 'function') { S.anims.push(anim); requestRender(); return true; }
+      return false;
+    }
+    let gate = null;
+    if (anim.type !== 'screenFlash') {
+      if (!Number.isInteger(anim.q) || !Number.isInteger(anim.r) || !tileAt(anim.q, anim.r)) return false;
+      const pair = Number.isInteger(anim.toQ) && Number.isInteger(anim.toR) && !!tileAt(anim.toQ, anim.toR);
+      if (FX_NEEDS_PAIR.has(anim.type) && !pair) return false;
+      // Both ends must be in sight: an arrow leaving unexplored ground would
+      // say a unit stands there. Re-checked every tick, ground can go dark.
+      gate = [[anim.q, anim.r]];
+      if (pair && (FX_NEEDS_PAIR.has(anim.type) || anim.type === 'clashSparks')) gate.push([anim.toQ, anim.toR]);
+      if (!gate.every(([a, b]) => hexSeen(a, b))) return false;
+    }
+    const delay = Number.isFinite(anim.delay) ? Math.max(0, Math.min(5000, anim.delay)) : 0;
+    const dur = Number.isFinite(anim.duration) && anim.duration > 0 ? Math.min(5000, anim.duration) : FX_DEFAULT_MS[anim.type];
+    const A = { type: anim.type, t0: null, delay, dur, objs: [], started: false, init: null, update: null, cleanup: null };
+    A.tick = (now) => {
+      // Anchored on the first tick. Animations run on performance.now(), not
+      // the rAF timestamp: that one can lag and then jump a whole burst ahead.
+      if (A.t0 === null) A.t0 = now + A.delay;
+      if (now < A.t0) return true;
+      if (!A.started) { A.started = true; if (A.init) A.init(); }
+      const k = Math.min(1, (now - A.t0) / A.dur);
+      if (gate && A.type !== 'floatingText') {
+        const ok = gate.every(([a, b]) => hexSeen(a, b));
+        for (const m of A.objs) m.visible = ok;
+        if (!ok) return k < 1;
+      }
+      if (A.update) A.update(k, (k * A.dur) / 1000);
+      return !A.stop && k < 1;
+    };
+    A.dispose = () => {
+      for (const m of A.objs) S.scene.remove(m);
+      S.fxCount = Math.max(0, S.fxCount - A.objs.length); A.objs = [];
+      if (A.cleanup) A.cleanup();
+    };
+    if (build(anim, A) === false) return false;
+    S.anims.push(A); requestRender();
+    return true;
+  }
 
   // fogAt is the renderer's own gate on top of the game's lookup: every layer
   // that could reveal game state filters through it, as well as sitting under
@@ -2091,6 +2383,24 @@
     },
     setReducedMotion: (b) => { reducedMotion = !!b; },
     animCount: () => (S ? S.anims.length : 0),
+    liveAnimations: () => (S ? S.anims.length : 0),
+    anims: () => (S ? S.anims : []),
+    liveFlashes: () => (S ? S.anims.filter((a) => a.type === 'screenFlash').length : 0),
+    flashPeak: () => FLASH_PEAK,
+    clearFlash: () => { if (S) { S.anims.filter((a) => a.type === 'screenFlash').forEach(dropAnim); S.anims = S.anims.filter((a) => a.type !== 'screenFlash'); S.flashNext = 0; } },
+    // Floating texts shown without a screen position (the 0,0 pile-up bug).
+    strayLabels: () => (S && S.labelRoot ? [...S.labelRoot.querySelectorAll('.fx-float')].filter((e) => e.style.visibility !== 'hidden' && !e.style.transform).length : 0),
+    fxMeshes: () => { const out = []; if (S) S.scene.traverse((x) => { if (x.isMesh && x.renderOrder === RENDER_ORDER.fx) out.push(x); }); return out; },
+    fxLimit: () => FX_MAX_OBJECTS,
+    fxMaterials: () => (S && S.fx ? new Set([].concat(...Object.values(S.fx.mats))) : new Set()),
+    // How far a unit's instance sits from the spot updatePieces gave it.
+    pieceOffset: (p, id) => {
+      const pl = S && S.pieces && S.pieces.placed.get(p + ':' + id);
+      if (!pl) return null;
+      const m = new THREE.Matrix4(); pl.mesh.getMatrixAt(pl.index, m);
+      const v = new THREE.Vector3().setFromMatrixPosition(m);
+      return { dx: v.x - pl.x, dy: v.y - pl.y, dz: v.z - pl.z };
+    },
     controls: () => (S ? S.controls : null),
     chunkCount: () => (S ? S.chunks.filter(Boolean).length : 0),
     visibleChunks: visibleChunkCount,
@@ -2248,6 +2558,8 @@
     },
     // One pass of the render loop with a caller-supplied clock.
     step: (now) => (S ? step(now) : false),
+    // Same, with the animation clock pinned to t as well.
+    stepFx: (t) => { if (!S) return false; S.fxT = t; try { return step(t); } finally { S.fxT = null; S.lastAmbient = 0; } },
     resetAmbientClock: () => { if (S) S.lastAmbient = 0; },
 
     // ---- fog readers (the real built buffers, not bookkeeping) ----

@@ -1917,6 +1917,332 @@ TESTS.push({name: 'pointer input: click, drag threshold, hover facts, outside th
   }
 }});
 
+// ── Task 13: animations ──
+const ANIM_TYPES = ['unitWalk', 'dustParticle', 'meleeCharge', 'clashSparks', 'unitShake', 'floatingText', 'screenFlash', 'archerFire', 'projectile', 'rangedImpact', 'cityFound'];
+const MESH_ANIMS = ['dustParticle', 'clashSparks', 'rangedImpact', 'cityFound', 'projectile'];
+const animSpec = (type, extra) => Object.assign({type, q: 8, r: 8, toQ: 9, toR: 8, text: '-5', color: '#ff4444'}, extra);
+const lastAnim = () => { const a = __r3d.anims(); return a[a.length - 1]; };
+// Animations anchor to the first tick's clock, so the tests drive a fake one.
+const FC = 1e6;
+const stepAt = (A, frac) => { if (A.t0 === null) __r3d.stepFx(FC); return __r3d.stepFx(A.t0 + A.dur * frac); };
+const drain = () => {
+  __r3d.stepFx(FC);
+  const far = Math.max(FC, ...__r3d.anims().map((a) => a.t0 + a.dur)) + 1;
+  __r3d.stepFx(far); __r3d.stepFx(far + 1); __r3d.resetAmbientClock();
+};
+// The first frame that draws each effect material compiles its shader, which
+// can stall a software renderer for seconds and wreck every wall-clock
+// assertion below. Draw one of everything up front, off the clock.
+let fxWarm = false;
+const fxReset = () => {
+  if (!fxWarm) { fxWarm = true; fogOff(); R3D.syncState(); for (const t of ANIM_TYPES) R3D.playAnimation(animSpec(t)); for (const A of __r3d.anims()) stepAt(A, 0.5); drain(); __r3d.clearFlash(); }
+  drain(); __r3d.clearFlash(); fogOff(); R3D.syncState(); __r3d.lookAt(8, 8, 14, 1.0, 0.4); };
+const WSPEC = {q: 4, r: 5, toQ: 5, toR: 5, player: 0, unitId: 2};   // the warrior stands on (5,5)
+const hexXZ = (q, r) => R3DCore.hexCenter(q, r);
+
+TESTS.push({name: 'all eleven animation types play', fn: async () => {
+  fxReset(); const base = __r3d.sceneCount();
+  for (const type of ANIM_TYPES) assert(R3D.playAnimation(animSpec(type)) === true, type + ' was not accepted');
+  await wait(50);
+  assert(__r3d.liveAnimations() >= ANIM_TYPES.length, 'live ' + __r3d.liveAnimations());
+  drain();
+  assert(__r3d.liveAnimations() === 0, 'an animation never completed: ' + __r3d.liveAnimations());
+  assert(__r3d.sceneCount() === base, 'leaked scene objects: ' + (__r3d.sceneCount() - base));
+}});
+TESTS.push({name: 'every mesh effect puts objects in the scene mid-run and removes all of them at the end', fn: () => {
+  fxReset();
+  for (const type of MESH_ANIMS) {
+    const base = __r3d.sceneCount();
+    R3D.playAnimation(animSpec(type)); const A = lastAnim(); stepAt(A, 0.5);
+    assert(__r3d.sceneCount() > base, type + ' added nothing to the scene');
+    drain();
+    assert(__r3d.sceneCount() === base, type + ' left ' + (__r3d.sceneCount() - base) + ' objects in the scene');
+    assert(__r3d.fxMeshes().length === 0, type + ' left an effect mesh');
+  }
+}});
+TESTS.push({name: 'a throwing animation disposes its own objects, text and unit offset', fn: () => {
+  fxReset(); const origErr = console.error; console.error = () => {};
+  try {
+    const specs = MESH_ANIMS.map((t) => animSpec(t)).concat([animSpec('floatingText', {q: 5, r: 5}), animSpec('screenFlash'),
+      Object.assign({type: 'unitWalk'}, WSPEC), Object.assign({type: 'meleeCharge', q: 5, r: 5, toQ: 6, toR: 5, player: 0, unitId: 2}),
+      {type: 'unitShake', q: 5, r: 5, player: 0, unitId: 2}]);
+    for (const spec of specs) {
+      const base = __r3d.sceneCount(), domBase = document.querySelectorAll('.fx-float,.fx-flash').length;
+      assert(R3D.playAnimation(spec), spec.type + ' not accepted');
+      const A = lastAnim(), real = A.tick;
+      A.tick = (n) => { real(n); throw new Error('boom'); };
+      stepAt(A, 0.4);
+      assert(__r3d.liveAnimations() === 0, spec.type + ' still registered');
+      assert(__r3d.sceneCount() === base, spec.type + ' leaked ' + (__r3d.sceneCount() - base) + ' scene objects when dropped');
+      assert(document.querySelectorAll('.fx-float,.fx-flash').length === domBase, spec.type + ' leaked a DOM element when dropped');
+      const off = __r3d.pieceOffset(0, 2);
+      assert(Math.abs(off.dx) < 1e-6 && Math.abs(off.dz) < 1e-6, spec.type + ' left the unit displaced: ' + JSON.stringify(off));
+    }
+  } finally { console.error = origErr; }
+}});
+TESTS.push({name: 'a walk slides the unit in from where it started and lands it exactly', fn: () => {
+  fxReset();
+  R3D.playAnimation(Object.assign({type: 'unitWalk'}, WSPEC)); const A = lastAnim();
+  stepAt(A, 0.1);
+  assert(__r3d.pieceOffset(0, 2).dx < -0.5, 'unit not drawn back at its origin: ' + JSON.stringify(__r3d.pieceOffset(0, 2)));
+  stepAt(A, 0.6); const mid = __r3d.pieceOffset(0, 2).dx;
+  assert(mid > -1.5 && mid < -0.01, 'unit not part-way: ' + mid);
+  drain(); const off = __r3d.pieceOffset(0, 2);
+  assert(Math.abs(off.dx) < 1e-6 && Math.abs(off.dy) < 1e-6 && Math.abs(off.dz) < 1e-6, 'unit left displaced: ' + JSON.stringify(off));
+}});
+TESTS.push({name: 'melee charge goes toward its target, shake and recoil move and restore the unit', fn: () => {
+  fxReset();
+  for (const [toQ, sign] of [[6, 1], [4, -1]]) {
+    R3D.playAnimation({type: 'meleeCharge', q: 5, r: 5, toQ, toR: 5, player: 0, unitId: 2}); const A = lastAnim();
+    stepAt(A, 0.4);
+    assert(__r3d.pieceOffset(0, 2).dx * sign > 0.3, 'charge ignored its target at q' + toQ + ': ' + __r3d.pieceOffset(0, 2).dx);
+    drain(); assert(Math.abs(__r3d.pieceOffset(0, 2).dx) < 1e-6, 'unit left displaced after the charge');
+  }
+  R3D.playAnimation({type: 'unitShake', q: 5, r: 5, player: 0, unitId: 2}); const S1 = lastAnim();
+  stepAt(S1, 0.1); assert(Math.abs(__r3d.pieceOffset(0, 2).dx) > 0.01, 'shake did not move the unit');
+  drain(); assert(Math.abs(__r3d.pieceOffset(0, 2).dx) < 1e-6, 'unit left displaced after the shake');
+  R3D.playAnimation({type: 'archerFire', q: 5, r: 5, toQ: 6, toR: 5, player: 0, unitId: 2}); const A2 = lastAnim();
+  stepAt(A2, 0.5); assert(__r3d.pieceOffset(0, 2).dx < -0.02, 'archer did not recoil away from the target');
+  drain(); assert(Math.abs(__r3d.pieceOffset(0, 2).dx) < 1e-6, 'unit left displaced after the recoil');
+}});
+TESTS.push({name: 'an arrow flies from its source to its target, in an arc, pointing the way it goes', fn: () => {
+  fxReset();
+  for (const [tq, tr] of [[9, 8], [8, 10]]) {
+    R3D.playAnimation({type: 'projectile', q: 8, r: 8, toQ: tq, toR: tr}); const A = lastAnim(), src = hexXZ(8, 8), dst = hexXZ(tq, tr);
+    stepAt(A, 0.02); const m = __r3d.fxMeshes()[0], d0 = Math.hypot(m.position.x - src.x, m.position.z - src.z);
+    assert(d0 < 0.35, 'arrow does not start at the shooter: ' + d0);
+    stepAt(A, 0.5); const y0 = m.position.y;
+    const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(m.quaternion), dir = new THREE.Vector3(dst.x - src.x, 0, dst.z - src.z).normalize();
+    assert(fwd.x * dir.x + fwd.z * dir.z > 0.5, 'arrow does not point toward its target');
+    stepAt(A, 0.97); const d1 = Math.hypot(m.position.x - dst.x, m.position.z - dst.z);
+    assert(d1 < 0.35, 'arrow does not reach (' + tq + ',' + tr + '): ' + d1);
+    assert(y0 > m.position.y + 0.1 && y0 > 0.3, 'arrow does not arc: mid ' + y0 + ' end ' + m.position.y);
+    drain();
+  }
+}});
+TESTS.push({name: 'effects are transparent, write no depth, sit under the fog and share materials', fn: () => {
+  fxReset(); fogOn(); R3D.syncState();
+  const p = {q: 6, r: 5, toQ: 7, toR: 5};     // in sight of player 0
+  R3D.playAnimation(Object.assign({type: 'projectile', count: 6}, p));
+  for (let i = 0; i < 3; i++) R3D.playAnimation(Object.assign({type: 'dustParticle'}, p));
+  for (const t of ['clashSparks', 'rangedImpact', 'cityFound']) R3D.playAnimation(Object.assign({type: t}, p));
+  for (const A of __r3d.anims()) stepAt(A, 0.5);
+  const meshes = __r3d.fxMeshes();
+  try {
+    assert(meshes.length > 20, 'expected a crowd of particles, got ' + meshes.length);
+    for (const m of meshes) {
+      assert(m.material.transparent === true && m.material.depthWrite === false, 'an effect mesh is opaque or writes depth');
+      assert(m.renderOrder < __r3d.renderOrderOf('fogUnseen'), 'an effect draws at or above the unexplored fog');
+    }
+    assert(__r3d.drawablesAtOrAboveUnseenFog() === 0, 'a drawable sits at/above the unseen fog');
+    const kit = __r3d.fxMaterials();
+    assert(meshes.every((m) => kit.has(m.material)), 'an effect mesh carries its own material instead of a shared one');
+    const mats = new Set(meshes.map((m) => m.material)), geos = new Set(meshes.map((m) => m.geometry));
+    assert(mats.size <= 14 && geos.size <= 4, meshes.length + ' meshes use ' + mats.size + ' materials and ' + geos.size + ' geometries');
+  } finally { drain(); fogOff(); R3D.syncState(); }
+}});
+TESTS.push({name: 'effect meshes are capped no matter how many animations are queued', fn: () => {
+  fxReset();
+  for (let i = 0; i < 40; i++) R3D.playAnimation(animSpec('cityFound'));
+  for (const A of __r3d.anims()) stepAt(A, 0.5);
+  const n = __r3d.fxMeshes().length;
+  drain();
+  assert(__r3d.fxLimit() <= 150, 'the cap itself is too generous: ' + __r3d.fxLimit());
+  assert(n > 0 && n <= __r3d.fxLimit(), 'live effect meshes ' + n + ' vs limit ' + __r3d.fxLimit());
+  assert(__r3d.fxMeshes().length === 0, 'meshes remain after the cap was hit');
+  R3D.playAnimation(animSpec('cityFound')); stepAt(lastAnim(), 0.5);
+  assert(__r3d.fxMeshes().length > 0, 'the cap counter never came back down');
+  drain();
+}});
+TESTS.push({name: 'effects over ground the player cannot see are not played at all', fn: () => {
+  fxReset(); fogOn(); R3D.syncState();
+  try {
+    for (const where of [LM.UNSEEN, LM.FOG_REMEMBERED]) {
+      for (const type of ['dustParticle', 'cityFound', 'rangedImpact', 'floatingText', 'clashSparks'])
+        assert(R3D.playAnimation({type, q: where.q, r: where.r, text: 'x'}) === false, type + ' played on ground at fog ' + R3D.fogAt(where.q, where.r));
+      assert(R3D.playAnimation({type: 'projectile', q: where.q, r: where.r, toQ: where.q + 1, toR: where.r}) === false, 'projectile on hidden ground');
+    }
+    assert(R3D.playAnimation({type: 'dustParticle', q: 6, r: 5}) === true, 'control: visible ground plays');
+  } finally { drain(); fogOff(); R3D.syncState(); }
+}});
+TESTS.push({name: 'screen flash never stacks', fn: () => {
+  fxReset(); const results = [];
+  for (let i = 0; i < 10; i++) results.push(R3D.playAnimation({type: 'screenFlash'}));
+  assert(__r3d.liveFlashes() === 1, 'live flashes ' + __r3d.liveFlashes());
+  assert(results.filter(Boolean).length === 1, 'accepted ' + results.filter(Boolean).length);
+  stepAt(lastAnim(), 0.3);
+  assert(document.querySelectorAll('.fx-flash').length === 1, 'overlays in the DOM: ' + document.querySelectorAll('.fx-flash').length);
+  drain();
+}});
+TESTS.push({name: 'screen flash keeps a modest peak and removes its overlay', fn: () => {
+  fxReset();
+  R3D.playAnimation({type: 'screenFlash', color: '231,76,60'}); const A = lastAnim();
+  let peak = 0;
+  for (let f = 0; f <= 1.0001; f += 0.05) { stepAt(A, Math.min(f, 1)); const el = document.querySelector('.fx-flash'); if (el) peak = Math.max(peak, +el.style.opacity); }
+  assert(peak > 0.05, 'the flash is invisible: peak ' + peak);
+  assert(peak <= 0.3 && peak <= __r3d.flashPeak() + 1e-9, 'flash peak ' + peak + ' is too strong');
+  assert(document.querySelectorAll('.fx-flash').length === 0, 'overlay left in the DOM');
+  assert(__r3d.liveFlashes() === 0, 'flash still live');
+}});
+TESTS.push({name: 'screen flash waits out a cooldown before the next one', fn: async () => {
+  fxReset();
+  assert(R3D.playAnimation({type: 'screenFlash'}) === true, 'first flash rejected');
+  drain();
+  assert(R3D.playAnimation({type: 'screenFlash'}) === false, 'a flash fired straight after the last one');
+  assert(__r3d.liveFlashes() === 0, 'rejected flash is live');
+  await wait(1300);
+  assert(R3D.playAnimation({type: 'screenFlash'}) === true, 'cooldown never ends');
+  drain(); __r3d.clearFlash();
+}});
+TESTS.push({name: 'screen flash respects reduced motion', fn: () => {
+  fxReset(); __r3d.setReducedMotion(true);
+  try {
+    assert(R3D.playAnimation({type: 'screenFlash'}) === false, 'flash accepted under reduced motion');
+    assert(__r3d.liveFlashes() === 0 && document.querySelectorAll('.fx-flash').length === 0, 'flash drawn under reduced motion');
+  } finally { __r3d.setReducedMotion(false); }
+  assert(R3D.playAnimation({type: 'screenFlash'}) === true, 'control: flash works once motion is allowed');
+  drain(); __r3d.clearFlash();
+}});
+TESTS.push({name: 'a floating text with no screen position stays hidden', fn: async () => {
+  fxReset(); __r3d.lookAt(5, 5, 14, 1.0, 0.4);
+  R3D.playAnimation({type: 'floatingText', q: 31, r: 19, text: '-5'}); const A = lastAnim();
+  for (const f of [0, 0.3, 0.8]) stepAt(A, f);
+  const els = document.querySelectorAll('.fx-float');
+  assert(els.length === 1, 'text element missing: ' + els.length);
+  assert(els[0].style.visibility === 'hidden' && !els[0].style.transform, 'off-screen text is shown');
+  assert(__r3d.strayLabels() === 0, 'off-screen labels must not sit at 0,0');
+  drain();
+}});
+TESTS.push({name: 'a floating text appears at its hex, follows the camera off-screen and cleans up', fn: async () => {
+  fxReset(); __r3d.lookAt(5, 5, 14, 1.0, 0.4);
+  const dom = __r3d.labelsInDom();
+  R3D.playAnimation({type: 'floatingText', q: 5, r: 5, text: '<b id="x">-5</b>', color: '#ff4444'}); const A = lastAnim();
+  stepAt(A, 0.3);
+  const el = document.querySelector('.fx-float');
+  assert(el && el.style.visibility === 'visible', 'on-screen text is not shown');
+  assert(!el.querySelector('b') && el.textContent === '<b id="x">-5</b>', 'text was parsed as HTML');
+  const m = /translate\(([-\d.]+)px,\s*([-\d.]+)px\)/.exec(el.style.transform), pr = __r3d.project(5, 5), rc = testCanvas.getBoundingClientRect();
+  assert(m, 'no position: ' + el.style.transform);
+  assert(Math.abs(+m[1] - (pr.x - rc.left)) < 25, 'text x ' + m[1] + ' vs tile ' + (pr.x - rc.left));
+  assert(+m[2] < pr.y - rc.top + 5, 'text should sit at or above the tile');
+  assert(__r3d.labelsInDom() === dom, 'a floating text is counted among the unit/city labels');
+  __r3d.lookAt(28, 15, 14, 1.0, 0.4); stepAt(A, 0.5);
+  assert(el.style.visibility === 'hidden' && __r3d.strayLabels() === 0, 'text stayed after the camera left');
+  drain();
+  assert(document.querySelectorAll('.fx-float').length === 0, 'text element left in the DOM');
+}});
+TESTS.push({name: 'a floating text hides if its ground drops out of sight', fn: async () => {
+  fxReset(); __r3d.lookAt(5, 5, 14, 1.0, 0.4);
+  R3D.playAnimation({type: 'floatingText', q: 5, r: 5, text: '-5'}); const A = lastAnim();
+  stepAt(A, 0.2); assert(shown(document.querySelector('.fx-float')), 'precondition: text is shown');
+  const i = fogIdx({q: 5, r: 5}), was = FOGM.state[i];
+  try {
+    FOGM.state[i] = R3DCore.FOG.UNSEEN; fogOn(); stepAt(A, 0.4);
+    assert(!shown(document.querySelector('.fx-float')), 'text over unexplored ground is still shown');
+  } finally { FOGM.state[i] = was; fogOff(); drain(); }
+}});
+TESTS.push({name: 'the loop draws every pass while an animation is live and idles after', fn: () => {
+  // Driven pass by pass: it is the loop's own decision to draw, not the wall clock.
+  fxReset(); __r3d.setReducedMotion(true);
+  try {
+    __r3d.stepFx(FC); __r3d.stepFx(FC + 1); __r3d.stepFx(FC + 2);
+    assert(__r3d.stepFx(FC + 3) === false, 'precondition: the scene idles with nothing animating');
+    R3D.playAnimation({type: 'cityFound', q: 8, r: 8}); const A = lastAnim();
+    __r3d.stepFx(FC + 10);
+    const f0 = __r3d.frames();
+    for (const f of [0.1, 0.3, 0.5, 0.7, 0.9]) assert(stepAt(A, f) === true, 'no frame drawn at ' + f + ' of a live animation');
+    assert(__r3d.frames() === f0 + 5, 'frames ' + (__r3d.frames() - f0));
+    stepAt(A, 1);
+    assert(__r3d.liveAnimations() === 0, 'animation never finished');
+    let drew = 0;
+    for (let i = 0; i < 6; i++) if (__r3d.stepFx(FC + 100 + i)) drew++;
+    assert(drew <= 1 && __r3d.stepFx(FC + 200) === false, 'loop still drawing after the animation: ' + drew);
+  } finally { __r3d.setReducedMotion(false); }
+}});
+TESTS.push({name: 'a delayed animation spawns nothing until its time', fn: () => {
+  fxReset(); const base = __r3d.sceneCount();
+  R3D.playAnimation(animSpec('cityFound', {delay: 400})); const A = lastAnim();
+  __r3d.stepFx(FC); __r3d.stepFx(A.t0 - 100);
+  assert(__r3d.liveAnimations() === 1 && __r3d.sceneCount() === base, 'delayed animation spawned early');
+  stepAt(A, 0.5); assert(__r3d.sceneCount() > base, 'delayed animation never started');
+  drain(); assert(__r3d.sceneCount() === base, 'leak');
+}});
+TESTS.push({name: 'malformed animations are ignored and the renderer never mutates the game state', fn: () => {
+  fxReset(); const before = stateSnapshot();
+  const bad = [null, undefined, 5, 'x', {}, {type: 'nope', q: 8, r: 8}, {type: 'dustParticle'}, {type: 'dustParticle', q: NaN, r: 8},
+    {type: 'dustParticle', q: 99, r: 99}, {type: 'dustParticle', q: -1, r: 3}, {type: 'projectile', q: 8, r: 8}, {type: 'unitWalk', q: 8, r: 8, toQ: 99, toR: 1},
+    {type: 'floatingText', q: 8, r: 8}, {type: 'floatingText', q: 8, r: 8, text: 5}];
+  for (const b of bad) assert(R3D.playAnimation(b) === false, 'accepted ' + JSON.stringify(b));
+  assert(__r3d.liveAnimations() === 0, 'something got queued');
+  for (const type of ANIM_TYPES) R3D.playAnimation(animSpec(type, {delay: NaN, duration: -5}));
+  for (const A of __r3d.anims()) stepAt(A, 0.5);
+  drain();
+  assert(stateSnapshot() === before, 'animations mutated the game state');
+}});
+
+// ── Task 13 fix round 1 ──
+TESTS.push({name: 'screen flash cannot stack when the loop stalls between two calls', fn: () => {
+  fxReset();
+  const realNow = performance.now.bind(performance); let skew = 0;
+  performance.now = () => realNow() + skew;
+  try {
+    assert(R3D.playAnimation({type: 'screenFlash'}) === true, 'first flash rejected');
+    skew += 2500;                       // the loop stalled: no tick, wall clock moved on
+    assert(R3D.playAnimation({type: 'screenFlash'}) === false, 'a second flash was accepted while the first had not started');
+    assert(__r3d.liveFlashes() === 1, 'live flashes ' + __r3d.liveFlashes());
+    for (const A of __r3d.anims()) stepAt(A, 0.35);
+    assert(document.querySelectorAll('.fx-flash').length === 1 && +document.querySelector('.fx-flash').style.opacity <= 0.3, 'flashes stacked');
+  } finally { performance.now = realNow; drain(); __r3d.clearFlash(); }
+}});
+TESTS.push({name: 'a running screen flash stops when reduced motion is switched on', fn: () => {
+  fxReset();
+  R3D.playAnimation({type: 'screenFlash'}); const A = lastAnim(); stepAt(A, 0.3);
+  assert(document.querySelectorAll('.fx-flash').length === 1, 'precondition: flash running');
+  __r3d.setReducedMotion(true);
+  try { stepAt(A, 0.4); assert(__r3d.liveFlashes() === 0 && document.querySelectorAll('.fx-flash').length === 0, 'flash kept running under reduced motion'); }
+  finally { __r3d.setReducedMotion(false); drain(); __r3d.clearFlash(); }
+}});
+TESTS.push({name: 'shake and charge are skipped under reduced motion', fn: () => {
+  fxReset(); __r3d.setReducedMotion(true);
+  try {
+    assert(R3D.playAnimation({type: 'unitShake', q: 5, r: 5, player: 0, unitId: 2}) === false, 'shake played');
+    assert(R3D.playAnimation({type: 'meleeCharge', q: 5, r: 5, toQ: 6, toR: 5, player: 0, unitId: 2}) === false, 'charge played');
+  } finally { __r3d.setReducedMotion(false); }
+}});
+TESTS.push({name: 'inherited property names are not animation types', fn: () => {
+  fxReset();
+  for (const type of ['constructor', 'toString', 'hasOwnProperty', '__proto__'])
+    assert(R3D.playAnimation({type, q: 8, r: 8, tick: undefined}) === false && __r3d.liveAnimations() === 0, type + ' accepted');
+}});
+TESTS.push({name: 'an effect needs BOTH ends in sight: nothing is drawn from or to hidden ground', fn: () => {
+  fxReset(); fogOn(); R3D.syncState(); __r3d.lookAt(7, 5, 10, 1.0, 0.4);
+  const vis = {q: 6, r: 5}, hid = LM.UNSEEN;
+  try {
+    assert(R3D.fogAt(vis.q, vis.r) === R3DCore.FOG.VISIBLE && R3D.fogAt(hid.q, hid.r) === R3DCore.FOG.UNSEEN, 'precondition');
+    for (const type of ['projectile', 'clashSparks']) {
+      assert(R3D.playAnimation({type, q: hid.q, r: hid.r, toQ: vis.q, toR: vis.r}) === false, type + ' accepted from hidden ground');
+      assert(R3D.playAnimation({type, q: vis.q, r: vis.r, toQ: hid.q, toR: hid.r}) === false, type + ' accepted onto hidden ground');
+    }
+    // control: with both ends visible the effect really changes pixels
+    const T = FC + 5;
+    __r3d.stepFx(T); const none = frameNow();
+    R3D.playAnimation({type: 'clashSparks', q: 6, r: 5, toQ: 7, toR: 5, duration: 1000}); const A = lastAnim();
+    __r3d.stepFx(T); __r3d.stepFx(T + 300); const withFx = frameNow();
+    assert(framesDiffer(none, withFx) > 5, 'control: the effect draws nothing even in sight');
+    // ground goes dark mid-flight: the same frame must now match the empty one
+    const i = fogIdx(vis), was = FOGM.state[i];
+    FOGM.state[i] = R3DCore.FOG.UNSEEN; R3D.refreshFog();
+    __r3d.stepFx(T + 320); const dark = frameNow();
+    FOGM.state[i] = was; R3D.refreshFog();
+    assert(__r3d.fxMeshes().every((m) => m.visible === false), 'effect meshes stayed visible over ground that went dark');
+    assert(A.t0 !== null, 'sanity');
+    __r3d.anims().forEach((a) => a.dispose()); __r3d.anims().length = 0;
+    FOGM.state[i] = R3DCore.FOG.UNSEEN; R3D.refreshFog(); __r3d.stepFx(T + 320); const empty = frameNow();
+    assert(framesDiffer(dark, empty) === 0, 'an effect still shows over hidden ground: ' + framesDiffer(dark, empty) + ' px');
+    FOGM.state[i] = was; R3D.refreshFog();
+  } finally { drain(); fogOff(); R3D.syncState(); }
+}});
+
 async function runAll() {
   const failures = [];
   let passed = 0;
